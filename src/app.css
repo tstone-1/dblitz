@@ -1,0 +1,137 @@
+:root, [data-theme="light"] {
+  --bg-primary: #f8f9fa;
+  --bg-secondary: #ebedef;
+  --bg-tertiary: #dee1e6;
+  --bg-hover: #d0d4da;
+  --bg-input: #ffffff;
+  --text-primary: #1a1a2e;
+  --text-secondary: #4a4a5a;
+  --text-muted: #8888a0;
+  --border-color: #c8ccd4;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --success: #16a34a;
+  --warning: #ca8a04;
+  --error: #dc2626;
+  --tab-active: #2563eb;
+  --scrollbar-thumb: #b0b4bc;
+  --scrollbar-track: #f0f0f0;
+}
+
+[data-theme="dark"] {
+  --bg-primary: #1e1e2e;
+  --bg-secondary: #282840;
+  --bg-tertiary: #313148;
+  --bg-hover: #3a3a55;
+  --bg-input: #232338;
+  --text-primary: #cdd6f4;
+  --text-secondary: #a6adc8;
+  --text-muted: #6c7086;
+  --border-color: #45475a;
+  --accent: #89b4fa;
+  --accent-hover: #74a8fc;
+  --success: #a6e3a1;
+  --warning: #f9e2af;
+  --error: #f38ba8;
+  --tab-active: #89b4fa;
+  --scrollbar-thumb: #45475a;
+  --scrollbar-track: #1e1e2e;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-primary);
+  background-color: var(--bg-primary);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--scrollbar-thumb) 80%, var(--text-primary));
+}
+
+input, select, textarea, button {
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--text-primary);
+}
+
+input, select, textarea {
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 4px 8px;
+  outline: none;
+}
+
+input:focus, select:focus, textarea:focus {
+  border-color: var(--accent);
+}
+
+button {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 4px 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+button:hover {
+  background: var(--bg-hover);
+}
+
+button:active {
+  background: var(--accent);
+  color: var(--bg-primary);
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th, td {
+  padding: 4px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 300px;
+}
+
+th {
+  background: var(--bg-tertiary);
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  user-select: none;
+}
+
+tr:hover td {
+  background: var(--bg-hover);
+}
