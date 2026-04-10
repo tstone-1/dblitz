@@ -26,21 +26,26 @@
   let showColumnSettings = $state(false);
   let filterDebounce: ReturnType<typeof setTimeout> | null = null;
   let sidebarCollapsed = $state(false);
-  let autoSelected = false;
+  let autoSelectedDb: string | null = null;
 
   // Row cache: chunks keyed by chunk index
   let rowCache = $state<Map<number, (string | null)[][]>>(new Map());
   let pendingChunks = new Set<number>();
   let epoch = 0;
 
-  // Auto-select single table & collapse sidebar
+  // Auto-select single table & collapse sidebar.
+  // Tracks the *path* that was last auto-selected so opening a different
+  // single-table DB after closing one re-fires the effect.
   $effect(() => {
-    if (appState.tables.length === 1 && !autoSelected && appState.dbPath) {
-      autoSelected = true;
+    const path = appState.dbPath;
+    if (!path) {
+      autoSelectedDb = null;
+      return;
+    }
+    if (appState.tables.length === 1 && autoSelectedDb !== path) {
+      autoSelectedDb = path;
       sidebarCollapsed = true;
       selectTable(appState.tables[0].name);
-    } else if (appState.tables.length > 1) {
-      autoSelected = false;
     }
   });
 
@@ -63,8 +68,11 @@
   }
 
   function buildFilters(): ColumnFilter[] {
+    // Drop filters for columns that no longer exist in the schema
+    // (e.g. a pinned filter on a column that was renamed externally).
+    const valid = new Set(columns);
     return Object.entries(columnFilters)
-      .filter(([_, f]) => f.value.trim() !== "")
+      .filter(([col, f]) => valid.has(col) && f.value.trim() !== "")
       .map(([col, f]) => ({ column: col, value: f.value, is_regex: f.is_regex }));
   }
 
@@ -122,12 +130,21 @@
 
   async function selectTable(name: string) {
     selectedTable = name;
-    globalFilter = "";
-    columnFilters = {};
     columns = [];
     const cfg = ensureTableConfig(name);
     sortColumn = cfg.sort_column;
     sortAsc = cfg.sort_asc;
+    // Hydrate ephemeral filter state from pinned defaults.
+    // Orphaned filters (pinned column no longer in schema) are silently
+    // dropped at query time by buildFilters().
+    columnFilters = Object.fromEntries(
+      Object.entries(cfg.pinned_filters).map(([col, pf]) => [
+        col,
+        { value: pf.value, is_regex: pf.is_regex },
+      ]),
+    );
+    globalFilter = cfg.pinned_global_filter ?? "";
+    lastFilterState = globalFilter.trim() + JSON.stringify(columnFilters);
 
     await reloadData();
   }
@@ -251,6 +268,160 @@
     if (columnFilters[col]?.value.trim()) debouncedReload();
   }
 
+  // ---- Pinned filters (opt-in persistence) -------------------------------
+
+  /** Pin state for a column's filter, used by the DataGrid pin button visual. */
+  function pinStateOf(col: string): "none" | "pinned" | "modified" {
+    if (!selectedTable) return "none";
+    const pinned = getTableConfig(selectedTable).pinned_filters[col];
+    if (!pinned) return "none";
+    const live = columnFilters[col];
+    const liveVal = live?.value ?? "";
+    const liveRx = live?.is_regex ?? false;
+    if (liveVal === pinned.value && liveRx === pinned.is_regex) return "pinned";
+    return "modified";
+  }
+
+  /** Map of column -> pin state for columns that have a pinned filter.
+   *  Columns without an entry default to "none" via pinStates?.[col] ?? "none". */
+  let pinStates = $derived.by(() => {
+    const out: Record<string, "none" | "pinned" | "modified"> = {};
+    if (!selectedTable) return out;
+    const pinned = getTableConfig(selectedTable).pinned_filters;
+    for (const col of Object.keys(pinned)) out[col] = pinStateOf(col);
+    return out;
+  });
+
+  let globalFilterPinState = $derived.by<"none" | "pinned" | "modified">(() => {
+    if (!selectedTable) return "none";
+    const pinned = getTableConfig(selectedTable).pinned_global_filter;
+    if (pinned == null) return "none";
+    return globalFilter === pinned ? "pinned" : "modified";
+  });
+
+  function pinColumnFilter(col: string) {
+    if (!selectedTable) return;
+    const f = columnFilters[col];
+    if (!f || f.value.trim() === "") return; // no-op for empty input
+    const cfg = ensureTableConfig(selectedTable);
+    cfg.pinned_filters[col] = { value: f.value, is_regex: f.is_regex };
+    appState.fileConfig.tables[selectedTable] = { ...cfg };
+    saveViewConfig();
+  }
+
+  function unpinColumnFilter(col: string) {
+    if (!selectedTable) return;
+    const cfg = ensureTableConfig(selectedTable);
+    if (!(col in cfg.pinned_filters)) return;
+    delete cfg.pinned_filters[col];
+    appState.fileConfig.tables[selectedTable] = { ...cfg };
+    saveViewConfig();
+  }
+
+  function revertColumnFilter(col: string) {
+    if (!selectedTable) return;
+    const pinned = getTableConfig(selectedTable).pinned_filters[col];
+    if (!pinned) return;
+    columnFilters[col] = { value: pinned.value, is_regex: pinned.is_regex };
+    debouncedReload();
+  }
+
+  function clearColumnFilter(col: string) {
+    if (columnFilters[col]) {
+      columnFilters[col] = { value: "", is_regex: columnFilters[col].is_regex };
+      debouncedReload();
+    }
+  }
+
+  /** Click on the pin button: pin/re-pin/unpin depending on current state. */
+  function togglePinColumnFilter(col: string) {
+    const state = pinStateOf(col);
+    if (state === "pinned") unpinColumnFilter(col);
+    else pinColumnFilter(col); // covers "none" and "modified" (re-pin)
+  }
+
+  function pinGlobalFilter() {
+    if (!selectedTable) return;
+    if (globalFilter.trim() === "") return;
+    const cfg = ensureTableConfig(selectedTable);
+    cfg.pinned_global_filter = globalFilter;
+    appState.fileConfig.tables[selectedTable] = { ...cfg };
+    saveViewConfig();
+  }
+
+  function unpinGlobalFilter() {
+    if (!selectedTable) return;
+    const cfg = ensureTableConfig(selectedTable);
+    if (cfg.pinned_global_filter == null) return;
+    cfg.pinned_global_filter = null;
+    appState.fileConfig.tables[selectedTable] = { ...cfg };
+    saveViewConfig();
+  }
+
+  function revertGlobalFilter() {
+    if (!selectedTable) return;
+    const pinned = getTableConfig(selectedTable).pinned_global_filter;
+    if (pinned == null) return;
+    globalFilter = pinned;
+    debouncedReload();
+  }
+
+  function toggleGlobalFilterPin() {
+    const state = globalFilterPinState;
+    if (state === "pinned") unpinGlobalFilter();
+    else pinGlobalFilter();
+  }
+
+  /** Discard ephemeral edits and re-apply pinned defaults. Non-destructive. */
+  function resetFiltersToPinned() {
+    if (!selectedTable) return;
+    const cfg = getTableConfig(selectedTable);
+    columnFilters = Object.fromEntries(
+      Object.entries(cfg.pinned_filters).map(([col, pf]) => [
+        col,
+        { value: pf.value, is_regex: pf.is_regex },
+      ]),
+    );
+    globalFilter = cfg.pinned_global_filter ?? "";
+    debouncedReload();
+  }
+
+  /** Wipe both ephemeral filters AND saved defaults. Destructive. */
+  function clearAllFiltersIncludingPinned() {
+    if (!selectedTable) return;
+    columnFilters = {};
+    globalFilter = "";
+    const cfg = ensureTableConfig(selectedTable);
+    cfg.pinned_filters = {};
+    cfg.pinned_global_filter = null;
+    appState.fileConfig.tables[selectedTable] = { ...cfg };
+    saveViewConfig();
+    debouncedReload();
+  }
+
+  function handleResetFiltersClick(e: MouseEvent) {
+    if (e.shiftKey) clearAllFiltersIncludingPinned();
+    else resetFiltersToPinned();
+  }
+
+  // Global filter pin context menu (right-click).
+  // Mirrors the column pin context menu in DataGrid for consistency.
+  let globalPinCtx = $state<{ x: number; y: number } | null>(null);
+
+  function openGlobalPinCtx(e: MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    globalPinCtx = { x: e.clientX, y: e.clientY };
+  }
+  function closeGlobalPinCtx() { globalPinCtx = null; }
+
+  function clearGlobalFilter() {
+    globalFilter = "";
+    debouncedReload();
+  }
+
+  // ------------------------------------------------------------------------
+
   let showFilterHelp = $state(false);
 
   function colorPresets(): string[] {
@@ -322,11 +493,47 @@
     {#if selectedTable && columns.length > 0}
       <div class="data-area">
         <div class="filter-bar">
-          <input type="text" placeholder="Global filter (all columns)..." bind:value={globalFilter} oninput={debouncedReload} class="global-filter" />
+          <div class="global-filter-wrap" data-pin-state={globalFilterPinState}>
+            <input
+              type="text"
+              placeholder="Global filter (all columns)..."
+              bind:value={globalFilter}
+              oninput={debouncedReload}
+              class="global-filter"
+            />
+            <button
+              class="pin-btn global-pin-btn"
+              data-pin-state={globalFilterPinState}
+              title={
+                globalFilterPinState === "pinned"
+                  ? "Global filter is saved — click to unpin"
+                  : globalFilterPinState === "modified"
+                    ? "Saved global filter exists — click to update, right-click to revert"
+                    : "Save global filter as default for this table"
+              }
+              onclick={toggleGlobalFilterPin}
+              oncontextmenu={openGlobalPinCtx}
+              aria-label="Pin global filter"
+            >
+              <!-- pin glyph -->
+              <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+                <path d="M9.5 1.5 L14.5 6.5 L11.5 7.5 L10 12 L7 9 L3 13 L2 14 L3 10 L6 7 L3 4 L7.5 2.5 Z"
+                  fill={globalFilterPinState === "none" ? "none" : "currentColor"}
+                  stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+          <button
+            class="reset-filters-btn"
+            onclick={handleResetFiltersClick}
+            title="Reset filters to saved defaults (Shift+click: also clear pinned)"
+            aria-label="Reset filters"
+          >Reset</button>
           <div class="filter-help-wrap">
             <button class="filter-help-btn" class:active={showFilterHelp} onclick={() => (showFilterHelp = !showFilterHelp)} title="Filter syntax help">?</button>
             {#if showFilterHelp}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
               <div class="filter-help-backdrop" onclick={() => (showFilterHelp = false)}></div>
               <div class="filter-help-popover">
                 <div class="help-title">Column filter syntax</div>
@@ -384,6 +591,10 @@
           onSetColumnColor={setColumnColor}
           onReorderColumn={reorderColumns}
           colorPresets={colorPresets()}
+          pinStates={pinStates}
+          onTogglePinFilter={togglePinColumnFilter}
+          onRevertFilter={revertColumnFilter}
+          onClearFilter={clearColumnFilter}
         />
       </div>
     {:else if selectedTable && loading}
@@ -393,6 +604,22 @@
     {:else}
       <div class="empty">Select a table to browse.</div>
     {/if}
+  </div>
+{/if}
+
+{#if globalPinCtx}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div class="ctx-backdrop" onclick={closeGlobalPinCtx} oncontextmenu={(e) => { e.preventDefault(); closeGlobalPinCtx(); }}></div>
+  <div class="ctx-menu" style="left: {globalPinCtx.x}px; top: {globalPinCtx.y}px;">
+    <button class="ctx-item" onclick={() => { toggleGlobalFilterPin(); closeGlobalPinCtx(); }}>
+      {globalFilterPinState === "pinned" ? "Unpin global filter" : globalFilterPinState === "modified" ? "Re-pin global filter (save current value)" : "Pin global filter (save as default)"}
+    </button>
+    {#if globalFilterPinState === "modified"}
+      <button class="ctx-item" onclick={() => { revertGlobalFilter(); closeGlobalPinCtx(); }}>Revert to pinned value</button>
+    {/if}
+    <div class="ctx-sep"></div>
+    <button class="ctx-item" onclick={() => { clearGlobalFilter(); closeGlobalPinCtx(); }}>Clear global filter</button>
   </div>
 {/if}
 
@@ -457,7 +684,56 @@
     display: flex; align-items: center; gap: 8px;
     padding: 6px 8px; border-bottom: 1px solid var(--border-color); flex-shrink: 0;
   }
-  .global-filter { flex: 1; max-width: 300px; }
+  .global-filter-wrap {
+    flex: 1; max-width: 300px;
+    display: flex; align-items: stretch;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    overflow: hidden;
+    transition: border-color 120ms;
+  }
+  .global-filter-wrap[data-pin-state="pinned"] { border-color: var(--accent); }
+  .global-filter-wrap[data-pin-state="modified"] { border-color: var(--warning); }
+  .global-filter {
+    flex: 1; min-width: 0;
+    border: none; background: transparent;
+    padding: 3px 6px;
+    font-size: 12px; color: var(--text-primary);
+  }
+  .global-filter:focus { outline: none; }
+
+  .pin-btn {
+    display: flex; align-items: center; justify-content: center;
+    border: none; background: transparent;
+    padding: 0 6px; cursor: pointer;
+    color: var(--text-muted);
+    transition: color 120ms, opacity 120ms;
+  }
+  .pin-btn[data-pin-state="none"] { opacity: 0.45; }
+  .pin-btn[data-pin-state="none"]:hover { opacity: 1; color: var(--text-primary); }
+  .pin-btn[data-pin-state="pinned"] { color: var(--accent); opacity: 1; }
+  .pin-btn[data-pin-state="modified"] { color: var(--warning); opacity: 1; }
+  .pin-btn:hover { color: var(--accent); }
+
+  .global-pin-btn {
+    border-left: 1px solid var(--border-color);
+    flex-shrink: 0;
+  }
+
+  .reset-filters-btn {
+    font-size: 11px;
+    padding: 3px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+  .reset-filters-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
 
   .filter-help-backdrop {
     position: fixed; inset: 0; z-index: 49;

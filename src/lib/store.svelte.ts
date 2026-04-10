@@ -42,6 +42,11 @@ export interface SqlResult {
   error: string | null;
 }
 
+export interface PinnedFilter {
+  value: string;
+  is_regex: boolean;
+}
+
 export interface ViewConfig {
   hidden_columns: string[];
   column_colors: Record<string, string>;
@@ -49,6 +54,8 @@ export interface ViewConfig {
   sort_asc: boolean;
   selected_table: string | null;
   column_order: string[];
+  pinned_filters: Record<string, PinnedFilter>;
+  pinned_global_filter: string | null;
 }
 
 export interface FileConfig {
@@ -97,8 +104,12 @@ export async function openDatabase(path: string) {
     const tables = await invoke<TableInfo[]>("open_database", { path });
     appState.dbPath = path;
     appState.tables = tables;
-    // Load per-file config
+    // Load per-file config and migrate any pre-pinned-filters entries.
     const config = await invoke<FileConfig>("load_view_config");
+    for (const t of Object.values(config.tables)) {
+      if (!t.pinned_filters) t.pinned_filters = {};
+      if (t.pinned_global_filter === undefined) t.pinned_global_filter = null;
+    }
     appState.fileConfig = config;
     // Fetch column names for all tables (for SQL autocomplete)
     const colMap: Record<string, string[]> = {};
@@ -109,6 +120,12 @@ export async function openDatabase(path: string) {
       } catch { /* best-effort: autocomplete works without columns */ }
     }));
     appState.tableColumns = colMap;
+    // Single-table DBs: jump straight to Browse so the user sees data
+    // immediately. Multi-table DBs leave the active tab alone — the user
+    // may want to inspect Structure first to pick a table.
+    if (tables.length === 1) {
+      appState.activeTab = "browse";
+    }
   } catch (e) {
     appState.error = String(e);
   } finally {
@@ -159,6 +176,8 @@ const defaultViewConfig: ViewConfig = {
   sort_asc: true,
   selected_table: null,
   column_order: [],
+  pinned_filters: {},
+  pinned_global_filter: null,
 };
 
 /** Read-only access — safe to call from templates/derived. */
@@ -176,6 +195,8 @@ export function ensureTableConfig(tableName: string): ViewConfig {
       sort_asc: true,
       selected_table: null,
       column_order: [],
+      pinned_filters: {},
+      pinned_global_filter: null,
     };
   }
   return appState.fileConfig.tables[tableName];

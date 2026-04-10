@@ -68,9 +68,10 @@
       <button onclick={onResetOrder} class="reset-order-btn">Reset Order</button>
     {/if}
   </div>
-  <div class="settings-grid">
+  <div class="settings-grid" role="list">
     {#each orderedColumns() as col (col)}
       <div class="setting-row"
+        role="listitem"
         class:drag-over={dragOverCol === col && dragCol !== col}
         draggable="true"
         ondragstart={(e) => handleDragStart(col, e)}

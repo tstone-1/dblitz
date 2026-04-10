@@ -2,7 +2,7 @@
 
 export function createDragReorder(
   getColumns: () => string[],
-  onReorder: ((fromCol: string, toCol: string) => void) | undefined,
+  getOnReorder: () => ((fromCol: string, toCol: string) => void) | undefined,
 ) {
   let reorderCol = $state<string | null>(null);
   let reorderOverCol = $state<string | null>(null);
@@ -10,7 +10,7 @@ export function createDragReorder(
   let cleanupFn: (() => void) | null = null;
 
   function onMouseDown(e: MouseEvent, col: string) {
-    if (e.button !== 0 || !onReorder) return;
+    if (e.button !== 0 || !getOnReorder()) return;
     if ((e.target as HTMLElement).classList.contains('resize-handle')) return;
     const startX = e.clientX;
     const startY = e.clientY;
@@ -44,7 +44,7 @@ export function createDragReorder(
     function onUp() {
       cleanup();
       if (started && reorderCol && reorderOverCol && reorderCol !== reorderOverCol) {
-        onReorder?.(reorderCol, reorderOverCol);
+        getOnReorder()?.(reorderCol, reorderOverCol);
       }
       if (started) didReorder = true;
       reorderCol = null;

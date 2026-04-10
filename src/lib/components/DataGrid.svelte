@@ -35,6 +35,11 @@
     onSetColumnColor?: (col: string, color: string) => void;
     onReorderColumn?: (fromCol: string, toCol: string) => void;
     colorPresets?: string[];
+    // Optional: pinned (persistent) filters
+    pinStates?: Record<string, "none" | "pinned" | "modified">;
+    onTogglePinFilter?: (col: string) => void;
+    onRevertFilter?: (col: string) => void;
+    onClearFilter?: (col: string) => void;
   }
 
   let {
@@ -54,7 +59,15 @@
     onSetColumnColor = undefined,
     onReorderColumn = undefined,
     colorPresets = undefined,
+    pinStates = undefined,
+    onTogglePinFilter = undefined,
+    onRevertFilter = undefined,
+    onClearFilter = undefined,
   }: Props = $props();
+
+  function pinStateOf(col: string): "none" | "pinned" | "modified" {
+    return pinStates?.[col] ?? "none";
+  }
 
   let showFilters = $derived(columnFilters != null);
   let stickyHeight = $derived(HEADER_HEIGHT + (showFilters ? FILTER_ROW_HEIGHT : 0));
@@ -229,36 +242,63 @@
   function closeHeaderCtx() { headerCtx = null; }
 
   // Header mouse-based reorder (extracted to dragReorder.ts)
-  const reorder = createDragReorder(() => columns, onReorderColumn);
+  const reorder = createDragReorder(() => columns, () => onReorderColumn);
+
+  function handleHeaderKeydown(e: KeyboardEvent, col: string) {
+    if (!onSort) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onSort(col);
+    }
+  }
+
+  // Pin button context menu (right-click on a filter pin)
+  let pinCtx = $state<{ x: number; y: number; col: string } | null>(null);
+
+  function handlePinContextMenu(e: MouseEvent, col: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    pinCtx = { x: e.clientX, y: e.clientY, col };
+  }
+  function closePinCtx() { pinCtx = null; }
 </script>
 
 <div class="grid-container" bind:this={gridContainer}>
-  <div class="scroll-viewport" bind:this={scrollContainer} bind:clientHeight={viewportHeight} onscroll={handleScroll}>
+  <div class="scroll-viewport" role="grid" bind:this={scrollContainer} bind:clientHeight={viewportHeight} onscroll={handleScroll}>
     <!-- Sticky header -->
-    <div class="grid-row header-row">
-      <div class="grid-cell row-num-header">#</div>
+    <div class="grid-row header-row" role="row">
+      <div class="grid-cell row-num-header" role="columnheader">#</div>
       {#each columns as col}
-        <div class="grid-cell col-header" class:sortable={onSort != null}
+        <div class="grid-cell col-header"
+          role="columnheader"
+          tabindex={onSort ? 0 : -1}
+          aria-sort={sortColumn === col ? (sortAsc ? 'ascending' : 'descending') : 'none'}
+          class:sortable={onSort != null}
           class:drag-over-header={reorder.reorderOverCol === col && reorder.reorderCol !== col}
           class:dragging={reorder.reorderCol === col}
           data-colidx={columns.indexOf(col)}
           onclick={() => { if (reorder.consumeReorder()) return; onSort?.(col); }}
+          onkeydown={(e) => handleHeaderKeydown(e, col)}
           oncontextmenu={(e) => handleHeaderContextMenu(e, col)}
           onmousedown={(e) => onReorderColumn ? reorder.onMouseDown(e, col) : undefined}
           style={getColor(col) ? `background: ${getColor(col)};` : ''}>
-          {col}{#if sortColumn === col}<span class="sort-indicator">{sortAsc ? ' \u25B2' : ' \u25BC'}</span>{/if}
+          {col}{#if pinStateOf(col) !== "none"}<span class="header-pin-glyph" class:modified={pinStateOf(col) === "modified"} title={pinStateOf(col) === "modified" ? "Pinned filter (modified)" : "Pinned filter"}>
+            <svg viewBox="0 0 16 16" width="9" height="9" aria-hidden="true"><path d="M9.5 1.5 L14.5 6.5 L11.5 7.5 L10 12 L7 9 L3 13 L2 14 L3 10 L6 7 L3 4 L7.5 2.5 Z" fill="currentColor" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+          </span>{/if}{#if sortColumn === col}<span class="sort-indicator">{sortAsc ? ' \u25B2' : ' \u25BC'}</span>{/if}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <!-- svelte-ignore a11y_click_events_have_key_events -->
           <div class="resize-handle" onmousedown={(e) => onResizeStart(e, col)} onclick={(e) => e.stopPropagation()}></div>
         </div>
       {/each}
     </div>
 
     {#if showFilters}
-      <div class="grid-row filter-row" style="top: {HEADER_HEIGHT}px;">
-        <div class="grid-cell row-num-header"></div>
+      <div class="grid-row filter-row" role="row" tabindex="-1" style="top: {HEADER_HEIGHT}px;">
+        <div class="grid-cell row-num-header" role="gridcell" tabindex="-1"></div>
         {#each columns as col}
           {@const f = columnFilters?.[col]}
-          <div class="grid-cell filter-cell">
+          {@const ps = pinStateOf(col)}
+          <div class="grid-cell filter-cell" role="gridcell" tabindex="-1" data-pin-state={ps}>
             <input
               type="text"
               class="col-filter-input"
@@ -272,6 +312,28 @@
               title={f?.is_regex ? 'Regex mode' : 'Text mode'}
               onclick={() => onToggleRegex?.(col)}
             >.*</button>
+            {#if onTogglePinFilter}
+              <button
+                class="pin-btn filter-pin-btn"
+                data-pin-state={ps}
+                title={
+                  ps === "pinned"
+                    ? "Filter is saved — click to unpin"
+                    : ps === "modified"
+                      ? "Saved filter exists — click to update, right-click to revert"
+                      : "Save filter as default for this column"
+                }
+                onclick={() => onTogglePinFilter?.(col)}
+                oncontextmenu={(e) => handlePinContextMenu(e, col)}
+                aria-label="Pin column filter"
+              >
+                <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">
+                  <path d="M9.5 1.5 L14.5 6.5 L11.5 7.5 L10 12 L7 9 L3 13 L2 14 L3 10 L6 7 L3 4 L7.5 2.5 Z"
+                    fill={ps === "none" ? "none" : "currentColor"}
+                    stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                </svg>
+              </button>
+            {/if}
           </div>
         {/each}
       </div>
@@ -281,13 +343,19 @@
     <div class="scroll-spacer" style="height: {rowCount * ROW_HEIGHT}px;">
       {#each visibleRowIndices() as rowIdx (rowIdx)}
         {@const row = getRowData(rowIdx)}
-        <div class="grid-row data-row" style="position: absolute; top: {rowIdx * ROW_HEIGHT}px; height: {ROW_HEIGHT}px; width: 100%;"
+        <div class="grid-row data-row"
+          role="row"
+          tabindex="-1"
+          style="position: absolute; top: {rowIdx * ROW_HEIGHT}px; height: {ROW_HEIGHT}px; width: 100%;"
           oncontextmenu={(e) => handleContextMenu(e, rowIdx)}
           onmousedown={(e) => selection.onCellMouseDown(e, rowIdx)}>
-          <div class="grid-cell row-num">{rowIdx + 1}</div>
+          <div class="grid-cell row-num" role="gridcell" tabindex="-1">{rowIdx + 1}</div>
           {#each columns as col, vi}
             {@const inSel = sel != null && rowIdx >= sel.r0 && rowIdx <= sel.r1 && vi >= sel.c0 && vi <= sel.c1}
-            <div class="grid-cell data-cell" data-col={vi}
+            <div class="grid-cell data-cell"
+              role="gridcell"
+              tabindex="-1"
+              data-col={vi}
               class:selected={inSel}
               class:sel-top={inSel && rowIdx === sel?.r0}
               class:sel-bottom={inSel && rowIdx === sel?.r1}
@@ -306,6 +374,7 @@
 
 {#if ctxMenu}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div class="ctx-backdrop" onclick={closeContextMenu} oncontextmenu={(e) => { e.preventDefault(); closeContextMenu(); }}></div>
   <div class="ctx-menu" style="left: {ctxMenu.x}px; top: {ctxMenu.y}px;">
     <button class="ctx-item" onclick={() => copySelection(false)}>Copy</button>
@@ -315,8 +384,28 @@
   </div>
 {/if}
 
+{#if pinCtx}
+  {@const ctxState = pinStateOf(pinCtx.col)}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div class="ctx-backdrop" onclick={closePinCtx} oncontextmenu={(e) => { e.preventDefault(); closePinCtx(); }}></div>
+  <div class="ctx-menu" style="left: {pinCtx.x}px; top: {pinCtx.y}px;">
+    <button class="ctx-item" onclick={() => { onTogglePinFilter?.(pinCtx!.col); closePinCtx(); }}>
+      {ctxState === "pinned" ? "Unpin filter" : ctxState === "modified" ? "Re-pin filter (save current value)" : "Pin filter (save as default)"}
+    </button>
+    {#if ctxState === "modified" && onRevertFilter}
+      <button class="ctx-item" onclick={() => { onRevertFilter!(pinCtx!.col); closePinCtx(); }}>Revert to pinned value</button>
+    {/if}
+    {#if onClearFilter}
+      <div class="ctx-sep"></div>
+      <button class="ctx-item" onclick={() => { onClearFilter!(pinCtx!.col); closePinCtx(); }}>Clear filter</button>
+    {/if}
+  </div>
+{/if}
+
 {#if headerCtx}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div class="ctx-backdrop" onclick={closeHeaderCtx} oncontextmenu={(e) => { e.preventDefault(); closeHeaderCtx(); }}></div>
   <div class="ctx-menu" style="left: {headerCtx.x}px; top: {headerCtx.y}px;">
     {#if onHideColumn}
@@ -448,6 +537,38 @@
     border-color: var(--accent);
   }
 
+  .filter-cell[data-pin-state="pinned"] {
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .filter-cell[data-pin-state="modified"] {
+    box-shadow: inset 2px 0 0 var(--warning);
+  }
+
+  .pin-btn {
+    display: flex; align-items: center; justify-content: center;
+    border: none; background: transparent;
+    padding: 0 3px; cursor: pointer;
+    color: var(--text-muted);
+    height: 22px;
+    flex-shrink: 0;
+    transition: opacity 120ms, color 120ms;
+  }
+  .pin-btn[data-pin-state="none"] { opacity: 0.35; }
+  .filter-cell:hover .pin-btn[data-pin-state="none"] { opacity: 0.7; }
+  .pin-btn[data-pin-state="none"]:hover { opacity: 1; color: var(--text-primary); }
+  .pin-btn[data-pin-state="pinned"] { color: var(--accent); opacity: 1; }
+  .pin-btn[data-pin-state="modified"] { color: var(--warning); opacity: 1; }
+  .pin-btn:hover { color: var(--accent); }
+
+  .header-pin-glyph {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 4px;
+    color: var(--accent);
+    vertical-align: middle;
+  }
+  .header-pin-glyph.modified { color: var(--warning); }
+
   .sort-indicator { color: var(--accent); font-size: 11px; }
 
   .scroll-viewport {
@@ -491,39 +612,7 @@
   .data-cell.sel-left { border-left: 1px solid var(--accent); }
   .data-cell.sel-right { border-right: 1px solid var(--accent); }
 
-  .ctx-backdrop {
-    position: fixed; inset: 0; z-index: 99;
-  }
-
-  .ctx-menu {
-    position: fixed;
-    z-index: 100;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    padding: 4px 0;
-    min-width: 180px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-  }
-
-  .ctx-item {
-    display: block;
-    width: 100%;
-    padding: 5px 12px;
-    border: none;
-    border-radius: 0;
-    background: transparent;
-    text-align: left;
-    font-size: 12px;
-    cursor: pointer;
-  }
-  .ctx-item:hover { background: var(--bg-hover); }
-
-  .ctx-sep {
-    height: 1px;
-    background: var(--border-color);
-    margin: 4px 0;
-  }
+  /* .ctx-backdrop, .ctx-menu, .ctx-item, .ctx-sep promoted to app.css */
 
   .ctx-color-label {
     font-size: 10px;

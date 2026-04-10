@@ -168,8 +168,6 @@
     box-shadow: 0 4px 12px rgba(0,0,0,0.15);
   }
 
-  .settings-section { }
-
   .settings-label {
     font-size: 11px;
     font-weight: 600;

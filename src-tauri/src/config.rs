@@ -7,6 +7,12 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct PinnedFilter {
+    pub value: String,
+    pub is_regex: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ViewConfig {
     pub hidden_columns: Vec<String>,
     pub column_colors: HashMap<String, String>,
@@ -15,6 +21,10 @@ pub struct ViewConfig {
     pub selected_table: Option<String>,
     #[serde(default)]
     pub column_order: Vec<String>,
+    #[serde(default)]
+    pub pinned_filters: HashMap<String, PinnedFilter>,
+    #[serde(default)]
+    pub pinned_global_filter: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
