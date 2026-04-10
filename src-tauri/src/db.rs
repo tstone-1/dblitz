@@ -22,25 +22,14 @@ impl<T, E: std::fmt::Display> StrErr<T> for Result<T, E> {
 }
 
 /// Sparse rowid index: maps chunk_index → starting rowid for O(log n) seeks.
-/// Built once per table on first query, invalidated on table switch
-/// or when SQLite's PRAGMA data_version changes (external write detected).
+/// Built once per table on first query, invalidated on table switch.
+/// External writers cannot stale this cache because we open with
+/// `?immutable=1` — the connection sees a frozen snapshot for its lifetime.
 struct RowidIndex {
     /// chunk_index → rowid of first row in that chunk
     boundaries: Vec<i64>,
     /// total row count at time of index build
     total_rows: i64,
-    /// Value of `PRAGMA data_version` when the index was built. SQLite
-    /// increments this on every commit (including from other processes),
-    /// so it lets us detect when an external writer has invalidated us
-    /// even though dblitz itself is read-only.
-    data_version: i64,
-}
-
-/// Read SQLite's PRAGMA data_version. Returns 0 on failure (treated as
-/// "always invalidate" — safer than serving stale data).
-fn read_data_version(conn: &Connection) -> i64 {
-    conn.query_row("PRAGMA data_version", [], |row| row.get(0))
-        .unwrap_or(0)
 }
 
 pub struct DbState {
@@ -124,19 +113,46 @@ pub fn close_database(state: &DbState) {
     state.rowid_indexes.lock().clear();
 }
 
+/// Convert an OS file path into a SQLite URI with `?immutable=1`. Percent-
+/// encodes the few characters that have special meaning in URIs and
+/// normalizes Windows backslashes to forward slashes.
+fn path_to_sqlite_uri(path: &str) -> String {
+    // Percent-encode in this order: % first (so we don't double-encode our
+    // own escapes), then the others.
+    let encoded = path
+        .replace('%', "%25")
+        .replace(' ', "%20")
+        .replace('?', "%3F")
+        .replace('#', "%23")
+        .replace('\\', "/");
+    // Unix path "/foo/bar" → "file:/foo/bar?immutable=1"
+    // Windows path "C:/foo/bar" → "file:/C:/foo/bar?immutable=1"
+    if encoded.starts_with('/') {
+        format!("file:{}?immutable=1", encoded)
+    } else {
+        format!("file:/{}?immutable=1", encoded)
+    }
+}
+
 pub fn open_database(state: &DbState, path: &str) -> Result<Vec<TableInfo>, String> {
-    info!(path, "Opening database (read-only)");
-    // dblitz is a viewer, not an editor — open the file read-only so the
-    // SQLite engine itself enforces immutability. Multiple read-only
-    // connections (from dblitz or other tools) can share the same file.
+    info!(path, "Opening database (read-only, immutable)");
+    // dblitz is a viewer, not an editor. Two layers of read-only:
+    //   1. SQLITE_OPEN_READ_ONLY at the connection layer.
+    //   2. ?immutable=1 in the URI tells SQLite to treat the file as a
+    //      frozen snapshot — no shared-memory coordination, no `-shm`
+    //      or `-wal` companion files created by us. The trade-off is
+    //      that we won't see live writes from other processes; reopening
+    //      the file is required to pick up changes.
+    // Both together: SQLite refuses writes AND avoids touching anything
+    // beyond the main file, which matters when the database lives in a
+    // OneDrive-synced folder where stray companion files become noise.
+    let uri = path_to_sqlite_uri(path);
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
-    let conn = Connection::open_with_flags(path, flags).map_err(|e| {
-        error!(path, error = %e, "Failed to open database");
+    let conn = Connection::open_with_flags(&uri, flags).map_err(|e| {
+        error!(path, uri, error = %e, "Failed to open database");
         e.to_string()
     })?;
-    // cache_size is per-connection and works fine on a read-only connection.
-    // We deliberately do NOT enable WAL — that's a write to the file header.
-    // Files already in WAL mode are still readable.
+    // cache_size is per-connection and safe on a read-only connection.
     conn.execute_batch("PRAGMA cache_size=-64000;").str_err()?;
 
     let tables = get_tables_inner(&conn)?;
@@ -255,10 +271,6 @@ fn build_rowid_index(conn: &Connection, safe_table: &str, chunk_size: i64) -> Op
         return None;
     }
 
-    // Snapshot data_version BEFORE the scan so a concurrent external write
-    // during the scan can be detected on the next query.
-    let data_version = read_data_version(conn);
-
     let total_rows: i64 = conn
         .query_row(&format!("SELECT COUNT(*) FROM \"{}\"", safe_table), [], |row| row.get(0))
         .ok()?;
@@ -280,7 +292,7 @@ fn build_rowid_index(conn: &Connection, safe_table: &str, chunk_size: i64) -> Op
         idx += 1;
     }
 
-    Some(RowidIndex { boundaries, total_rows, data_version })
+    Some(RowidIndex { boundaries, total_rows })
 }
 
 fn get_column_names(conn: &Connection, safe_table: &str) -> Result<Vec<String>, String> {
@@ -482,16 +494,10 @@ fn query_with_rowid_index(
 ) -> Option<Result<QueryResult, String>> {
     let chunk_idx = offset / limit;
 
-    // Build index lazily on first access. Drop a cached entry first if
-    // SQLite's data_version has changed since we built it — that means
-    // an external writer modified the database and our boundaries are stale.
+    // Build index lazily on first access. The connection is opened with
+    // ?immutable=1, so the snapshot is frozen for the connection's lifetime
+    // and the cached index can never go stale until close_database.
     let mut indexes = state.rowid_indexes.lock();
-    let current_version = read_data_version(conn);
-    if let Some(idx) = indexes.get(table) {
-        if idx.data_version != current_version {
-            indexes.remove(table);
-        }
-    }
     if !indexes.contains_key(table) {
         if let Some(idx) = build_rowid_index(conn, safe_table, limit) {
             indexes.insert(table.to_string(), idx);
