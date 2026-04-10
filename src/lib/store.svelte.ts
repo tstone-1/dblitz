@@ -101,17 +101,20 @@ export async function openDatabase(path: string) {
   appState.loading = true;
   appState.error = null;
   try {
+    // Fetch everything BEFORE publishing to appState. Each appState
+    // assignment is a reactive trigger; if we set `tables` first and then
+    // await `load_view_config`, the auto-select effect in BrowseData fires
+    // against an empty fileConfig and never re-runs once the real config
+    // arrives. So load it all here, then publish in one synchronous batch.
     const tables = await invoke<TableInfo[]>("open_database", { path });
-    appState.dbPath = path;
-    appState.tables = tables;
-    // Load per-file config and migrate any pre-pinned-filters entries.
     const config = await invoke<FileConfig>("load_view_config");
+    // Migrate any pre-pinned-filters entries from older config files.
     for (const t of Object.values(config.tables)) {
       if (!t.pinned_filters) t.pinned_filters = {};
       if (t.pinned_global_filter === undefined) t.pinned_global_filter = null;
     }
-    appState.fileConfig = config;
-    // Fetch column names for all tables (for SQL autocomplete)
+    // Fetch column names for all tables (for SQL autocomplete + as a
+    // schema source for filter validation before the first query result).
     const colMap: Record<string, string[]> = {};
     await Promise.all(tables.map(async (t) => {
       try {
@@ -119,7 +122,16 @@ export async function openDatabase(path: string) {
         colMap[t.name] = cols.map((c) => c.name);
       } catch { /* best-effort: autocomplete works without columns */ }
     }));
+
+    // Single synchronous publish — auto-select effect sees consistent state.
+    // Order matters: `appState.tables = tables` MUST be last because it's
+    // the trigger for the auto-select effect in BrowseData. By the time the
+    // effect fires, dbPath/fileConfig/tableColumns must already be in place
+    // so that selectTable can hydrate filters and pre-populate columns.
+    appState.dbPath = path;
+    appState.fileConfig = config;
     appState.tableColumns = colMap;
+    appState.tables = tables;
     // Single-table DBs: jump straight to Browse so the user sees data
     // immediately. Multi-table DBs leave the active tab alone — the user
     // may want to inspect Structure first to pick a table.

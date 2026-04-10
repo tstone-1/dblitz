@@ -22,12 +22,25 @@ impl<T, E: std::fmt::Display> StrErr<T> for Result<T, E> {
 }
 
 /// Sparse rowid index: maps chunk_index → starting rowid for O(log n) seeks.
-/// Built once per table on first query, invalidated on table switch.
+/// Built once per table on first query, invalidated on table switch
+/// or when SQLite's PRAGMA data_version changes (external write detected).
 struct RowidIndex {
     /// chunk_index → rowid of first row in that chunk
     boundaries: Vec<i64>,
     /// total row count at time of index build
     total_rows: i64,
+    /// Value of `PRAGMA data_version` when the index was built. SQLite
+    /// increments this on every commit (including from other processes),
+    /// so it lets us detect when an external writer has invalidated us
+    /// even though dblitz itself is read-only.
+    data_version: i64,
+}
+
+/// Read SQLite's PRAGMA data_version. Returns 0 on failure (treated as
+/// "always invalidate" — safer than serving stale data).
+fn read_data_version(conn: &Connection) -> i64 {
+    conn.query_row("PRAGMA data_version", [], |row| row.get(0))
+        .unwrap_or(0)
 }
 
 pub struct DbState {
@@ -112,14 +125,19 @@ pub fn close_database(state: &DbState) {
 }
 
 pub fn open_database(state: &DbState, path: &str) -> Result<Vec<TableInfo>, String> {
-    info!(path, "Opening database");
-    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI;
+    info!(path, "Opening database (read-only)");
+    // dblitz is a viewer, not an editor — open the file read-only so the
+    // SQLite engine itself enforces immutability. Multiple read-only
+    // connections (from dblitz or other tools) can share the same file.
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
     let conn = Connection::open_with_flags(path, flags).map_err(|e| {
         error!(path, error = %e, "Failed to open database");
         e.to_string()
     })?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA cache_size=-64000;")
-        .str_err()?;
+    // cache_size is per-connection and works fine on a read-only connection.
+    // We deliberately do NOT enable WAL — that's a write to the file header.
+    // Files already in WAL mode are still readable.
+    conn.execute_batch("PRAGMA cache_size=-64000;").str_err()?;
 
     let tables = get_tables_inner(&conn)?;
 
@@ -237,6 +255,10 @@ fn build_rowid_index(conn: &Connection, safe_table: &str, chunk_size: i64) -> Op
         return None;
     }
 
+    // Snapshot data_version BEFORE the scan so a concurrent external write
+    // during the scan can be detected on the next query.
+    let data_version = read_data_version(conn);
+
     let total_rows: i64 = conn
         .query_row(&format!("SELECT COUNT(*) FROM \"{}\"", safe_table), [], |row| row.get(0))
         .ok()?;
@@ -258,7 +280,7 @@ fn build_rowid_index(conn: &Connection, safe_table: &str, chunk_size: i64) -> Op
         idx += 1;
     }
 
-    Some(RowidIndex { boundaries, total_rows })
+    Some(RowidIndex { boundaries, total_rows, data_version })
 }
 
 fn get_column_names(conn: &Connection, safe_table: &str) -> Result<Vec<String>, String> {
@@ -460,8 +482,16 @@ fn query_with_rowid_index(
 ) -> Option<Result<QueryResult, String>> {
     let chunk_idx = offset / limit;
 
-    // Build index lazily on first access
+    // Build index lazily on first access. Drop a cached entry first if
+    // SQLite's data_version has changed since we built it — that means
+    // an external writer modified the database and our boundaries are stale.
     let mut indexes = state.rowid_indexes.lock();
+    let current_version = read_data_version(conn);
+    if let Some(idx) = indexes.get(table) {
+        if idx.data_version != current_version {
+            indexes.remove(table);
+        }
+    }
     if !indexes.contains_key(table) {
         if let Some(idx) = build_rowid_index(conn, safe_table, limit) {
             indexes.insert(table.to_string(), idx);
@@ -796,62 +826,57 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
 
     let trimmed = sql.trim();
 
-    // Try to prepare; use sqlite3_stmt_readonly() to distinguish queries from mutations
-    let result = match conn.prepare(trimmed) {
-        Ok(mut stmt) => {
-            if stmt.readonly() {
-                let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
-                let col_count = columns.len();
-                match stmt.query([]) {
-                    Ok(mut rows_iter) => {
-                        let mut rows: Vec<Vec<Option<String>>> = Vec::new();
-                        let mut truncated = false;
-                        loop {
-                            if rows.len() >= SQL_RESULT_LIMIT {
-                                truncated = true;
-                                break;
-                            }
-                            match rows_iter.next() {
-                                Ok(Some(row)) => rows.push(read_row(row, col_count)),
-                                Ok(None) => break,
-                                Err(e) => {
-                                    return SqlResult { columns, rows, rows_affected: 0, error: Some(e.to_string()) };
-                                }
-                            }
-                        }
-                        let error = if truncated {
-                            Some(format!("Result truncated to {} rows", SQL_RESULT_LIMIT))
-                        } else {
-                            None
-                        };
-                        SqlResult { columns, rows, rows_affected: 0, error }
-                    }
-                    Err(e) => SqlResult { columns: vec![], rows: vec![], rows_affected: 0, error: Some(e.to_string()) },
+    // dblitz is read-only. The connection is opened with SQLITE_OPEN_READ_ONLY
+    // so any mutation attempt would fail at the SQLite level anyway, but we
+    // reject it explicitly here to give the user a clear, actionable message
+    // instead of "attempt to write a readonly database".
+    let mut stmt = match conn.prepare(trimmed) {
+        Ok(s) => s,
+        Err(e) => {
+            return SqlResult {
+                columns: vec![], rows: vec![], rows_affected: 0,
+                error: Some(e.to_string()),
+            };
+        }
+    };
+
+    if !stmt.readonly() {
+        return SqlResult {
+            columns: vec![], rows: vec![], rows_affected: 0,
+            error: Some(
+                "dblitz is a read-only viewer — write statements (INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, etc.) are not supported.".to_string(),
+            ),
+        };
+    }
+
+    let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let col_count = columns.len();
+    return match stmt.query([]) {
+        Ok(mut rows_iter) => {
+            let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+            let mut truncated = false;
+            loop {
+                if rows.len() >= SQL_RESULT_LIMIT {
+                    truncated = true;
+                    break;
                 }
-            } else {
-                // Mutation — drop the prepared statement and use execute_batch for multi-statement support
-                drop(stmt);
-                let total_before = conn.total_changes();
-                match conn.execute_batch(trimmed) {
-                    Ok(_) => {
-                        // Invalidate rowid index cache — mutations may change row counts/positions
-                        state.rowid_indexes.lock().clear();
-                        let affected = conn.total_changes() - total_before;
-                        SqlResult {
-                            columns: vec!["result".to_string()],
-                            rows: vec![vec![Some("Statement executed successfully".to_string())]],
-                            rows_affected: affected as usize,
-                            error: None,
-                        }
+                match rows_iter.next() {
+                    Ok(Some(row)) => rows.push(read_row(row, col_count)),
+                    Ok(None) => break,
+                    Err(e) => {
+                        return SqlResult { columns, rows, rows_affected: 0, error: Some(e.to_string()) };
                     }
-                    Err(e) => SqlResult { columns: vec![], rows: vec![], rows_affected: 0, error: Some(e.to_string()) },
                 }
             }
+            let error = if truncated {
+                Some(format!("Result truncated to {} rows", SQL_RESULT_LIMIT))
+            } else {
+                None
+            };
+            SqlResult { columns, rows, rows_affected: 0, error }
         }
-        // If prepare fails (syntax error, etc.), report the error
         Err(e) => SqlResult { columns: vec![], rows: vec![], rows_affected: 0, error: Some(e.to_string()) },
     };
-    result
 }
 
 #[cfg(test)]

@@ -605,12 +605,20 @@
   .data-cell.selected {
     background: color-mix(in srgb, var(--accent) 20%, transparent) !important;
     border-color: transparent;
+    /* Selection edges drawn as inset box-shadows so they don't shrink the
+     * content box and shift the cell text by 1px. The four edges compose
+     * via CSS custom properties below. */
+    box-shadow:
+      inset 0 var(--sel-t, 0px) 0 0 var(--accent),
+      inset calc(-1 * var(--sel-r, 0px)) 0 0 0 var(--accent),
+      inset 0 calc(-1 * var(--sel-b, 0px)) 0 0 var(--accent),
+      inset var(--sel-l, 0px) 0 0 0 var(--accent);
   }
 
-  .data-cell.sel-top { border-top: 1px solid var(--accent); }
-  .data-cell.sel-bottom { border-bottom: 1px solid var(--accent); }
-  .data-cell.sel-left { border-left: 1px solid var(--accent); }
-  .data-cell.sel-right { border-right: 1px solid var(--accent); }
+  .data-cell.sel-top { --sel-t: 1px; }
+  .data-cell.sel-bottom { --sel-b: 1px; }
+  .data-cell.sel-left { --sel-l: 1px; }
+  .data-cell.sel-right { --sel-r: 1px; }
 
   /* .ctx-backdrop, .ctx-menu, .ctx-item, .ctx-sep promoted to app.css */
 

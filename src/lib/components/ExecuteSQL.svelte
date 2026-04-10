@@ -44,7 +44,12 @@
 
   function loadFromHistory(entry: { sql: string }) {
     sql = entry.sql;
-    showHistory = false;
+    // Panel stays open so the user can keep browsing/comparing entries.
+  }
+
+  function loadAndRunFromHistory(entry: { sql: string }) {
+    sql = entry.sql;
+    executeSql();
   }
 
   function formatTime(ts: number): string {
@@ -58,7 +63,7 @@
   <div class="sql-layout">
     <div class="editor-area">
       <div class="editor-header">
-        <span class="hint">Ctrl+Enter to execute</span>
+        <span class="hint">Read-only — Ctrl+Enter to execute</span>
         <button
           onclick={() => (showHistory = !showHistory)}
           class="history-btn"
@@ -73,18 +78,26 @@
         bind:value={sql}
         onexecute={executeSql}
         schema={sqlSchema}
-        placeholder="Enter SQL query..."
+        placeholder="Enter a SELECT query (read-only)..."
       />
     </div>
 
     {#if showHistory}
       <div class="history-panel">
-        <div class="history-title">Query History</div>
+        <div class="history-title">
+          Query History <span class="history-hint">— click to load, double-click to run</span>
+        </div>
         {#if appState.sqlHistory.length === 0}
           <div class="history-empty">No queries yet.</div>
         {:else}
           {#each appState.sqlHistory as entry}
-            <button class="history-entry" class:error={entry.error} onclick={() => loadFromHistory(entry)}>
+            <button
+              class="history-entry"
+              class:error={entry.error}
+              title="Click to load into editor — double-click to load and run"
+              onclick={() => loadFromHistory(entry)}
+              ondblclick={() => loadAndRunFromHistory(entry)}
+            >
               <span class="history-time">{formatTime(entry.timestamp)}</span>
               <span class="history-sql">{entry.sql}</span>
             </button>
@@ -193,6 +206,13 @@
     color: var(--text-muted);
     text-transform: uppercase;
     border-bottom: 1px solid var(--border-color);
+  }
+
+  .history-hint {
+    font-weight: 400;
+    text-transform: none;
+    opacity: 0.75;
+    margin-left: 4px;
   }
 
   .history-empty {

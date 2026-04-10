@@ -130,13 +130,17 @@
 
   async function selectTable(name: string) {
     selectedTable = name;
-    columns = [];
+    // Pre-populate columns from the openDatabase-time autocomplete cache
+    // so buildFilters() (called by reloadData below) sees the schema BEFORE
+    // the first query result arrives. Without this, filters are dropped on
+    // the very first query after a table switch because `valid` is empty.
+    columns = appState.tableColumns[name] ?? [];
     const cfg = ensureTableConfig(name);
     sortColumn = cfg.sort_column;
     sortAsc = cfg.sort_asc;
     // Hydrate ephemeral filter state from pinned defaults.
     // Orphaned filters (pinned column no longer in schema) are silently
-    // dropped at query time by buildFilters().
+    // dropped at query time by buildFilters() against the live `columns`.
     columnFilters = Object.fromEntries(
       Object.entries(cfg.pinned_filters).map(([col, pf]) => [
         col,
