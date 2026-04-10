@@ -17,7 +17,7 @@ Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 - **Verbose log field cleanup**: dropped the redundant `uri` field from the `open_database` error log (it's a deterministic function of `path` and the OneDrive paths can be sensitive).
 
 ### Fixed
-- *(no fixes — all bugs from the 26.4.1 cycle are already in the 26.4.1 entry below.)*
+- **Filter row jittered 1px while scrolling**: the per-column filter row used `position: sticky` with a hardcoded `top: 26px` matching the `HEADER_HEIGHT` constant, but the header's actual rendered height drifted by a pixel under Windows display scaling (125%/150%) due to subpixel rounding — so the filter row appeared to wiggle up/down by 1px on every scroll tick. Fixed by wrapping the header row and filter row in a single `.sticky-header` div pinned at `top: 0`, so they move as one unit and there's no cross-element offset to compute.
 
 ## [26.4.1] - 2026-04-10
 

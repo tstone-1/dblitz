@@ -70,6 +70,10 @@
   }
 
   let showFilters = $derived(columnFilters != null);
+  // Approximate sticky-header height used only for virtual-scroll row culling
+  // (firstVisible/lastVisible). Actual rendered height may drift by a px or two
+  // under display scaling — OVERSCAN absorbs the slack. Do NOT reuse this for
+  // CSS positioning; the sticky wrapper handles that structurally.
   let stickyHeight = $derived(HEADER_HEIGHT + (showFilters ? FILTER_ROW_HEIGHT : 0));
 
   // Determine mode
@@ -265,79 +269,82 @@
 
 <div class="grid-container" bind:this={gridContainer}>
   <div class="scroll-viewport" role="grid" bind:this={scrollContainer} bind:clientHeight={viewportHeight} onscroll={handleScroll}>
-    <!-- Sticky header -->
-    <div class="grid-row header-row" role="row">
-      <div class="grid-cell row-num-header" role="columnheader">#</div>
-      {#each columns as col}
-        <div class="grid-cell col-header"
-          role="columnheader"
-          tabindex={onSort ? 0 : -1}
-          aria-sort={sortColumn === col ? (sortAsc ? 'ascending' : 'descending') : 'none'}
-          class:sortable={onSort != null}
-          class:drag-over-header={reorder.reorderOverCol === col && reorder.reorderCol !== col}
-          class:dragging={reorder.reorderCol === col}
-          data-colidx={columns.indexOf(col)}
-          onclick={() => { if (reorder.consumeReorder()) return; onSort?.(col); }}
-          onkeydown={(e) => handleHeaderKeydown(e, col)}
-          oncontextmenu={(e) => handleHeaderContextMenu(e, col)}
-          onmousedown={(e) => onReorderColumn ? reorder.onMouseDown(e, col) : undefined}
-          style={getColor(col) ? `background: ${getColor(col)};` : ''}>
-          {col}{#if pinStateOf(col) !== "none"}<span class="header-pin-glyph" class:modified={pinStateOf(col) === "modified"} title={pinStateOf(col) === "modified" ? "Pinned filter (modified)" : "Pinned filter"}>
-            <svg viewBox="0 0 16 16" width="9" height="9" aria-hidden="true"><path d="M9.5 1.5 L14.5 6.5 L11.5 7.5 L10 12 L7 9 L3 13 L2 14 L3 10 L6 7 L3 4 L7.5 2.5 Z" fill="currentColor" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
-          </span>{/if}{#if sortColumn === col}<span class="sort-indicator">{sortAsc ? ' \u25B2' : ' \u25BC'}</span>{/if}
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <!-- svelte-ignore a11y_click_events_have_key_events -->
-          <div class="resize-handle" onmousedown={(e) => onResizeStart(e, col)} onclick={(e) => e.stopPropagation()}></div>
-        </div>
-      {/each}
-    </div>
-
-    {#if showFilters}
-      <div class="grid-row filter-row" role="row" tabindex="-1" style="top: {HEADER_HEIGHT}px;">
-        <div class="grid-cell row-num-header" role="gridcell" tabindex="-1"></div>
+    <!-- Sticky header stack: header row + (optional) filter row pinned together
+         to avoid 1px subpixel drift between two independently-sticky elements -->
+    <div class="sticky-header">
+      <div class="grid-row header-row" role="row">
+        <div class="grid-cell row-num-header" role="columnheader">#</div>
         {#each columns as col}
-          {@const f = columnFilters?.[col]}
-          {@const ps = pinStateOf(col)}
-          <div class="grid-cell filter-cell" role="gridcell" tabindex="-1" data-pin-state={ps}>
-            <input
-              type="text"
-              class="col-filter-input"
-              placeholder="Filter..."
-              value={f?.value ?? ''}
-              oninput={(e) => onFilterInput?.(col, (e.target as HTMLInputElement).value)}
-            />
-            <button
-              class="regex-toggle"
-              class:active={f?.is_regex ?? false}
-              title={f?.is_regex ? 'Regex mode' : 'Text mode'}
-              onclick={() => onToggleRegex?.(col)}
-            >.*</button>
-            {#if onTogglePinFilter}
-              <button
-                class="pin-btn filter-pin-btn"
-                data-pin-state={ps}
-                title={
-                  ps === "pinned"
-                    ? "Filter is saved — click to unpin"
-                    : ps === "modified"
-                      ? "Saved filter exists — click to update, right-click to revert"
-                      : "Save filter as default for this column"
-                }
-                onclick={() => onTogglePinFilter?.(col)}
-                oncontextmenu={(e) => handlePinContextMenu(e, col)}
-                aria-label="Pin column filter"
-              >
-                <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">
-                  <path d="M9.5 1.5 L14.5 6.5 L11.5 7.5 L10 12 L7 9 L3 13 L2 14 L3 10 L6 7 L3 4 L7.5 2.5 Z"
-                    fill={ps === "none" ? "none" : "currentColor"}
-                    stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
-                </svg>
-              </button>
-            {/if}
+          <div class="grid-cell col-header"
+            role="columnheader"
+            tabindex={onSort ? 0 : -1}
+            aria-sort={sortColumn === col ? (sortAsc ? 'ascending' : 'descending') : 'none'}
+            class:sortable={onSort != null}
+            class:drag-over-header={reorder.reorderOverCol === col && reorder.reorderCol !== col}
+            class:dragging={reorder.reorderCol === col}
+            data-colidx={columns.indexOf(col)}
+            onclick={() => { if (reorder.consumeReorder()) return; onSort?.(col); }}
+            onkeydown={(e) => handleHeaderKeydown(e, col)}
+            oncontextmenu={(e) => handleHeaderContextMenu(e, col)}
+            onmousedown={(e) => onReorderColumn ? reorder.onMouseDown(e, col) : undefined}
+            style={getColor(col) ? `background: ${getColor(col)};` : ''}>
+            {col}{#if pinStateOf(col) !== "none"}<span class="header-pin-glyph" class:modified={pinStateOf(col) === "modified"} title={pinStateOf(col) === "modified" ? "Pinned filter (modified)" : "Pinned filter"}>
+              <svg viewBox="0 0 16 16" width="9" height="9" aria-hidden="true"><path d="M9.5 1.5 L14.5 6.5 L11.5 7.5 L10 12 L7 9 L3 13 L2 14 L3 10 L6 7 L3 4 L7.5 2.5 Z" fill="currentColor" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+            </span>{/if}{#if sortColumn === col}<span class="sort-indicator">{sortAsc ? ' \u25B2' : ' \u25BC'}</span>{/if}
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <div class="resize-handle" onmousedown={(e) => onResizeStart(e, col)} onclick={(e) => e.stopPropagation()}></div>
           </div>
         {/each}
       </div>
-    {/if}
+
+      {#if showFilters}
+        <div class="grid-row filter-row" role="row" tabindex="-1">
+          <div class="grid-cell row-num-header" role="gridcell" tabindex="-1"></div>
+          {#each columns as col}
+            {@const f = columnFilters?.[col]}
+            {@const ps = pinStateOf(col)}
+            <div class="grid-cell filter-cell" role="gridcell" tabindex="-1" data-pin-state={ps}>
+              <input
+                type="text"
+                class="col-filter-input"
+                placeholder="Filter..."
+                value={f?.value ?? ''}
+                oninput={(e) => onFilterInput?.(col, (e.target as HTMLInputElement).value)}
+              />
+              <button
+                class="regex-toggle"
+                class:active={f?.is_regex ?? false}
+                title={f?.is_regex ? 'Regex mode' : 'Text mode'}
+                onclick={() => onToggleRegex?.(col)}
+              >.*</button>
+              {#if onTogglePinFilter}
+                <button
+                  class="pin-btn filter-pin-btn"
+                  data-pin-state={ps}
+                  title={
+                    ps === "pinned"
+                      ? "Filter is saved — click to unpin"
+                      : ps === "modified"
+                        ? "Saved filter exists — click to update, right-click to revert"
+                        : "Save filter as default for this column"
+                  }
+                  onclick={() => onTogglePinFilter?.(col)}
+                  oncontextmenu={(e) => handlePinContextMenu(e, col)}
+                  aria-label="Pin column filter"
+                >
+                  <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">
+                    <path d="M9.5 1.5 L14.5 6.5 L11.5 7.5 L10 12 L7 9 L3 13 L2 14 L3 10 L6 7 L3 4 L7.5 2.5 Z"
+                      fill={ps === "none" ? "none" : "currentColor"}
+                      stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
 
     <!-- Data rows -->
     <div class="scroll-spacer" style="height: {rowCount * ROW_HEIGHT}px;">
@@ -450,10 +457,16 @@
     align-items: center;
   }
 
-  .header-row {
+  .sticky-header {
     position: sticky;
     top: 0;
     z-index: 2;
+    /* Must be at least as wide as its grid-row children so the sticky region
+       spans the full horizontal scroll range. */
+    min-width: fit-content;
+  }
+
+  .header-row {
     border-bottom: 1px solid var(--border-color);
     min-width: fit-content;
   }
@@ -489,8 +502,6 @@
   }
 
   .filter-row {
-    position: sticky;
-    z-index: 2;
     border-bottom: 1px solid var(--border-color);
     min-width: fit-content;
   }
