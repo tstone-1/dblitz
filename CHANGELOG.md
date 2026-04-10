@@ -5,6 +5,15 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.4.3] - 2026-04-10
+
+### Added
+- **"Open DB" split button with recent-files dropdown**: a chevron next to the Open DB toolbar button drops down the most recently opened databases (capped at 10, deduped, most-recent first). Each entry shows the file name with the parent directory dimmed beneath it. Click any entry to reopen the database; a "Clear recent files" item at the bottom wipes the list. Recents are tracked at the backend in `app.json` next to the existing per-DB view configs and stay self-cleaning — entries pointing at files that no longer exist are filtered out at read time. The list is updated automatically on every successful `open_database` call (manual open, file association, jump-list, command-line argument), so the chevron is always in sync regardless of how the database was opened.
+
+### Changed
+- **New SQLite-themed app icon** replaces the default Tauri rocket. Source SVG (`src-tauri/icons/sqlite.svg`, MIT-licensed, by [vscode-icons](https://github.com/vscode-icons/vscode-icons)) is committed to the repo so the full icon set can be regenerated at any time with `npx tauri icon src-tauri/icons/sqlite.svg`. All platform variants (`.ico` multi-size for Windows, `.icns` for macOS, multiple `.png` sizes, plus iOS/Android/Microsoft Store assets) are produced by Tauri's built-in icon generator from that single source.
+- **Window title now includes the open file name**: title is `<filename> - dblitz v<version>` while a database is open, falling back to plain `dblitz v<version>` when none is. Lets users distinguish multiple dblitz instances at a glance from the taskbar / Alt-Tab list when comparing several SQLite files side by side. The title is updated by the backend on every `open_database` / `close_database` call so file-association launches, jump-list opens, and the toolbar "Open DB" button all behave the same.
+
 ## [26.4.2] - 2026-04-10
 
 ### Added

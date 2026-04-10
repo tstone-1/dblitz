@@ -10,3 +10,11 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .claude/
 docs/reviews/
+
+# Tauri icon outputs that aren't used by the Windows build target.
+# All of these are regenerable from src-tauri/icons/sqlite.svg via
+# `npx tauri icon src-tauri/icons/sqlite.svg`, so the SVG is the source
+# of truth and there's no value in tracking the binary copies.
+src-tauri/icons/64x64.png
+src-tauri/icons/android/
+src-tauri/icons/ios/

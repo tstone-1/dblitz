@@ -6,7 +6,32 @@ use db::{ColumnFilter, ColumnInfo, DbState, QueryRequest, QueryResult, SchemaEnt
 #[cfg(debug_assertions)]
 use db::BenchmarkResult;
 use std::sync::Arc;
-use tauri::{Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+/// Set the main window title to "<filename> - dblitz v<version>" when a file is
+/// open, or just "dblitz v<version>" when none is. Appends " DEV" in debug
+/// builds. Multiple instances showing different files are then distinguishable
+/// from the taskbar / Alt-Tab list.
+fn update_window_title(app: &AppHandle, file: Option<&str>) {
+    let version = app.package_info().version.to_string();
+    let suffix = if cfg!(debug_assertions) { " DEV" } else { "" };
+    let title = match file {
+        Some(name) => format!("{name} - dblitz v{version}{suffix}"),
+        None => format!("dblitz v{version}{suffix}"),
+    };
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_title(&title);
+    }
+}
+
+/// Extract the file name (with extension) from a full path, falling back to
+/// the original path string if it has no parseable basename.
+fn basename(path: &str) -> &str {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path)
+}
 
 #[cfg(windows)]
 fn set_app_user_model_id() {
@@ -27,18 +52,35 @@ fn add_to_recent_docs(path: &str) {
 }
 
 #[tauri::command]
-fn close_database(state: State<'_, Arc<DbState>>) {
+fn close_database(app: AppHandle, state: State<'_, Arc<DbState>>) {
     db::close_database(&state);
+    update_window_title(&app, None);
 }
 
 #[tauri::command]
-fn open_database(state: State<'_, Arc<DbState>>, path: String) -> Result<Vec<TableInfo>, String> {
+fn open_database(
+    app: AppHandle,
+    state: State<'_, Arc<DbState>>,
+    path: String,
+) -> Result<Vec<TableInfo>, String> {
     let result = db::open_database(&state, &path);
     if result.is_ok() {
         #[cfg(windows)]
         add_to_recent_docs(&path);
+        config::push_recent_file(&path);
+        update_window_title(&app, Some(basename(&path)));
     }
     result
+}
+
+#[tauri::command]
+fn get_recent_files() -> Vec<String> {
+    config::get_recent_files()
+}
+
+#[tauri::command]
+fn clear_recent_files() -> Result<(), String> {
+    config::clear_recent_files()
 }
 
 #[tauri::command]
@@ -195,18 +237,15 @@ pub fn run() {
             load_view_config,
             save_view_config,
             get_initial_file,
+            get_recent_files,
+            clear_recent_files,
         ])
         .setup(|app| {
-            let version = app.package_info().version.to_string();
-            let title = if cfg!(debug_assertions) {
-                format!("dblitz v{version} DEV")
-            } else {
-                format!("dblitz v{version}")
-            };
-            let window = app.get_webview_window("main").unwrap();
-            let _ = window.set_title(&title);
+            update_window_title(app.handle(), None);
             #[cfg(debug_assertions)]
-            window.open_devtools();
+            if let Some(window) = app.get_webview_window("main") {
+                window.open_devtools();
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -1,8 +1,11 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
+  import { invoke } from "@tauri-apps/api/core";
   import { appState, openDatabase, closeDatabase, setTheme, type Theme } from "$lib/store.svelte";
 
   let showSettings = $state(false);
+  let showRecents = $state(false);
+  let recentFiles = $state<string[]>([]);
 
   async function handleOpen() {
     const path = await open({
@@ -15,10 +18,50 @@
     }
   }
 
+  async function toggleRecents() {
+    if (showRecents) {
+      showRecents = false;
+      return;
+    }
+    // Open the dropdown immediately so the chevron click feels responsive
+    // even if the backend round-trip is slow (e.g. app.json on a sleeping
+    // disk). The dropdown shows the previous list (or "No recent databases"
+    // on the very first click) and then refreshes silently. Backend filters
+    // out files that no longer exist, so the list stays self-cleaning.
+    showRecents = true;
+    try {
+      recentFiles = await invoke<string[]>("get_recent_files");
+    } catch (e) {
+      console.error("Failed to load recent files:", e);
+      recentFiles = [];
+    }
+  }
+
+  async function openRecent(path: string) {
+    showRecents = false;
+    await openDatabase(path);
+  }
+
+  async function clearRecents() {
+    try {
+      await invoke("clear_recent_files");
+      recentFiles = [];
+    } catch (e) {
+      console.error("Failed to clear recent files:", e);
+    }
+    showRecents = false;
+  }
+
   function fileName(path: string | null): string {
     if (!path) return "No file open";
     const parts = path.replace(/\\/g, "/").split("/");
     return parts[parts.length - 1];
+  }
+
+  function parentDir(path: string): string {
+    const norm = path.replace(/\\/g, "/");
+    const idx = norm.lastIndexOf("/");
+    return idx > 0 ? norm.slice(0, idx) : "";
   }
 
   function handleClickOutside(e: MouseEvent) {
@@ -26,15 +69,49 @@
     if (!target.closest(".settings-dropdown") && !target.closest(".settings-toggle")) {
       showSettings = false;
     }
+    if (!target.closest(".recents-dropdown") && !target.closest(".open-chevron")) {
+      showRecents = false;
+    }
   }
 </script>
 
 <svelte:document onclick={handleClickOutside} />
 
 <div class="toolbar">
-  <button onclick={handleOpen} class="open-btn" title="Open SQLite database">
-    Open DB
-  </button>
+  <div class="open-btn-group">
+    <button onclick={handleOpen} class="open-btn" title="Open SQLite database">
+      Open DB
+    </button>
+    <button
+      onclick={toggleRecents}
+      class="open-chevron"
+      class:active={showRecents}
+      title="Recent databases"
+      aria-label="Recent databases"
+      aria-expanded={showRecents}
+      aria-haspopup="menu"
+    >
+      <svg viewBox="0 0 10 6" width="10" height="6" aria-hidden="true">
+        <path d="M0 0 L5 6 L10 0 Z" fill="currentColor"/>
+      </svg>
+    </button>
+    {#if showRecents}
+      <div class="recents-dropdown" role="menu">
+        {#if recentFiles.length === 0}
+          <div class="recents-empty">No recent databases</div>
+        {:else}
+          {#each recentFiles as path}
+            <button class="recent-item" role="menuitem" onclick={() => openRecent(path)} title={path}>
+              <span class="recent-name">{fileName(path)}</span>
+              <span class="recent-dir">{parentDir(path)}</span>
+            </button>
+          {/each}
+          <div class="recents-sep"></div>
+          <button class="recent-clear" role="menuitem" onclick={clearRecents}>Clear recent files</button>
+        {/if}
+      </div>
+    {/if}
+  </div>
 
   <span class="file-path" title={appState.dbPath ?? ""}>
     {fileName(appState.dbPath)}
@@ -96,15 +173,111 @@
     flex-shrink: 0;
   }
 
+  .open-btn-group {
+    position: relative;
+    display: inline-flex;
+    align-items: stretch;
+  }
+
   .open-btn {
     background: var(--accent);
     color: white;
     font-weight: 600;
     border: none;
     padding: 5px 14px;
-    border-radius: 4px;
+    border-radius: 4px 0 0 4px;
   }
   .open-btn:hover { background: var(--accent-hover); }
+
+  .open-chevron {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-left: 1px solid color-mix(in srgb, white 25%, transparent);
+    padding: 0 6px;
+    border-radius: 0 4px 4px 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+  }
+  .open-chevron:hover,
+  .open-chevron.active { background: var(--accent-hover); }
+
+  .recents-dropdown {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    min-width: 280px;
+    max-width: 480px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 4px;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.18);
+    display: flex;
+    flex-direction: column;
+  }
+
+  .recents-empty {
+    padding: 10px 12px;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-style: italic;
+    text-align: center;
+  }
+
+  .recent-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    padding: 6px 10px;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    text-align: left;
+    cursor: pointer;
+    color: var(--text-primary);
+    overflow: hidden;
+  }
+  .recent-item:hover { background: var(--bg-hover); }
+
+  .recent-name {
+    font-size: 12px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+  }
+  .recent-dir {
+    font-size: 10px;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+  }
+
+  .recents-sep {
+    height: 1px;
+    background: var(--border-color);
+    margin: 4px 2px;
+  }
+
+  .recent-clear {
+    padding: 6px 10px;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    text-align: left;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 11px;
+  }
+  .recent-clear:hover { background: var(--bg-hover); color: var(--error); }
 
   .file-path {
     color: var(--text-secondary);

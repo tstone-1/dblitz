@@ -660,7 +660,7 @@ dependencies = [
 
 [[package]]
 name = "dblitz"
-version = "26.4.2"
+version = "26.4.3"
 dependencies = [
  "dirs",
  "hex",
@@ -677,6 +677,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "windows",
