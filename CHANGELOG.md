@@ -5,6 +5,20 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.4.2] - 2026-04-10
+
+### Added
+- **Auto-select on Structure tab**: opening a single-table database now also auto-selects the lone table on the Structure tab (previously only Browse Data did this), so the user doesn't have to click the table to see its columns.
+- **Read-only enforcement test coverage**: three new unit tests in `db.rs` covering the friendly write-rejection message, that SELECT still works on the read-only connection, and that `path_to_sqlite_uri` correctly percent-encodes spaces, `#`, `?`, and `%` while normalizing Windows backslashes.
+
+### Changed
+- **`pinnedFilters.svelte.ts` extracted from `BrowseData.svelte`**: the pinned-filter state machine (12 functions, two derived stores, the global pin context menu state) now lives in its own file mirroring the existing `cellSelection.svelte.ts` / `dragReorder.svelte.ts` extraction pattern. `BrowseData.svelte` shrinks by ~145 LOC.
+- **`autoSelectFirstTable.svelte.ts` extracted as a shared helper**: the "track which db path was last auto-selected, fire `onSelect` when there's exactly one table and the path changed" bookkeeping is consolidated. Each consumer (BrowseData, DatabaseStructure) gets its own closure-scoped flag — no shared module state.
+- **Verbose log field cleanup**: dropped the redundant `uri` field from the `open_database` error log (it's a deterministic function of `path` and the OneDrive paths can be sensitive).
+
+### Fixed
+- *(no fixes — all bugs from the 26.4.1 cycle are already in the 26.4.1 entry below.)*
+
 ## [26.4.1] - 2026-04-10
 
 ### Added

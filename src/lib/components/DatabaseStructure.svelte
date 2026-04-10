@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { appState, type ColumnInfo, type SchemaEntry } from "$lib/store.svelte";
+  import { createAutoSelectFirstTable } from "./autoSelectFirstTable.svelte";
 
   let selectedTable = $state<string | null>(null);
   let columns = $state<ColumnInfo[]>([]);
@@ -12,6 +13,18 @@
       loadSchema();
     }
   });
+
+  // Auto-select the only table for single-table databases — mirrors the
+  // same affordance in BrowseData so users don't have to click the lone
+  // table just to see its columns.
+  const checkAutoSelect = createAutoSelectFirstTable(
+    (name) => selectTable(name),
+    () => {
+      selectedTable = null;
+      columns = [];
+    },
+  );
+  $effect(() => { checkAutoSelect(); });
 
   async function loadSchema() {
     try {

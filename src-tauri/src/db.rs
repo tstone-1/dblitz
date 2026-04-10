@@ -149,7 +149,7 @@ pub fn open_database(state: &DbState, path: &str) -> Result<Vec<TableInfo>, Stri
     let uri = path_to_sqlite_uri(path);
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
     let conn = Connection::open_with_flags(&uri, flags).map_err(|e| {
-        error!(path, uri, error = %e, "Failed to open database");
+        error!(path, error = %e, "Failed to open database");
         e.to_string()
     })?;
     // cache_size is per-connection and safe on a read-only connection.
@@ -1028,5 +1028,97 @@ mod tests {
         assert_eq!(safe_ident("normal"), "normal");
         assert_eq!(safe_ident("has\"quote"), "has\"\"quote");
         assert_eq!(safe_ident("two\"\"quotes"), "two\"\"\"\"quotes");
+    }
+
+    #[test]
+    fn path_to_sqlite_uri_encodes_special_chars() {
+        // Unix-style path
+        assert_eq!(
+            path_to_sqlite_uri("/home/user/db.sqlite"),
+            "file:/home/user/db.sqlite?immutable=1"
+        );
+        // Windows path with backslashes — normalized to forward slashes
+        assert_eq!(
+            path_to_sqlite_uri(r"C:\Users\mail\db.sqlite"),
+            "file:/C:/Users/mail/db.sqlite?immutable=1"
+        );
+        // Spaces percent-encoded
+        assert_eq!(
+            path_to_sqlite_uri(r"C:\foo bar\db.sqlite"),
+            "file:/C:/foo%20bar/db.sqlite?immutable=1"
+        );
+        // # and ? are URI-special and must be encoded
+        assert_eq!(
+            path_to_sqlite_uri(r"C:\with#hash\db.sqlite"),
+            "file:/C:/with%23hash/db.sqlite?immutable=1"
+        );
+        assert_eq!(
+            path_to_sqlite_uri(r"C:\with?question\db.sqlite"),
+            "file:/C:/with%3Fquestion/db.sqlite?immutable=1"
+        );
+        // % must be encoded first so we don't double-escape our own escapes
+        assert_eq!(
+            path_to_sqlite_uri(r"C:\with%percent\db.sqlite"),
+            "file:/C:/with%25percent/db.sqlite?immutable=1"
+        );
+    }
+
+    /// Set up a temp SQLite file with one table, then open it via dblitz's
+    /// production code path. Returns (state, path) — caller must clean up
+    /// the file after closing the state.
+    fn setup_temp_db_with_table() -> (DbState, std::path::PathBuf) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("dblitz_test_{}.sqlite", nanos));
+
+        // Create the table on a separate writable connection (NOT via dblitz code).
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")
+                .unwrap();
+            conn.execute("INSERT INTO users (name) VALUES ('alice')", [])
+                .unwrap();
+        }
+
+        // Now open via the production read-only + immutable code path.
+        let state = DbState::new();
+        open_database(&state, path.to_str().unwrap()).unwrap();
+        (state, path)
+    }
+
+    #[test]
+    fn execute_sql_rejects_writes_with_friendly_message() {
+        let (state, path) = setup_temp_db_with_table();
+
+        let result = execute_sql(&state, "DELETE FROM users");
+
+        assert!(result.error.is_some(), "expected DELETE to be rejected");
+        let err = result.error.unwrap();
+        assert!(
+            err.contains("read-only viewer"),
+            "expected friendly read-only message, got: {err}"
+        );
+        assert!(result.rows.is_empty());
+        assert_eq!(result.rows_affected, 0);
+
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn execute_sql_allows_select_on_readonly_connection() {
+        let (state, path) = setup_temp_db_with_table();
+
+        let result = execute_sql(&state, "SELECT name FROM users");
+
+        assert!(result.error.is_none(), "SELECT should succeed, got: {:?}", result.error);
+        assert_eq!(result.columns, vec!["name"]);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0].as_deref(), Some("alice"));
+
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
     }
 }
