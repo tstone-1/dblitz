@@ -6,8 +6,25 @@ on:
       - 'v*'
 
 jobs:
-  release:
-    runs-on: windows-latest
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create ${{ github.ref_name }} --title "dblitz ${{ github.ref_name }}" --notes "See [CHANGELOG.md](https://github.com/tstone-1/dblitz/blob/main/CHANGELOG.md) for details."
+
+  build:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: write
 
@@ -31,18 +48,15 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build and release
+      - name: Build and upload artifacts
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: "dblitz ${{ github.ref_name }}"
-          releaseBody: "See [CHANGELOG.md](https://github.com/tstone-1/dblitz/blob/main/CHANGELOG.md) for details."
-          releaseDraft: false
-          prerelease: false
 
       - name: Upload portable exe
+        if: matrix.os == 'windows-latest'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload ${{ github.ref_name }} src-tauri/target/release/dblitz.exe --clobber
