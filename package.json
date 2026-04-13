@@ -1,6 +1,6 @@
 {
   "name": "dblitz",
-  "version": "26.4.3",
+  "version": "26.4.4",
   "description": "Blazingly fast SQLite browser",
   "type": "module",
   "scripts": {

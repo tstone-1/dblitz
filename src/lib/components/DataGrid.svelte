@@ -170,6 +170,57 @@
   const selection = createCellSelection();
   const sel = $derived(selection.sel);
 
+  // Selection statistics for status bar
+  const MAX_STATS_ROWS = 100_000;
+
+  interface SelectionStats {
+    rows: number;
+    cols: number;
+    sum: number | null;
+    avg: number | null;
+    min: number | null;
+    max: number | null;
+  }
+
+  const selStats = $derived.by((): SelectionStats | null => {
+    if (!sel) return null;
+    const nRows = sel.r1 - sel.r0 + 1;
+    const nCols = sel.c1 - sel.c0 + 1;
+    if (nRows === 1 && nCols === 1) return null; // single cell — no bar
+    const capRow = Math.min(sel.r1, sel.r0 + MAX_STATS_ROWS - 1);
+    let allNumeric = true;
+    let sum = 0;
+    let min = Infinity;
+    let max = -Infinity;
+    let count = 0;
+    for (let r = sel.r0; r <= capRow; r++) {
+      const row = getRowData(r);
+      for (let c = sel.c0; c <= sel.c1; c++) {
+        const v = row ? row[c] : null;
+        if (v === null || v === '') continue;
+        const n = Number(v);
+        if (Number.isNaN(n)) { allNumeric = false; break; }
+        sum += n;
+        if (n < min) min = n;
+        if (n > max) max = n;
+        count++;
+      }
+      if (!allNumeric) break;
+    }
+    return {
+      rows: nRows,
+      cols: nCols,
+      sum: allNumeric && count > 0 ? sum : null,
+      avg: allNumeric && count > 0 ? sum / count : null,
+      min: allNumeric && count > 0 ? min : null,
+      max: allNumeric && count > 0 ? max : null,
+    };
+  });
+
+  function fmtNum(n: number): string {
+    return Number.isInteger(n) ? n.toLocaleString() : n.toLocaleString(undefined, { maximumFractionDigits: 6 });
+  }
+
   // Context menu
   let ctxMenu = $state<{ x: number; y: number } | null>(null);
 
@@ -394,6 +445,18 @@
   </div>
 </div>
 
+{#if selStats}
+  <div class="sel-status-bar">
+    <span>{selStats.rows} row(s), {selStats.cols} column(s)</span>
+    {#if selStats.sum !== null}
+      <span class="sel-stat">Sum: {fmtNum(selStats.sum)}</span>
+      <span class="sel-stat">Avg: {fmtNum(selStats.avg!)}</span>
+      <span class="sel-stat">Min: {fmtNum(selStats.min!)}</span>
+      <span class="sel-stat">Max: {fmtNum(selStats.max!)}</span>
+    {/if}
+  </div>
+{/if}
+
 {#if ctxMenu}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -451,6 +514,22 @@
 <style>
   .grid-container {
     flex: 1; display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  .sel-status-bar {
+    display: flex;
+    gap: 16px;
+    padding: 3px 12px;
+    font-size: 11px;
+    font-family: 'Cascadia Code', 'Cascadia Mono', 'Fira Code', 'Consolas', monospace;
+    color: var(--text-secondary);
+    background: var(--bg-tertiary);
+    border-top: 1px solid var(--border-color);
+    flex-shrink: 0;
+  }
+
+  .sel-stat {
+    color: var(--text-muted);
   }
 
   .grid-row {

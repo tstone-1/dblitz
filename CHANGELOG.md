@@ -5,6 +5,18 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.4.4] - 2026-04-13
+
+### Added
+- **Ctrl+A selects all cells** in the Browse Data grid. The browser's default select-all is intercepted so only the table body is selected, not the surrounding UI.
+- **Shift+Click extends cell selection** from the current anchor to the clicked cell, matching standard spreadsheet behavior.
+- **Selection statistics bar** appears at the bottom of the grid when multiple cells are selected, showing row/column count. When all non-empty values in the selection are numeric, Sum, Avg, Min, and Max are displayed. Capped at 100k rows for performance.
+- **Multi-instance support**: each SQLite file opens in its own window. Duplicate detection uses a Win32 window property (path hash via `SetPropW`/`GetPropW`) so the same file is never opened twice, while different files with the same name in different directories open correctly in separate windows.
+
+### Changed
+- **Window title shows filename only** (e.g. `file.sqlite - dblitz v26.4.4`) for a cleaner taskbar and title bar. The full file path is now displayed in the toolbar instead, using a flex layout that expands to fill available space rather than truncating at a fixed 300px width.
+- **Copy/export capped at 100k rows** to prevent runaway chunk fetches on large virtual-scroll tables when the selection exceeds loaded data.
+
 ## [26.4.3] - 2026-04-10
 
 ### Added
