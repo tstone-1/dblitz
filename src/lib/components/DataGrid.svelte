@@ -180,12 +180,15 @@
 
   function closeContextMenu() { ctxMenu = null; }
 
+  const MAX_COPY_ROWS = 100_000;
+
   function getSelectionData(): { headers: string[]; rows: string[][] } | null {
     const b = sel;
     if (!b) return null;
     const headers = columns.slice(b.c0, b.c1 + 1);
     const selRows: string[][] = [];
-    for (let r = b.r0; r <= b.r1; r++) {
+    const lastRow = Math.min(b.r1, b.r0 + MAX_COPY_ROWS - 1);
+    for (let r = b.r0; r <= lastRow; r++) {
       const row = getRowData(r);
       const cells: string[] = [];
       for (let c = b.c0; c <= b.c1; c++) {
@@ -248,6 +251,18 @@
   // Header mouse-based reorder (extracted to dragReorder.ts)
   const reorder = createDragReorder(() => columns, () => onReorderColumn);
 
+  function handleGridKeydown(e: KeyboardEvent) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+      e.preventDefault();
+      if (rowCount > 0 && columns.length > 0) {
+        selection.setSelection(
+          { row: 0, col: 0 },
+          { row: rowCount - 1, col: columns.length - 1 },
+        );
+      }
+    }
+  }
+
   function handleHeaderKeydown(e: KeyboardEvent, col: string) {
     if (!onSort) return;
     if (e.key === "Enter" || e.key === " ") {
@@ -268,7 +283,7 @@
 </script>
 
 <div class="grid-container" bind:this={gridContainer}>
-  <div class="scroll-viewport" role="grid" bind:this={scrollContainer} bind:clientHeight={viewportHeight} onscroll={handleScroll}>
+  <div class="scroll-viewport" role="grid" bind:this={scrollContainer} bind:clientHeight={viewportHeight} onscroll={handleScroll} onkeydown={handleGridKeydown}>
     <!-- Sticky header stack: header row + (optional) filter row pinned together
          to avoid 1px subpixel drift between two independently-sticky elements -->
     <div class="sticky-header">

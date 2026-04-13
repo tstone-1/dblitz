@@ -8,20 +8,49 @@ use db::BenchmarkResult;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 
-/// Set the main window title to `"<path> - dblitz v<version>"` when a file is
-/// open, or just `"dblitz v<version>"` when none is. Appends `" DEV"` in debug
-/// builds. The full path makes different instances distinguishable from the
-/// taskbar / Alt-Tab list and is used by `try_activate_existing` to detect
-/// duplicate opens of the same file.
+/// Compute a 64-bit hash of the lowercased path for cross-process duplicate
+/// detection via Win32 window properties.
+#[cfg(windows)]
+fn path_hash(path: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.to_ascii_lowercase().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Set the main window title to `"<filename> - dblitz v<version>"` when a file
+/// is open, or just `"dblitz v<version>"` when none is. Appends `" DEV"` in
+/// debug builds. Uses the filename (not the full path) for a cleaner title bar
+/// — the full path is shown in the toolbar instead.
+///
+/// Also sets a Win32 window property (`dblitz_db_path`) containing a hash of
+/// the full path, used by [`try_activate_existing`] for duplicate detection.
 fn update_window_title(app: &AppHandle, path: Option<&str>) {
     let version = app.package_info().version.to_string();
     let suffix = if cfg!(debug_assertions) { " DEV" } else { "" };
     let title = match path {
-        Some(p) => format!("{p} - dblitz v{version}{suffix}"),
+        Some(p) => {
+            let name = std::path::Path::new(p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(p);
+            format!("{name} - dblitz v{version}{suffix}")
+        }
         None => format!("dblitz v{version}{suffix}"),
     };
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_title(&title);
+        #[cfg(windows)]
+        {
+            use windows::core::w;
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::UI::WindowsAndMessaging::SetPropW;
+            let hwnd = window.hwnd().expect("main window hwnd");
+            let hash = path.map(path_hash).unwrap_or(0);
+            unsafe {
+                let _ = SetPropW(hwnd, w!("dblitz_db_path"), Some(HANDLE(hash as *mut _)));
+            }
+        }
     }
 }
 
@@ -184,54 +213,42 @@ fn save_view_config(
     }
 }
 
-/// Search for an existing dblitz window whose title starts with
-/// `"<path> - dblitz v"` (case-insensitive on the path portion, since Windows
-/// paths are case-insensitive). If found, restore (un-minimise) and activate
-/// it, returning `true` so the caller can exit early.
+/// Search for an existing dblitz window that has the same file open by
+/// comparing the `dblitz_db_path` window property (a 64-bit hash of the
+/// full, lowercased path set by [`update_window_title`]).
+///
+/// If found, restore (un-minimise) and activate it, returning `true` so
+/// the caller can exit early.
 ///
 /// There is a narrow race between when an instance launches and when it
-/// finishes loading its database (at which point the title is updated). If the
+/// finishes loading its database (at which point the property is set). If the
 /// same file is double-clicked twice within milliseconds the second instance
 /// may not find the first. Acceptable in practice.
-///
-/// Title format must stay in sync with [`update_window_title`].
 #[cfg(windows)]
 fn try_activate_existing(path: &str) -> bool {
-    use windows::core::BOOL;
+    use windows::core::{w, BOOL};
     use windows::Win32::Foundation::{HWND, LPARAM};
     use windows::Win32::UI::WindowsAndMessaging::*;
 
-    fn ascii_lower(c: u16) -> u16 {
-        if (0x41..=0x5A).contains(&c) { c + 0x20 } else { c }
-    }
-
     struct Ctx {
-        prefix: Vec<u16>,
+        target_hash: u64,
         found: HWND,
     }
 
     unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let ctx = &mut *(lparam.0 as *mut Ctx);
-        let mut buf = [0u16; 512];
-        let len = GetWindowTextW(hwnd, &mut buf) as usize;
-        if len >= ctx.prefix.len()
-            && buf[..ctx.prefix.len()]
-                .iter()
-                .zip(ctx.prefix.iter())
-                .all(|(&a, &b)| ascii_lower(a) == b)
-        {
+        let prop = GetPropW(hwnd, w!("dblitz_db_path"));
+        if !prop.is_invalid() && prop.0 as u64 == ctx.target_hash {
             ctx.found = hwnd;
             return BOOL(0); // stop enumerating
         }
         BOOL(1)
     }
 
-    // Pre-lowercase the prefix so the callback only needs to fold each title char.
-    let prefix: Vec<u16> = format!("{path} - dblitz v")
-        .encode_utf16()
-        .map(ascii_lower)
-        .collect();
-    let mut ctx = Ctx { prefix, found: HWND::default() };
+    let mut ctx = Ctx {
+        target_hash: path_hash(path),
+        found: HWND::default(),
+    };
 
     unsafe {
         let _ = EnumWindows(Some(cb), LPARAM(&mut ctx as *mut _ as isize));

@@ -114,7 +114,7 @@
   </div>
 
   <span class="file-path" title={appState.dbPath ?? ""}>
-    {fileName(appState.dbPath)}
+    {appState.dbPath ?? ""}
   </span>
 
   {#if appState.dbPath}
@@ -285,7 +285,8 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 300px;
+    flex: 1;
+    min-width: 0;
   }
 
   .table-count { color: var(--text-muted); font-size: 11px; }

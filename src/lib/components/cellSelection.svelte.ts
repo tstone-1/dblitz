@@ -37,8 +37,12 @@ export function createCellSelection() {
     const colIdx = colIdxFromEvent(e);
     if (colIdx < 0) return;
     selecting = true;
-    selAnchor = { row: rowIdx, col: colIdx };
-    selEnd = { row: rowIdx, col: colIdx };
+    if (e.shiftKey && selAnchor) {
+      selEnd = { row: rowIdx, col: colIdx };
+    } else {
+      selAnchor = { row: rowIdx, col: colIdx };
+      selEnd = { row: rowIdx, col: colIdx };
+    }
     document.addEventListener('mouseup', onSelectionEnd);
   }
 
