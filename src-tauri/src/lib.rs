@@ -6,31 +6,23 @@ use db::{ColumnFilter, ColumnInfo, DbState, QueryRequest, QueryResult, SchemaEnt
 #[cfg(debug_assertions)]
 use db::BenchmarkResult;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 
-/// Set the main window title to "<filename> - dblitz v<version>" when a file is
-/// open, or just "dblitz v<version>" when none is. Appends " DEV" in debug
-/// builds. Multiple instances showing different files are then distinguishable
-/// from the taskbar / Alt-Tab list.
-fn update_window_title(app: &AppHandle, file: Option<&str>) {
+/// Set the main window title to `"<path> - dblitz v<version>"` when a file is
+/// open, or just `"dblitz v<version>"` when none is. Appends `" DEV"` in debug
+/// builds. The full path makes different instances distinguishable from the
+/// taskbar / Alt-Tab list and is used by `try_activate_existing` to detect
+/// duplicate opens of the same file.
+fn update_window_title(app: &AppHandle, path: Option<&str>) {
     let version = app.package_info().version.to_string();
     let suffix = if cfg!(debug_assertions) { " DEV" } else { "" };
-    let title = match file {
-        Some(name) => format!("{name} - dblitz v{version}{suffix}"),
+    let title = match path {
+        Some(p) => format!("{p} - dblitz v{version}{suffix}"),
         None => format!("dblitz v{version}{suffix}"),
     };
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_title(&title);
     }
-}
-
-/// Extract the file name (with extension) from a full path, falling back to
-/// the original path string if it has no parseable basename.
-fn basename(path: &str) -> &str {
-    std::path::Path::new(path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(path)
 }
 
 #[cfg(windows)]
@@ -68,7 +60,7 @@ fn open_database(
         #[cfg(windows)]
         add_to_recent_docs(&path);
         config::push_recent_file(&path);
-        update_window_title(&app, Some(basename(&path)));
+        update_window_title(&app, Some(&path));
     }
     result
 }
@@ -192,10 +184,82 @@ fn save_view_config(
     }
 }
 
+/// Search for an existing dblitz window whose title starts with
+/// `"<path> - dblitz v"` (case-insensitive on the path portion, since Windows
+/// paths are case-insensitive). If found, restore (un-minimise) and activate
+/// it, returning `true` so the caller can exit early.
+///
+/// There is a narrow race between when an instance launches and when it
+/// finishes loading its database (at which point the title is updated). If the
+/// same file is double-clicked twice within milliseconds the second instance
+/// may not find the first. Acceptable in practice.
+///
+/// Title format must stay in sync with [`update_window_title`].
+#[cfg(windows)]
+fn try_activate_existing(path: &str) -> bool {
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::*;
+
+    fn ascii_lower(c: u16) -> u16 {
+        if (0x41..=0x5A).contains(&c) { c + 0x20 } else { c }
+    }
+
+    struct Ctx {
+        prefix: Vec<u16>,
+        found: HWND,
+    }
+
+    unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let ctx = &mut *(lparam.0 as *mut Ctx);
+        let mut buf = [0u16; 512];
+        let len = GetWindowTextW(hwnd, &mut buf) as usize;
+        if len >= ctx.prefix.len()
+            && buf[..ctx.prefix.len()]
+                .iter()
+                .zip(ctx.prefix.iter())
+                .all(|(&a, &b)| ascii_lower(a) == b)
+        {
+            ctx.found = hwnd;
+            return BOOL(0); // stop enumerating
+        }
+        BOOL(1)
+    }
+
+    // Pre-lowercase the prefix so the callback only needs to fold each title char.
+    let prefix: Vec<u16> = format!("{path} - dblitz v")
+        .encode_utf16()
+        .map(ascii_lower)
+        .collect();
+    let mut ctx = Ctx { prefix, found: HWND::default() };
+
+    unsafe {
+        let _ = EnumWindows(Some(cb), LPARAM(&mut ctx as *mut _ as isize));
+        if !ctx.found.0.is_null() {
+            if IsIconic(ctx.found).as_bool() {
+                let _ = ShowWindow(ctx.found, SW_RESTORE);
+            }
+            let _ = SetForegroundWindow(ctx.found);
+            eprintln!("dblitz: activated existing window for {path}");
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(windows)]
     set_app_user_model_id();
+
+    // If launched with a file already open in another instance, activate
+    // that window instead of opening a duplicate.
+    #[cfg(windows)]
+    if let Some(path) = std::env::args().nth(1) {
+        if try_activate_existing(&path) {
+            return;
+        }
+    }
 
     let db_state = Arc::new(DbState::new());
 
@@ -210,15 +274,6 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            // args[0] is the exe, args[1..] may contain file paths
-            if let Some(path) = args.get(1) {
-                let _ = app.emit("open-file", path.clone());
-            }
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_focus();
-            }
-        }))
         .manage(db_state)
         .invoke_handler(tauri::generate_handler![
             close_database,

@@ -2,7 +2,6 @@
   import "../app.css";
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { listen } from "@tauri-apps/api/event";
   import { appState, initTheme, openDatabase, closeDatabase } from "$lib/store.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import DatabaseStructure from "$lib/components/DatabaseStructure.svelte";
@@ -23,12 +22,6 @@
       if (path) handleOpenFile(path);
     });
 
-    // Listen for files from second instance (single-instance plugin)
-    let unlisten: (() => void) | undefined;
-    listen<string>("open-file", (event) => {
-      handleOpenFile(event.payload);
-    }).then((fn) => (unlisten = fn));
-
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "F12") {
         e.preventDefault();
@@ -38,7 +31,6 @@
     document.addEventListener("keydown", onKeyDown);
 
     return () => {
-      unlisten?.();
       document.removeEventListener("keydown", onKeyDown);
     };
   });
