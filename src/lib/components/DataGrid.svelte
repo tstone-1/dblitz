@@ -304,6 +304,9 @@
 
   function handleGridKeydown(e: KeyboardEvent) {
     if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+      // Let inputs/textareas handle Ctrl+A natively (select all text)
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
       e.preventDefault();
       if (rowCount > 0 && columns.length > 0) {
         selection.setSelection(

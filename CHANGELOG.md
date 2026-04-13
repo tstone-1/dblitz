@@ -5,6 +5,12 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.4.5] - 2026-04-13
+
+### Fixed
+- **Ctrl+A in column filter inputs now selects text** instead of selecting all grid cells. The grid's Ctrl+A handler no longer intercepts the shortcut when focus is inside a filter input or textarea.
+- **Filter input responsiveness improved**: increased debounce delay from 300ms to 500ms so rapid edits (e.g. holding Backspace) don't trigger expensive intermediate queries. The query now fires once after the user stops typing.
+
 ## [26.4.4] - 2026-04-13
 
 ### Added

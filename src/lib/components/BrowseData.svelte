@@ -15,6 +15,7 @@
   import { createAutoSelectFirstTable } from "./autoSelectFirstTable.svelte";
 
   const CHUNK_SIZE = 500;
+  const FILTER_DEBOUNCE_MS = 500;
 
   let selectedTable = $state<string | null>(null);
   let columns = $state<string[]>([]);
@@ -217,7 +218,7 @@
     filterDebounce = setTimeout(() => {
       lastFilterState = filterSnapshot;
       reloadData();
-    }, 300);
+    }, FILTER_DEBOUNCE_MS);
   }
 
   function handleSort(col: string) {
