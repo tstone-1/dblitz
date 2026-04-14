@@ -5,6 +5,11 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [Unreleased]
+
+### Added
+- **Recent-files dropdown shows window markers**: each entry renders its file's tint as a colored left border and its label as an inline pill, so PROD/QA distinctions are visible before the file is opened.
+
 ## [26.4.6] - 2026-04-14
 
 ### Added

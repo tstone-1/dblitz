@@ -43,9 +43,11 @@
       : "",
   );
 
+  interface RecentFile { path: string; tint: string | null; label: string | null; }
+
   let showSettings = $state(false);
   let showRecents = $state(false);
-  let recentFiles = $state<string[]>([]);
+  let recentFiles = $state<RecentFile[]>([]);
 
   async function handleOpen() {
     const path = await open({
@@ -70,7 +72,7 @@
     // out files that no longer exist, so the list stays self-cleaning.
     showRecents = true;
     try {
-      recentFiles = await invoke<string[]>("get_recent_files");
+      recentFiles = await invoke<RecentFile[]>("get_recent_files");
     } catch (e) {
       console.error("Failed to load recent files:", e);
       recentFiles = [];
@@ -140,10 +142,24 @@
         {#if recentFiles.length === 0}
           <div class="recents-empty">No recent databases</div>
         {:else}
-          {#each recentFiles as path}
-            <button class="recent-item" role="menuitem" onclick={() => openRecent(path)} title={path}>
-              <span class="recent-name">{fileName(path)}</span>
-              <span class="recent-dir">{parentDir(path)}</span>
+          {#each recentFiles as rf}
+            <button
+              class="recent-item"
+              role="menuitem"
+              onclick={() => openRecent(rf.path)}
+              title={rf.path}
+              style={rf.tint ? `border-left-color: ${rf.tint};` : ""}
+            >
+              <div class="recent-item-row">
+                <span class="recent-name">{fileName(rf.path)}</span>
+                {#if rf.label}
+                  <span
+                    class="recent-label-pill"
+                    style={rf.tint ? `background: ${rf.tint}; border-color: ${rf.tint}; color: white;` : ""}
+                  >{rf.label}</span>
+                {/if}
+              </div>
+              <span class="recent-dir">{parentDir(rf.path)}</span>
             </button>
           {/each}
           <div class="recents-sep"></div>
@@ -310,6 +326,7 @@
     padding: 6px 10px;
     background: transparent;
     border: none;
+    border-left: 3px solid transparent;
     border-radius: 4px;
     text-align: left;
     cursor: pointer;
@@ -317,6 +334,29 @@
     overflow: hidden;
   }
   .recent-item:hover { background: var(--bg-hover); }
+
+  .recent-item-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    overflow: hidden;
+  }
+
+  .recent-label-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 6px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
 
   .recent-name {
     font-size: 12px;

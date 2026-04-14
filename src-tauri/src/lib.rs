@@ -94,9 +94,12 @@ fn open_database(
     result
 }
 
+/// Returns the recent-files list with each entry enriched by its per-DB
+/// window marker (tint + label). Return shape changed in 26.4.6+ from
+/// `Vec<String>` to `Vec<RecentFile>`; callers must deserialize as objects.
 #[tauri::command]
-fn get_recent_files() -> Vec<String> {
-    config::get_recent_files()
+fn get_recent_files() -> Vec<config::RecentFile> {
+    config::get_recent_files_enriched()
 }
 
 #[tauri::command]

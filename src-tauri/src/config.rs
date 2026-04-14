@@ -184,6 +184,32 @@ pub fn clear_recent_files() -> Result<(), String> {
     clear_recent_files_in(&config_dir())
 }
 
+/// Public struct for the enriched recents list (path + window marker).
+/// `rename_all = "camelCase"` is a no-op today (all fields are single words)
+/// but locks in the JS-side field names so adding e.g. `last_opened` later
+/// won't silently rename the serialized key.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentFile {
+    pub path: String,
+    pub tint: Option<String>,
+    pub label: Option<String>,
+}
+
+/// Same as [`get_recent_files`], but also reads each file's per-DB config to
+/// attach the window marker (tint + label) so the recents dropdown can render
+/// them. Missing/corrupt per-DB configs silently yield `None` for both fields
+/// — a visible tint is a nice-to-have, not a correctness concern.
+pub fn get_recent_files_enriched() -> Vec<RecentFile> {
+    get_recent_files()
+        .into_iter()
+        .map(|path| {
+            let cfg = load_config(&path);
+            RecentFile { path, tint: cfg.tint, label: cfg.label }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
