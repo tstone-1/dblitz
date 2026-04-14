@@ -28,12 +28,21 @@ pub struct ViewConfig {
     pub pinned_filters: HashMap<String, PinnedFilter>,
     #[serde(default)]
     pub pinned_global_filter: Option<String>,
+    #[serde(default)]
+    pub column_widths: HashMap<String, u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct FileConfig {
     /// Per-table view configs, keyed by table name
     pub tables: HashMap<String, ViewConfig>,
+    /// Optional CSS color string used to tint the toolbar so multiple
+    /// open windows are visually distinguishable (e.g. PROD vs QA).
+    #[serde(default)]
+    pub tint: Option<String>,
+    /// Optional short label shown as a pill next to the file path.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 fn config_dir() -> PathBuf {

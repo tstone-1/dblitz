@@ -1,7 +1,47 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
   import { invoke } from "@tauri-apps/api/core";
-  import { appState, openDatabase, closeDatabase, setTheme, type Theme } from "$lib/store.svelte";
+  import { appState, openDatabase, closeDatabase, setTheme, saveViewConfig, type Theme } from "$lib/store.svelte";
+
+  // Preset tints — enough variety to disambiguate ~6 parallel windows without
+  // drowning the user in a color picker. `null` is the "no tint" option.
+  const TINT_PRESETS: { value: string | null; name: string }[] = [
+    { value: null, name: "None" },
+    { value: "#d94040", name: "Red" },
+    { value: "#e0a030", name: "Amber" },
+    { value: "#4aa84a", name: "Green" },
+    { value: "#3080d0", name: "Blue" },
+    { value: "#8050c0", name: "Purple" },
+    { value: "#c04090", name: "Pink" },
+  ];
+
+  function setTint(value: string | null) {
+    appState.fileConfig.tint = value;
+    saveViewConfig();
+  }
+
+  function onLabelInput(e: Event) {
+    // `maxlength="12"` on the input already caps length; just trim + nullify.
+    const v = (e.target as HTMLInputElement).value.trim();
+    appState.fileConfig.label = v === "" ? null : v;
+  }
+
+  function commitLabel() {
+    saveViewConfig();
+  }
+
+  // Mix tint with toolbar bg so the strip is tinted, not solid — keeps the UI
+  // readable in both themes. 22% tint reads clearly without overwhelming.
+  let toolbarStyle = $derived(
+    appState.fileConfig.tint
+      ? `background: color-mix(in srgb, ${appState.fileConfig.tint} 22%, var(--bg-secondary));`
+      : "",
+  );
+  let pillStyle = $derived(
+    appState.fileConfig.tint
+      ? `background: ${appState.fileConfig.tint}; color: white; border-color: ${appState.fileConfig.tint};`
+      : "",
+  );
 
   let showSettings = $state(false);
   let showRecents = $state(false);
@@ -77,7 +117,7 @@
 
 <svelte:document onclick={handleClickOutside} />
 
-<div class="toolbar">
+<div class="toolbar" style={toolbarStyle}>
   <div class="open-btn-group">
     <button onclick={handleOpen} class="open-btn" title="Open SQLite database">
       Open DB
@@ -112,6 +152,10 @@
       </div>
     {/if}
   </div>
+
+  {#if appState.fileConfig.label}
+    <span class="window-label-pill" style={pillStyle}>{appState.fileConfig.label}</span>
+  {/if}
 
   <span class="file-path" title={appState.dbPath ?? ""}>
     {appState.dbPath ?? ""}
@@ -150,6 +194,36 @@
             <button class="theme-btn" class:active={appState.theme === 'dark'} onclick={() => setTheme('dark')}>Dark</button>
           </div>
         </div>
+
+        {#if appState.dbPath}
+          <div class="settings-section">
+            <div class="settings-label">Window Marker</div>
+            <div class="tint-swatches">
+              {#each TINT_PRESETS as preset}
+                <button
+                  type="button"
+                  class="tint-swatch"
+                  class:active={appState.fileConfig.tint === preset.value}
+                  class:none={preset.value === null}
+                  style={preset.value ? `background: ${preset.value};` : ""}
+                  title={preset.name}
+                  aria-label={preset.name}
+                  onclick={() => setTint(preset.value)}
+                ></button>
+              {/each}
+            </div>
+            <input
+              class="label-input"
+              type="text"
+              maxlength="12"
+              placeholder="Label (e.g. PROD)"
+              value={appState.fileConfig.label ?? ""}
+              oninput={onLabelInput}
+              onchange={commitLabel}
+              onblur={commitLabel}
+            />
+          </div>
+        {/if}
       </div>
     {/if}
   </div>
@@ -340,6 +414,67 @@
     min-width: 160px;
     z-index: 100;
     box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  }
+
+  .settings-section + .settings-section {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-color);
+  }
+
+  .window-label-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    border-radius: 10px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .tint-swatches {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+
+  .tint-swatch {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 1px solid var(--border-color);
+    padding: 0;
+    cursor: pointer;
+  }
+  .tint-swatch.none {
+    background:
+      linear-gradient(45deg, transparent 45%, var(--error) 45%, var(--error) 55%, transparent 55%),
+      var(--bg-primary);
+  }
+  .tint-swatch.active {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  .label-input {
+    width: 100%;
+    padding: 4px 8px;
+    font-size: 12px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    box-sizing: border-box;
+  }
+  .label-input:focus {
+    outline: none;
+    border-color: var(--accent);
   }
 
   .settings-label {

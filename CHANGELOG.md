@@ -5,6 +5,16 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.4.6] - 2026-04-14
+
+### Added
+- **Per-file window marker** (Settings → Window Marker): pick one of seven toolbar tint colors and enter a short label (e.g. `PROD`, `QA`) to visually distinguish windows when opening same-named files from different directories in parallel. Both are persisted per-file alongside the rest of the view config and restored automatically on reopen.
+- **Ctrl+C copies the current cell selection** to the clipboard as tab-separated values. Gated on having an active grid selection; defers to native copy when typing in inputs/SQL editor or when the user has a text selection.
+- **Per-file column widths**: resizing a column now persists the width in the file's view config (per table, alongside column colors/order/hidden flags) and is restored on the next open.
+
+### Fixed
+- **Large text-stored numbers no longer shown in scientific notation** when using "Open in Excel". The xlsx exporter now respects the declared SQLite column type — `VARCHAR`/`TEXT`/`CLOB` columns stay as strings, so values like `123123123123` keep their original digits instead of being coerced to `f64`. Numeric columns (`INTEGER`, `REAL`, `NUMERIC`, ...) still export as numbers.
+
 ## [26.4.5] - 2026-04-13
 
 ### Fixed

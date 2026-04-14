@@ -56,10 +56,13 @@ export interface ViewConfig {
   column_order: string[];
   pinned_filters: Record<string, PinnedFilter>;
   pinned_global_filter: string | null;
+  column_widths: Record<string, number>;
 }
 
 export interface FileConfig {
   tables: Record<string, ViewConfig>;
+  tint: string | null;
+  label: string | null;
 }
 
 export interface SqlHistoryEntry {
@@ -78,7 +81,8 @@ export const appState = $state({
   loading: false,
   error: null as string | null,
   tableColumns: {} as Record<string, string[]>, // table name -> column names for autocomplete
-  fileConfig: { tables: {} } as FileConfig,
+  tableColumnTypes: {} as Record<string, Record<string, string>>, // table -> col -> declared type (for xlsx export)
+  fileConfig: { tables: {}, tint: null, label: null } as FileConfig,
   sqlHistory: (typeof localStorage !== "undefined"
     ? JSON.parse(localStorage.getItem("dblitz-sql-history") ?? "[]")
     : []) as SqlHistoryEntry[],
@@ -112,14 +116,21 @@ export async function openDatabase(path: string) {
     for (const t of Object.values(config.tables)) {
       if (!t.pinned_filters) t.pinned_filters = {};
       if (t.pinned_global_filter === undefined) t.pinned_global_filter = null;
+      if (!t.column_widths) t.column_widths = {};
     }
+    if (config.tint === undefined) config.tint = null;
+    if (config.label === undefined) config.label = null;
     // Fetch column names for all tables (for SQL autocomplete + as a
     // schema source for filter validation before the first query result).
     const colMap: Record<string, string[]> = {};
+    const typeMap: Record<string, Record<string, string>> = {};
     await Promise.all(tables.map(async (t) => {
       try {
         const cols = await invoke<ColumnInfo[]>("get_columns", { table: t.name });
         colMap[t.name] = cols.map((c) => c.name);
+        const tmap: Record<string, string> = {};
+        for (const c of cols) tmap[c.name] = c.col_type;
+        typeMap[t.name] = tmap;
       } catch { /* best-effort: autocomplete works without columns */ }
     }));
 
@@ -131,6 +142,7 @@ export async function openDatabase(path: string) {
     appState.dbPath = path;
     appState.fileConfig = config;
     appState.tableColumns = colMap;
+    appState.tableColumnTypes = typeMap;
     appState.tables = tables;
     // Single-table DBs: jump straight to Browse so the user sees data
     // immediately. Multi-table DBs leave the active tab alone — the user
@@ -154,7 +166,8 @@ export async function closeDatabase() {
   appState.dbPath = null;
   appState.tables = [];
   appState.tableColumns = {};
-  appState.fileConfig = { tables: {} };
+  appState.tableColumnTypes = {};
+  appState.fileConfig = { tables: {}, tint: null, label: null };
 }
 
 export function persistSqlHistory() {
@@ -190,6 +203,7 @@ const defaultViewConfig: ViewConfig = {
   column_order: [],
   pinned_filters: {},
   pinned_global_filter: null,
+  column_widths: {},
 };
 
 /** Read-only access — safe to call from templates/derived. */
@@ -209,6 +223,7 @@ export function ensureTableConfig(tableName: string): ViewConfig {
       column_order: [],
       pinned_filters: {},
       pinned_global_filter: null,
+      column_widths: {},
     };
   }
   return appState.fileConfig.tables[tableName];

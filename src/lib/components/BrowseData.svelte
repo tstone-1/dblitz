@@ -252,6 +252,16 @@
     saveViewConfig();
   }
 
+  function setColumnWidth(col: string, width: number) {
+    if (!selectedTable) return;
+    const cfg = ensureTableConfig(selectedTable);
+    cfg.column_widths[col] = width;
+    // Widths are a high-churn field compared to colors/hidden, but we only
+    // write on drag-end (DataGrid emits once per resize), so the save cost
+    // is bounded. No need to debounce further.
+    saveViewConfig();
+  }
+
   function getColumnColor(col: string): string {
     if (!selectedTable) return "";
     return getTableConfig(selectedTable).column_colors[col] || "";
@@ -455,6 +465,9 @@
           onTogglePinFilter={pinned.togglePinColumnFilter}
           onRevertFilter={pinned.revertColumnFilter}
           onClearFilter={pinned.clearColumnFilter}
+          initialColumnWidths={selectedTable ? (getTableConfig(selectedTable).column_widths ?? {}) : {}}
+          onResizeColumn={setColumnWidth}
+          columnTypes={selectedTable ? (appState.tableColumnTypes[selectedTable] ?? {}) : {}}
         />
       </div>
     {:else if selectedTable && loading}

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { onDestroy, tick } from "svelte";
+  import { onDestroy, tick, untrack } from "svelte";
   import { appState } from "$lib/store.svelte";
   import { createCellSelection } from "./cellSelection.svelte";
   import { createDragReorder } from "./dragReorder.svelte";
@@ -40,6 +40,15 @@
     onTogglePinFilter?: (col: string) => void;
     onRevertFilter?: (col: string) => void;
     onClearFilter?: (col: string) => void;
+    // Optional: persisted column widths (px). Drives initial layout; emits
+    // back via `onResizeColumn` once the user finishes a drag.
+    initialColumnWidths?: Record<string, number>;
+    onResizeColumn?: (col: string, width: number) => void;
+    // Optional: declared SQLite types per column (VARCHAR, INTEGER, ...).
+    // When provided, "Open in Excel" uses them to decide whether to emit
+    // numeric vs text cells so long text-like IDs don't get coerced to
+    // scientific notation.
+    columnTypes?: Record<string, string>;
   }
 
   let {
@@ -63,6 +72,9 @@
     onTogglePinFilter = undefined,
     onRevertFilter = undefined,
     onClearFilter = undefined,
+    initialColumnWidths = undefined,
+    onResizeColumn = undefined,
+    columnTypes = undefined,
   }: Props = $props();
 
   function pinStateOf(col: string): "none" | "pinned" | "modified" {
@@ -115,7 +127,8 @@
     return indices;
   }
 
-  // Column widths — plain object, not reactive
+  // Column widths — plain object, not reactive. The `$effect` below seeds
+  // this from `initialColumnWidths` so a reopened table reuses prior sizing.
   let columnWidths: Record<string, number> = {};
   let gridContainer: HTMLDivElement | undefined = $state();
 
@@ -161,6 +174,12 @@
   }
 
   function onResizeEnd() {
+    // Persist the final width once the drag ends (avoids thrashing
+    // saveViewConfig on every mousemove).
+    if (resizeCol && onResizeColumn) {
+      const w = columnWidths[resizeCol];
+      if (w) onResizeColumn(resizeCol, Math.round(w));
+    }
     resizeCol = null;
     document.removeEventListener('mousemove', onResizeMove);
     document.removeEventListener('mouseup', onResizeEnd);
@@ -263,18 +282,29 @@
   async function exportToExcel() {
     const data = getSelectionData();
     if (!data) return;
+    // Map each exported header to its declared SQLite type so the Rust side
+    // can respect TEXT affinity (VARCHAR stays text, INT/REAL becomes number).
+    const types = data.headers.map((h) => columnTypes?.[h] ?? "");
     try {
-      await invoke("export_to_xlsx", { headers: data.headers, rows: data.rows });
+      await invoke("export_to_xlsx", {
+        headers: data.headers,
+        rows: data.rows,
+        columnTypes: types,
+      });
     } catch (e) {
       appState.error = String(e);
     }
     ctxMenu = null;
   }
 
-  // Reset column widths when columns change
+  // Re-seed column widths only when the column set changes (table switch /
+  // new file). `initialColumnWidths` is untracked so saving a resized width
+  // back to config (which rebuilds the prop object in BrowseData) doesn't
+  // trigger a redundant resync on every drag-end.
   $effect(() => {
     void columns;
-    columnWidths = {};
+    columnWidths = { ...(untrack(() => initialColumnWidths) ?? {}) };
+    tick().then(syncGridTplToDOM);
   });
 
   onDestroy(() => {
@@ -317,6 +347,26 @@
     }
   }
 
+  // Ctrl+C copies the active selection. Attached at window level because the
+  // viewport isn't focusable — clicking a cell doesn't move focus there, so a
+  // listener on the viewport never sees the keystroke. We gate on "selection
+  // exists" and "not typing in an input" to avoid clobbering native copy
+  // behavior inside filter inputs, SQL editor, etc.
+  function handleWindowKeydown(e: KeyboardEvent) {
+    if (!(e.ctrlKey || e.metaKey) || e.key !== 'c') return;
+    if (!selection.sel) return;
+    const tag = (e.target as HTMLElement)?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    const active = document.activeElement as HTMLElement | null;
+    if (active?.isContentEditable) return;
+    // Don't override the browser's native copy when the user has a text
+    // selection (e.g. highlighted part of a cell value).
+    const textSel = window.getSelection();
+    if (textSel && textSel.toString().length > 0) return;
+    e.preventDefault();
+    copySelection(false);
+  }
+
   function handleHeaderKeydown(e: KeyboardEvent, col: string) {
     if (!onSort) return;
     if (e.key === "Enter" || e.key === " ") {
@@ -335,6 +385,8 @@
   }
   function closePinCtx() { pinCtx = null; }
 </script>
+
+<svelte:window onkeydown={handleWindowKeydown} />
 
 <div class="grid-container" bind:this={gridContainer}>
   <div class="scroll-viewport" role="grid" bind:this={scrollContainer} bind:clientHeight={viewportHeight} onscroll={handleScroll} onkeydown={handleGridKeydown}>

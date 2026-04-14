@@ -158,8 +158,14 @@ fn execute_sql(state: State<'_, Arc<DbState>>, sql: String) -> SqlResult {
 }
 
 #[tauri::command]
-fn export_to_xlsx(app: tauri::AppHandle, headers: Vec<String>, rows: Vec<Vec<String>>) -> Result<String, String> {
-    let path = db::export_to_xlsx(&headers, &rows)?;
+fn export_to_xlsx(
+    app: tauri::AppHandle,
+    headers: Vec<String>,
+    rows: Vec<Vec<String>>,
+    column_types: Option<Vec<String>>,
+) -> Result<String, String> {
+    let types = column_types.unwrap_or_default();
+    let path = db::export_to_xlsx(&headers, &rows, &types)?;
     // Open with default application via opener plugin (safe, cross-platform)
     use tauri_plugin_opener::OpenerExt;
     app.opener().open_path(&path, None::<&str>).str_err()?;

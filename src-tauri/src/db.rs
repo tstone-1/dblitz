@@ -657,9 +657,33 @@ pub fn count_rows(
         .map_err(|e| e.to_string())
 }
 
+/// Classify a SQLite declared column type as numeric-affinity or not, using
+/// the SQLite type-affinity rules (https://www.sqlite.org/datatype3.html §3.1).
+/// Anything with TEXT/BLOB affinity — VARCHAR, CHAR, CLOB, TEXT, BLOB — stays
+/// as a string in the xlsx so values like `123123123123` in a VARCHAR column
+/// don't get coerced to an f64 and rendered in scientific notation by Excel.
+fn is_numeric_affinity(declared: &str) -> bool {
+    let t = declared.to_ascii_uppercase();
+    // SQLite rule 1: INT wins first (e.g. `INTEGER`, `BIGINT`).
+    if t.contains("INT") {
+        return true;
+    }
+    // Rule 2: CHAR/CLOB/TEXT → TEXT affinity.
+    if t.contains("CHAR") || t.contains("CLOB") || t.contains("TEXT") {
+        return false;
+    }
+    // Rule 3: BLOB or empty → BLOB affinity. Keep as string.
+    if t.contains("BLOB") || t.is_empty() {
+        return false;
+    }
+    // Rules 4 & 5: REAL/FLOA/DOUB or NUMERIC → numeric.
+    true
+}
+
 pub fn export_to_xlsx(
     headers: &[String],
     rows: &[Vec<String>],
+    column_types: &[String],
 ) -> Result<String, String> {
     use rust_xlsxwriter::*;
 
@@ -670,19 +694,31 @@ pub fn export_to_xlsx(
     let mut wb = Workbook::new();
     let ws = wb.add_worksheet();
 
+    // Pre-compute per-column "should parse as number" to avoid re-uppercasing
+    // the declared type for every cell. If column_types is missing or shorter
+    // than headers (defensive), default to numeric-parse for unknown columns
+    // so existing callers that haven't been updated still behave as before.
+    let numeric: Vec<bool> = (0..headers.len())
+        .map(|i| column_types.get(i).is_none_or(|t| is_numeric_affinity(t)))
+        .collect();
+
     // Write data first (headers + rows) so the table range is populated
     for (ci, h) in headers.iter().enumerate() {
         ws.write_string(0, ci as u16, h).str_err()?;
     }
     for (ri, row) in rows.iter().enumerate() {
         for (ci, val) in row.iter().enumerate() {
-            // Try numeric parse for proper Excel formatting
-            if let Ok(n) = val.parse::<f64>() {
-                ws.write_number((ri + 1) as u32, ci as u16, n)
-                    .str_err()?;
+            // TEXT-affinity columns always write as string; numeric-affinity
+            // columns try f64 parse first and fall back to string for NULLs
+            // or malformed values.
+            if numeric.get(ci).copied().unwrap_or(true) {
+                if let Ok(n) = val.parse::<f64>() {
+                    ws.write_number((ri + 1) as u32, ci as u16, n).str_err()?;
+                } else {
+                    ws.write_string((ri + 1) as u32, ci as u16, val).str_err()?;
+                }
             } else {
-                ws.write_string((ri + 1) as u32, ci as u16, val)
-                    .str_err()?;
+                ws.write_string((ri + 1) as u32, ci as u16, val).str_err()?;
             }
         }
     }
