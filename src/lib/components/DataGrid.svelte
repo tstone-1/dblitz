@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { onDestroy, tick, untrack } from "svelte";
+  import { onDestroy, tick } from "svelte";
   import { appState } from "$lib/store.svelte";
   import { createCellSelection } from "./cellSelection.svelte";
   import { createDragReorder } from "./dragReorder.svelte";
@@ -44,6 +44,8 @@
     // back via `onResizeColumn` once the user finishes a drag.
     initialColumnWidths?: Record<string, number>;
     onResizeColumn?: (col: string, width: number) => void;
+    // Optional: reset all column widths to auto-fit
+    onResetColumnWidths?: () => void;
     // Optional: declared SQLite types per column (VARCHAR, INTEGER, ...).
     // When provided, "Open in Excel" uses them to decide whether to emit
     // numeric vs text cells so long text-like IDs don't get coerced to
@@ -74,6 +76,7 @@
     onClearFilter = undefined,
     initialColumnWidths = undefined,
     onResizeColumn = undefined,
+    onResetColumnWidths = undefined,
     columnTypes = undefined,
   }: Props = $props();
 
@@ -297,13 +300,13 @@
     ctxMenu = null;
   }
 
-  // Re-seed column widths only when the column set changes (table switch /
-  // new file). `initialColumnWidths` is untracked so saving a resized width
-  // back to config (which rebuilds the prop object in BrowseData) doesn't
-  // trigger a redundant resync on every drag-end.
+  // Re-seed column widths when the column set changes (table switch / new
+  // file) or when initialColumnWidths is updated externally (e.g. auto-fit).
+  // Drag-end saves cause a harmless resync (same values) — acceptable cost
+  // for letting auto-size updates propagate without an extra signalling prop.
   $effect(() => {
     void columns;
-    columnWidths = { ...(untrack(() => initialColumnWidths) ?? {}) };
+    columnWidths = { ...(initialColumnWidths ?? {}) };
     tick().then(syncGridTplToDOM);
   });
 
@@ -436,7 +439,7 @@
               <button
                 class="regex-toggle"
                 class:active={f?.is_regex ?? false}
-                title={f?.is_regex ? 'Regex mode' : 'Text mode'}
+                title={f?.is_regex ? 'Regex mode (e.g. foo|bar matches either)' : 'Text mode — use ; for OR (foo;bar). Toggle for regex (foo|bar).'}
                 onclick={() => onToggleRegex?.(col)}
               >.*</button>
               {#if onTogglePinFilter}
@@ -548,6 +551,9 @@
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div class="ctx-backdrop" onclick={closeHeaderCtx} oncontextmenu={(e) => { e.preventDefault(); closeHeaderCtx(); }}></div>
   <div class="ctx-menu" style="left: {headerCtx.x}px; top: {headerCtx.y}px;">
+    {#if onResetColumnWidths}
+      <button class="ctx-item" onclick={() => { onResetColumnWidths!(); closeHeaderCtx(); }}>Auto-fit column widths</button>
+    {/if}
     {#if onHideColumn}
       <button class="ctx-item" onclick={() => { onHideColumn!(headerCtx!.col); closeHeaderCtx(); }}>Hide column</button>
     {/if}
@@ -623,7 +629,7 @@
   .col-header {
     background: var(--bg-tertiary);
     font-weight: 600;
-    padding: 5px 8px;
+    padding: 5px 8px 5px 4px;
     user-select: none;
     position: relative;
   }
@@ -739,8 +745,11 @@
     position: relative; width: 100%; min-width: fit-content;
   }
 
-  .data-row {
-    border-bottom: 1px solid color-mix(in srgb, var(--border-color) 40%, transparent);
+  /* Row separator lives on each cell (not on .data-row) so that selected cells
+   * can override it via the box-shadow stack below. Keep `.data-cell.selected`
+   * declared AFTER this rule — same specificity (0,2,0), source order wins. */
+  .data-row .grid-cell {
+    box-shadow: inset 0 -1px 0 0 color-mix(in srgb, var(--border-color) 40%, transparent);
   }
 
   .data-row:hover .grid-cell {
@@ -752,7 +761,7 @@
   }
 
   .data-cell {
-    padding: 3px 8px;
+    padding: 3px 8px 3px 4px;
     user-select: none;
   }
 
@@ -768,10 +777,21 @@
     /* Selection edges drawn as inset box-shadows so they don't shrink the
      * content box and shift the cell text by 1px. The four edges compose
      * via CSS custom properties below. */
+    /* Baseline bottom shadow in selection-fill color keeps the row separator
+     * continuous across selected cells adjacent to non-selected cells (no
+     * 1px notch at the selection boundary). sel-bottom overrides it below. */
     box-shadow:
+      inset 0 -1px 0 0 color-mix(in srgb, var(--accent) 20%, transparent),
       inset 0 var(--sel-t, 0px) 0 0 var(--accent),
       inset calc(-1 * var(--sel-r, 0px)) 0 0 0 var(--accent),
       inset 0 calc(-1 * var(--sel-b, 0px)) 0 0 var(--accent),
+      inset var(--sel-l, 0px) 0 0 0 var(--accent);
+  }
+  .data-cell.selected.sel-bottom {
+    box-shadow:
+      inset 0 var(--sel-t, 0px) 0 0 var(--accent),
+      inset calc(-1 * var(--sel-r, 0px)) 0 0 0 var(--accent),
+      inset 0 -1px 0 0 var(--accent),
       inset var(--sel-l, 0px) 0 0 0 var(--accent);
   }
 

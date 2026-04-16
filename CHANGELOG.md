@@ -5,10 +5,19 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
-## [Unreleased]
+## [26.4.7] - 2026-04-16
 
 ### Added
+- **Auto-fit column widths**: columns now auto-size to fit their content (header + first 100 data rows) when a table is opened for the first time (no saved widths). Uses `canvas.measureText()` for fast, reflow-free measurement. Widths are clamped to 60–400 px and persisted to the per-file config.
+- **"Auto-fit column widths" in header context menu**: right-click any column header to recompute all column widths from current data, resetting any manual sizing.
 - **Recent-files dropdown shows window markers**: each entry renders its file's tint as a colored left border and its label as an inline pill, so PROD/QA distinctions are visible before the file is opened.
+
+### Changed
+- **Filter tooltip documents OR syntax**: the `.*` regex-toggle button now explains both paths — `foo;bar` for OR in text mode, `foo|bar` for alternation in regex mode — so the multi-value search feature is discoverable without docs.
+- **Tighter left padding in grid cells and headers**: left padding reduced from 8px to 4px (right padding unchanged) so cell content sits closer to the column border.
+
+### Fixed
+- **Cell selection fill renders solid across rows**: moved the row separator from the row element's `border-bottom` onto each cell as an `inset box-shadow`, so the blue selection fill is no longer cut by 1px grey stripes between rows and the dark outer selection border stays continuous down the left/right edges. Selected cells adjacent to non-selected cells now preserve a continuous fill-colored bottom line, eliminating the 1px notch at selection boundaries.
 
 ## [26.4.6] - 2026-04-14
 

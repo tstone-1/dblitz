@@ -145,6 +145,12 @@
     lastFilterState = globalFilter.trim() + JSON.stringify(columnFilters);
 
     await reloadData();
+
+    // Auto-fit column widths on first open (no saved widths for this table)
+    const widthCfg = getTableConfig(name).column_widths;
+    if (!widthCfg || Object.keys(widthCfg).length === 0) {
+      applyAutoWidths();
+    }
   }
 
   async function reloadData() {
@@ -260,6 +266,63 @@
     // write on drag-end (DataGrid emits once per resize), so the save cost
     // is bounded. No need to debounce further.
     saveViewConfig();
+  }
+
+  /** Compute reasonable column widths by measuring content with canvas. */
+  function computeAutoWidths(): Record<string, number> {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d')!;
+
+    const CELL_PAD = 24;   // 4px left + 8px right + border + buffer
+    const HDR_EXTRA = 24;  // sort arrow + pin glyph space
+    const MIN_W = 60;
+    const MAX_W = 400;
+    const MAX_SAMPLE = 100;
+
+    const vc = visCols();
+    const widths: Record<string, number> = {};
+    const chunk0 = rowCache.get(0) ?? [];
+    const n = Math.min(chunk0.length, MAX_SAMPLE);
+
+    for (const col of vc) {
+      // Keep font strings in sync with DataGrid.svelte .grid-cell font
+      // Header text (bold)
+      ctx.font = '600 12px "Cascadia Code","Cascadia Mono","Fira Code","Consolas",monospace';
+      let maxW = ctx.measureText(col).width + CELL_PAD + HDR_EXTRA;
+
+      // Data cells (normal weight)
+      ctx.font = '12px "Cascadia Code","Cascadia Mono","Fira Code","Consolas",monospace';
+      const ci = colIndexMap.get(col);
+      if (ci !== undefined) {
+        for (let i = 0; i < n; i++) {
+          const val = chunk0[i][ci];
+          if (val === null) {
+            const w = ctx.measureText('NULL').width + CELL_PAD;
+            if (w > maxW) maxW = w;
+          } else if (val) {
+            const w = ctx.measureText(val).width + CELL_PAD;
+            if (w > maxW) maxW = w;
+          }
+        }
+      }
+      widths[col] = Math.round(Math.min(MAX_W, Math.max(MIN_W, maxW)));
+    }
+    return widths;
+  }
+
+  /** Apply auto-fit widths and persist them. */
+  function applyAutoWidths() {
+    if (!selectedTable) return;
+    const widths = computeAutoWidths();
+    const cfg = ensureTableConfig(selectedTable);
+    cfg.column_widths = widths;
+    appState.fileConfig.tables[selectedTable] = { ...cfg };
+    saveViewConfig();
+  }
+
+  /** Reset saved widths and recompute from content. */
+  function resetColumnWidths() {
+    applyAutoWidths();
   }
 
   function getColumnColor(col: string): string {
@@ -467,6 +530,7 @@
           onClearFilter={pinned.clearColumnFilter}
           initialColumnWidths={selectedTable ? (getTableConfig(selectedTable).column_widths ?? {}) : {}}
           onResizeColumn={setColumnWidth}
+          onResetColumnWidths={resetColumnWidths}
           columnTypes={selectedTable ? (appState.tableColumnTypes[selectedTable] ?? {}) : {}}
         />
       </div>
