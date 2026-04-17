@@ -392,7 +392,7 @@
 <svelte:window onkeydown={handleWindowKeydown} />
 
 <div class="grid-container" bind:this={gridContainer}>
-  <div class="scroll-viewport" role="grid" bind:this={scrollContainer} bind:clientHeight={viewportHeight} onscroll={handleScroll} onkeydown={handleGridKeydown}>
+  <div class="scroll-viewport" role="grid" tabindex="0" bind:this={scrollContainer} bind:clientHeight={viewportHeight} onscroll={handleScroll} onkeydown={handleGridKeydown}>
     <!-- Sticky header stack: header row + (optional) filter row pinned together
          to avoid 1px subpixel drift between two independently-sticky elements -->
     <div class="sticky-header">

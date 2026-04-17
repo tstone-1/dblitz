@@ -86,14 +86,14 @@
       <div class="tables-columns">
         <div class="table-list">
           <div class="section-title">Tables</div>
-          {#each appState.tables as table}
+          {#each appState.tables as table (table.name)}
             <button
               class="table-item"
               class:selected={selectedTable === table.name}
               onclick={() => selectTable(table.name)}
             >
               <span class="table-name">{table.name}</span>
-              <span class="row-count">{table.row_count.toLocaleString()} rows</span>
+              <span class="row-count">{table.row_count < 0 ? '? rows' : `${table.row_count.toLocaleString()} rows`}</span>
             </button>
           {/each}
         </div>

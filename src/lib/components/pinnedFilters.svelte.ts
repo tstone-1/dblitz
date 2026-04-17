@@ -9,9 +9,9 @@
  */
 
 import {
-  appState,
   getTableConfig,
   ensureTableConfig,
+  commitTableConfig,
   saveViewConfig,
 } from "$lib/store.svelte";
 
@@ -82,7 +82,7 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
     if (!f || f.value.trim() === "") return; // no-op for empty input
     const cfg = ensureTableConfig(selectedTable);
     cfg.pinned_filters[col] = { value: f.value, is_regex: f.is_regex };
-    appState.fileConfig.tables[selectedTable] = { ...cfg };
+    commitTableConfig(selectedTable, cfg);
     saveViewConfig();
   }
 
@@ -92,7 +92,7 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
     const cfg = ensureTableConfig(selectedTable);
     if (!(col in cfg.pinned_filters)) return;
     delete cfg.pinned_filters[col];
-    appState.fileConfig.tables[selectedTable] = { ...cfg };
+    commitTableConfig(selectedTable, cfg);
     saveViewConfig();
   }
 
@@ -130,7 +130,7 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
     if (gf.trim() === "") return;
     const cfg = ensureTableConfig(selectedTable);
     cfg.pinned_global_filter = gf;
-    appState.fileConfig.tables[selectedTable] = { ...cfg };
+    commitTableConfig(selectedTable, cfg);
     saveViewConfig();
   }
 
@@ -140,7 +140,7 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
     const cfg = ensureTableConfig(selectedTable);
     if (cfg.pinned_global_filter == null) return;
     cfg.pinned_global_filter = null;
-    appState.fileConfig.tables[selectedTable] = { ...cfg };
+    commitTableConfig(selectedTable, cfg);
     saveViewConfig();
   }
 
@@ -191,7 +191,7 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
     const cfg = ensureTableConfig(selectedTable);
     cfg.pinned_filters = {};
     cfg.pinned_global_filter = null;
-    appState.fileConfig.tables[selectedTable] = { ...cfg };
+    commitTableConfig(selectedTable, cfg);
     saveViewConfig();
     deps.triggerReload();
   }

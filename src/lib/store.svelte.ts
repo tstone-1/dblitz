@@ -211,6 +211,17 @@ export function getTableConfig(tableName: string): ViewConfig {
   return appState.fileConfig.tables[tableName] ?? defaultViewConfig;
 }
 
+/**
+ * Re-publish a table config into appState after mutating its fields. Svelte 5's
+ * `$state` proxies are deep-reactive, but reassigning the entry with a fresh
+ * object is the most robust way to make sure every consumer (derived state,
+ * effects) sees the change — especially when a caller mutated multiple nested
+ * fields before publishing.
+ */
+export function commitTableConfig(tableName: string, cfg: ViewConfig) {
+  appState.fileConfig.tables[tableName] = { ...cfg };
+}
+
 /** Ensures a mutable config entry exists. Call from event handlers only. */
 export function ensureTableConfig(tableName: string): ViewConfig {
   if (!appState.fileConfig.tables[tableName]) {

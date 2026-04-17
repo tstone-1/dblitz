@@ -5,6 +5,7 @@
     appState,
     getTableConfig,
     ensureTableConfig,
+    commitTableConfig,
     saveViewConfig,
     type ColumnFilter,
     type QueryResult,
@@ -123,6 +124,9 @@
   }
 
   async function selectTable(name: string) {
+    // Cancel any pending debounced reload from the outgoing table so it can't
+    // fire against the incoming one and waste a round-trip.
+    if (filterDebounce) { clearTimeout(filterDebounce); filterDebounce = null; }
     selectedTable = name;
     // Pre-populate columns from the openDatabase-time autocomplete cache
     // so buildFilters() (called by reloadData below) sees the schema BEFORE
@@ -245,7 +249,7 @@
     const idx = cfg.hidden_columns.indexOf(col);
     if (idx >= 0) cfg.hidden_columns.splice(idx, 1);
     else cfg.hidden_columns.push(col);
-    appState.fileConfig.tables[selectedTable] = { ...cfg };
+    commitTableConfig(selectedTable, cfg);
     saveViewConfig();
   }
 
@@ -254,7 +258,7 @@
     const cfg = ensureTableConfig(selectedTable);
     if (color) cfg.column_colors[col] = color;
     else delete cfg.column_colors[col];
-    appState.fileConfig.tables[selectedTable] = { ...cfg };
+    commitTableConfig(selectedTable, cfg);
     saveViewConfig();
   }
 
@@ -316,7 +320,7 @@
     const widths = computeAutoWidths();
     const cfg = ensureTableConfig(selectedTable);
     cfg.column_widths = widths;
-    appState.fileConfig.tables[selectedTable] = { ...cfg };
+    commitTableConfig(selectedTable, cfg);
     saveViewConfig();
   }
 
@@ -376,7 +380,7 @@
     order.splice(fromIdx, 1);
     order.splice(toIdx, 0, fromCol);
     cfg.column_order = order;
-    appState.fileConfig.tables[selectedTable] = { ...cfg };
+    commitTableConfig(selectedTable, cfg);
     saveViewConfig();
   }
 
@@ -384,7 +388,7 @@
     if (!selectedTable) return;
     const cfg = ensureTableConfig(selectedTable);
     cfg.column_order = [];
-    appState.fileConfig.tables[selectedTable] = { ...cfg };
+    commitTableConfig(selectedTable, cfg);
     saveViewConfig();
   }
 
@@ -409,14 +413,14 @@
       </button>
       {#if !sidebarCollapsed}
         <div class="table-selector">
-          {#each appState.tables as table}
+          {#each appState.tables as table (table.name)}
             <button
               class="table-btn"
               class:selected={selectedTable === table.name}
               onclick={() => selectTable(table.name)}
             >
               {table.name}
-              <span class="cnt">{table.row_count.toLocaleString()}</span>
+              <span class="cnt">{table.row_count < 0 ? '?' : table.row_count.toLocaleString()}</span>
             </button>
           {/each}
         </div>

@@ -3,7 +3,7 @@ use regex::Regex;
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tracing::{info, error};
+use tracing::{info, warn, error};
 
 /// Escape a SQL identifier (table/column name) for safe use in double-quoted contexts.
 fn safe_ident(name: &str) -> String {
@@ -176,13 +176,19 @@ fn get_tables_inner(conn: &Connection) -> Result<Vec<TableInfo>, String> {
 
     let mut tables = Vec::new();
     for name in table_names {
+        // -1 signals "count unknown" to the frontend, which renders it as `?`.
+        // Swallowing to 0 used to hide legitimate access errors (corrupt page,
+        // missing index) behind a cheerful empty table.
         let count: i64 = conn
             .query_row(
                 &format!("SELECT COUNT(*) FROM \"{}\"", safe_ident(&name)),
                 [],
                 |row| row.get(0),
             )
-            .unwrap_or(0);
+            .unwrap_or_else(|e| {
+                warn!(table = %name, error = %e, "Failed to count rows");
+                -1
+            });
         tables.push(TableInfo { name, row_count: count });
     }
     Ok(tables)
@@ -706,13 +712,24 @@ pub fn export_to_xlsx(
     for (ci, h) in headers.iter().enumerate() {
         ws.write_string(0, ci as u16, h).str_err()?;
     }
+    // Excel stores all numbers as IEEE-754 f64, so integers outside ±2^53
+    // lose precision if written as numbers. Keep those as strings so values
+    // like bigint IDs survive the round-trip exactly.
+    const F64_EXACT_INT: i64 = 1i64 << 53;
     for (ri, row) in rows.iter().enumerate() {
         for (ci, val) in row.iter().enumerate() {
             // TEXT-affinity columns always write as string; numeric-affinity
-            // columns try f64 parse first and fall back to string for NULLs
-            // or malformed values.
+            // columns try i64 first (so large IDs don't downcast to f64),
+            // fall back to f64 for decimals, then to string for NULLs or
+            // malformed values.
             if numeric.get(ci).copied().unwrap_or(true) {
-                if let Ok(n) = val.parse::<f64>() {
+                if let Ok(n) = val.parse::<i64>() {
+                    if n.abs() <= F64_EXACT_INT {
+                        ws.write_number((ri + 1) as u32, ci as u16, n as f64).str_err()?;
+                    } else {
+                        ws.write_string((ri + 1) as u32, ci as u16, val).str_err()?;
+                    }
+                } else if let Ok(n) = val.parse::<f64>() {
                     ws.write_number((ri + 1) as u32, ci as u16, n).str_err()?;
                 } else {
                     ws.write_string((ri + 1) as u32, ci as u16, val).str_err()?;

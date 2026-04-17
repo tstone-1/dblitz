@@ -5,6 +5,19 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.4.8] - 2026-04-17
+
+### Fixed
+- **xlsx export preserves large integer IDs**: numeric-affinity columns now try `i64` parsing first and emit values beyond ±2^53 as strings instead of coercing to `f64`. Previously, a bigint-sized ID (e.g. snowflake IDs, large sequence keys) would silently lose precision when exported to Excel because xlsx stores all numbers as IEEE-754 doubles.
+- **Filter debounce cancelled on table switch**: switching tables mid-debounce no longer fires a stale reload against the new table ~500ms later.
+- **Row counts surface errors instead of hiding them**: if a `SELECT COUNT(*)` fails on a table (corrupt page, access issue), the sidebar now shows `?` and logs a warning, instead of silently reporting 0 rows.
+- **Graceful fallback when window handle is unavailable** on the duplicate-window detection path, instead of panicking.
+
+### Internal
+- Extracted `commitTableConfig` helper in `store.svelte.ts` to consolidate the 10 call sites that re-published table configs via spread — one place to touch when reactivity semantics change.
+- Added key expressions to the table-list `{#each}` loops so DOM reuse is correct when the table set changes.
+- Added `tabindex="0"` to the data grid viewport for keyboard-focus accessibility.
+
 ## [26.4.7] - 2026-04-16
 
 ### Added

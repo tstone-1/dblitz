@@ -41,11 +41,10 @@ fn update_window_title(app: &AppHandle, path: Option<&str>) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_title(&title);
         #[cfg(windows)]
-        {
+        if let Ok(hwnd) = window.hwnd() {
             use windows::core::w;
             use windows::Win32::Foundation::HANDLE;
             use windows::Win32::UI::WindowsAndMessaging::SetPropW;
-            let hwnd = window.hwnd().expect("main window hwnd");
             let hash = path.map(path_hash).unwrap_or(0);
             unsafe {
                 let _ = SetPropW(hwnd, w!("dblitz_db_path"), Some(HANDLE(hash as *mut _)));
