@@ -404,6 +404,7 @@
             tabindex={onSort ? 0 : -1}
             aria-sort={sortColumn === col ? (sortAsc ? 'ascending' : 'descending') : 'none'}
             class:sortable={onSort != null}
+            class:has-active-filter={(columnFilters?.[col]?.value ?? '').trim() !== ''}
             class:drag-over-header={reorder.reorderOverCol === col && reorder.reorderCol !== col}
             class:dragging={reorder.reorderCol === col}
             data-colidx={columns.indexOf(col)}
@@ -635,6 +636,9 @@
   }
   .col-header.sortable { cursor: pointer; }
   .col-header.sortable:hover { color: var(--accent); }
+  .col-header.has-active-filter {
+    box-shadow: inset 0 -3px 0 var(--accent);
+  }
 
   .resize-handle {
     position: absolute;
