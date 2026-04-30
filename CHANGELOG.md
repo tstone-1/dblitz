@@ -5,7 +5,7 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
-## [26.4.9] - Unreleased
+## [26.4.9] - 2026-04-30
 
 ### Added
 - **Find column (Ctrl+F)**: a search palette that locates any column by substring, intended for tables with hundreds of columns where horizontal scrolling alone is too slow. Type a fragment (e.g. `SLBU`) to filter the list, use Up/Down to navigate, Enter to scroll the grid to the matched header (centered) and pulse it briefly. Hidden columns appear in the results with a `hidden` badge and are unhidden automatically when located. Also reachable via the new **Find** button next to **Columns**.
