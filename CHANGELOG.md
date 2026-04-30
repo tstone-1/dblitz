@@ -14,6 +14,7 @@ Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 - Bumped npm devdeps to latest minor/patch: `svelte 5.55.5`, `@sveltejs/kit 2.58.0`, `vite 8.0.10`, `@codemirror/search 6.7.0`, `@codemirror/view 6.41.1`.
 - Bumped `rusqlite 0.34 → 0.39` (also `libsqlite3-sys 0.32 → 0.37`). All 22 unit tests pass; no API churn in the surface we use (Connection, Statement, Row, Value, params!).
 - Bumped `sha2 0.10 → 0.11`. `Digest` trait + `Sha256::new()` unchanged at our call site (Win32 path-hash for duplicate-window detection).
+- Bumped `windows 0.61 → 0.62`. Tauri still pins 0.61 transitively, so both versions live in the lockfile; the only place where they meet is `update_window_title`, which now rewraps `Tauri's HWND.0` into our 0.62 `HWND` (identical struct layout — `pub *mut c_void`). All other Win32 calls already use HWNDs sourced from EnumWindows so no further rewraps were needed.
 
 ## [26.4.8] - 2026-04-17
 

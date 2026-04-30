@@ -43,8 +43,13 @@ fn update_window_title(app: &AppHandle, path: Option<&str>) {
         #[cfg(windows)]
         if let Ok(hwnd) = window.hwnd() {
             use windows::core::w;
-            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::Foundation::{HANDLE, HWND};
             use windows::Win32::UI::WindowsAndMessaging::SetPropW;
+            // Tauri's windows-rs is pinned a version behind ours, so its
+            // HWND type is structurally identical but type-distinct. Both
+            // versions define HWND as `struct HWND(pub *mut c_void)`, so a
+            // pointer-equivalent rewrap is sound.
+            let hwnd = HWND(hwnd.0);
             let hash = path.map(path_hash).unwrap_or(0);
             unsafe {
                 let _ = SetPropW(hwnd, w!("dblitz_db_path"), Some(HANDLE(hash as *mut _)));
