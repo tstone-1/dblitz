@@ -5,6 +5,14 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.4.9] - Unreleased
+
+### Added
+- **Find column (Ctrl+F)**: a search palette that locates any column by substring, intended for tables with hundreds of columns where horizontal scrolling alone is too slow. Type a fragment (e.g. `SLBU`) to filter the list, use Up/Down to navigate, Enter to scroll the grid to the matched header (centered) and pulse it briefly. Hidden columns appear in the results with a `hidden` badge and are unhidden automatically when located. Also reachable via the new **Find** button next to **Columns**.
+
+### Internal
+- Bumped npm devdeps to latest minor/patch: `svelte 5.55.5`, `@sveltejs/kit 2.58.0`, `vite 8.0.10`, `@codemirror/search 6.7.0`, `@codemirror/view 6.41.1`.
+
 ## [26.4.8] - 2026-04-17
 
 ### Fixed

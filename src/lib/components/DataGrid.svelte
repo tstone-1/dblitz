@@ -51,6 +51,9 @@
     // numeric vs text cells so long text-like IDs don't get coerced to
     // scientific notation.
     columnTypes?: Record<string, string>;
+    // Optional: locate-column signal. Bumping `n` re-triggers the effect for
+    // the same column (e.g. user invokes Find on the same column twice).
+    locateRequest?: { col: string; n: number } | null;
   }
 
   let {
@@ -78,6 +81,7 @@
     onResizeColumn = undefined,
     onResetColumnWidths = undefined,
     columnTypes = undefined,
+    locateRequest = null,
   }: Props = $props();
 
   function pinStateOf(col: string): "none" | "pinned" | "modified" {
@@ -310,11 +314,46 @@
     tick().then(syncGridTplToDOM);
   });
 
+  // Locate-column: scroll the requested header into horizontal view and
+  // pulse a flash overlay on it. Triggered by parent bumping locateRequest.n;
+  // tick() lets a just-unhidden column render before we query the DOM.
+  // We track the previously-flashed header so a rapid second locate doesn't
+  // leave the first header stuck with the class (the timer for it would have
+  // been cleared by the new invocation).
+  let flashTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastLocatedHeader: HTMLElement | null = null;
+  $effect(() => {
+    if (!locateRequest) return;
+    const target = locateRequest.col;
+    void locateRequest.n;
+    tick().then(() => {
+      if (!gridContainer) return;
+      const idx = columns.indexOf(target);
+      if (idx < 0) return;
+      const header = gridContainer.querySelector<HTMLElement>(
+        `.col-header[data-colidx="${idx}"]`,
+      );
+      if (!header) return;
+      if (lastLocatedHeader && lastLocatedHeader !== header) {
+        lastLocatedHeader.classList.remove("locate-flash");
+      }
+      header.scrollIntoView({ inline: "center", block: "nearest", behavior: "auto" });
+      header.classList.remove("locate-flash");
+      // Force reflow so the animation restarts even if class was just removed
+      void header.offsetWidth;
+      header.classList.add("locate-flash");
+      lastLocatedHeader = header;
+      if (flashTimer) clearTimeout(flashTimer);
+      flashTimer = setTimeout(() => header.classList.remove("locate-flash"), 1100);
+    });
+  });
+
   onDestroy(() => {
     document.removeEventListener('mousemove', onResizeMove);
     document.removeEventListener('mouseup', onResizeEnd);
     selection.cleanup();
     reorder.destroy();
+    if (flashTimer) clearTimeout(flashTimer);
   });
 
   function getColor(col: string): string {
@@ -839,5 +878,22 @@
   }
   .col-header.dragging {
     opacity: 0.4;
+  }
+
+  /* Locate-column flash: a 1s tinted overlay so the user can spot the
+     scrolled-to column. The `locate-flash` class is added via JS in the
+     locate effect, so it must be `:global` — otherwise Svelte's CSS scoping
+     would rename it and the rule would silently fail to apply. */
+  .col-header:global(.locate-flash)::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
+    animation: col-locate-flash-fade 1000ms ease-out forwards;
+  }
+  @keyframes col-locate-flash-fade {
+    from { opacity: 1; }
+    to { opacity: 0; }
   }
 </style>

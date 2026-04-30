@@ -660,7 +660,7 @@ dependencies = [
 
 [[package]]
 name = "dblitz"
-version = "26.4.8"
+version = "26.4.9"
 dependencies = [
  "dirs",
  "hex",

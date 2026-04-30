@@ -12,6 +12,7 @@
   } from "$lib/store.svelte";
   import DataGrid from "./DataGrid.svelte";
   import ColumnSettings from "./ColumnSettings.svelte";
+  import ColumnFinder from "./ColumnFinder.svelte";
   import { createPinnedFilters } from "./pinnedFilters.svelte";
   import { createAutoSelectFirstTable } from "./autoSelectFirstTable.svelte";
 
@@ -28,6 +29,10 @@
   let loading = $state(false);
   let countPending = $state(false);
   let showColumnSettings = $state(false);
+  let showFinder = $state(false);
+  // Bumping `n` re-triggers the locate effect inside DataGrid even when the
+  // user picks the same column twice in a row.
+  let locateRequest = $state<{ col: string; n: number } | null>(null);
   let filterDebounce: ReturnType<typeof setTimeout> | null = null;
   let sidebarCollapsed = $state(false);
 
@@ -401,7 +406,30 @@
     }
     return colors;
   });
+
+  // Locate a column in the grid: unhide it first if needed, then bump the
+  // locate signal so DataGrid scrolls to and pulses the header.
+  function locateColumn(col: string) {
+    if (!selectedTable) return;
+    if (getTableConfig(selectedTable).hidden_columns.includes(col)) {
+      toggleColumnHidden(col);
+    }
+    locateRequest = { col, n: (locateRequest?.n ?? 0) + 1 };
+  }
+
+  // Ctrl+F opens the column finder. Gated to the browse tab so it doesn't
+  // intercept in SQL editor / structure tabs. preventDefault stops the webview
+  // from showing its own find UI.
+  function onWindowKeydown(e: KeyboardEvent) {
+    if (!(e.ctrlKey || e.metaKey) || e.key !== "f") return;
+    if (appState.activeTab !== "browse") return;
+    if (!selectedTable || columns.length === 0) return;
+    e.preventDefault();
+    showFinder = true;
+  }
 </script>
+
+<svelte:window onkeydown={onWindowKeydown} />
 
 {#if !appState.dbPath}
   <div class="empty">Open a SQLite database to browse data.</div>
@@ -495,6 +523,19 @@
             {/if}
           </div>
           <button onclick={() => (showColumnSettings = !showColumnSettings)} class="settings-btn">Columns</button>
+          <button
+            onclick={() => (showFinder = !showFinder)}
+            class="settings-btn find-col-btn"
+            title="Find column by name"
+            aria-label="Find column"
+          >
+            <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+              <circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+              <line x1="10.5" y1="10.5" x2="14" y2="14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <span>Find column</span>
+            <kbd class="kbd-hint">Ctrl+F</kbd>
+          </button>
           <span class="row-info">{countPending ? 'counting...' : `${totalRows.toLocaleString()} rows`}</span>
           {#if loading}<span class="loading-indicator">Loading...</span>{/if}
         </div>
@@ -536,6 +577,15 @@
           onResizeColumn={setColumnWidth}
           onResetColumnWidths={resetColumnWidths}
           columnTypes={selectedTable ? (appState.tableColumnTypes[selectedTable] ?? {}) : {}}
+          locateRequest={locateRequest}
+        />
+
+        <ColumnFinder
+          columns={allColsOrdered()}
+          hiddenColumns={selectedTable ? getTableConfig(selectedTable).hidden_columns : []}
+          open={showFinder}
+          onClose={() => (showFinder = false)}
+          onLocate={locateColumn}
         />
       </div>
     {:else if selectedTable && loading}
@@ -619,6 +669,7 @@
 
   .data-area {
     flex: 1; display: flex; flex-direction: column; overflow: hidden;
+    position: relative; /* anchor for ColumnFinder popover */
   }
 
   .filter-bar {
@@ -733,6 +784,22 @@
   }
 
   .settings-btn { font-size: 12px; padding: 3px 10px; }
+  .find-col-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 6px 3px 8px;
+  }
+  .find-col-btn .kbd-hint {
+    font-family: 'Cascadia Code', 'Cascadia Mono', 'Consolas', monospace;
+    font-size: 10px;
+    line-height: 1;
+    padding: 2px 4px;
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    color: var(--text-muted);
+    background: var(--bg-tertiary);
+  }
   .row-info { margin-left: auto; color: var(--text-secondary); font-size: 12px; }
   .loading-indicator { color: var(--warning); font-size: 11px; animation: pulse 1s infinite; }
   @keyframes pulse { 50% { opacity: 0.5; } }
