@@ -13,6 +13,7 @@ Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 ### Internal
 - Bumped npm devdeps to latest minor/patch: `svelte 5.55.5`, `@sveltejs/kit 2.58.0`, `vite 8.0.10`, `@codemirror/search 6.7.0`, `@codemirror/view 6.41.1`.
 - Bumped `rusqlite 0.34 → 0.39` (also `libsqlite3-sys 0.32 → 0.37`). All 22 unit tests pass; no API churn in the surface we use (Connection, Statement, Row, Value, params!).
+- Bumped `sha2 0.10 → 0.11`. `Digest` trait + `Sha256::new()` unchanged at our call site (Win32 path-hash for duplicate-window detection).
 
 ## [26.4.8] - 2026-04-17
 
