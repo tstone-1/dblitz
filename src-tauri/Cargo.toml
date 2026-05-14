@@ -1,0 +1,48 @@
+[package]
+name = "dblitz"
+version = "26.5.0"
+description = "Blazingly fast SQLite browser"
+authors = ["Timo Stein"]
+edition = "2021"
+
+[lib]
+name = "dblitz_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["devtools"] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.39", features = ["bundled"] }
+regex = "1"
+sha2 = "0.11"
+hex = "0.4"
+dirs = "6"
+parking_lot = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rust_xlsxwriter = "0.94.0"
+tauri-plugin-opener = "2.5.3"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+# Dev builds: optimize everything for near-release perf, keep debuginfo
+[profile.dev]
+opt-level = 1
+
+# Optimize all dependencies at full release level
+[profile.dev.package."*"]
+opt-level = 2
+
+# SQLite C code gets maximum optimization
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
