@@ -198,6 +198,7 @@ fn benchmark_query(
     db::benchmark_query(&state, &table, chunk_size)
 }
 
+#[cfg(debug_assertions)]
 #[tauri::command]
 fn toggle_devtools(app: tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -322,6 +323,7 @@ pub fn run() {
             export_to_xlsx,
             #[cfg(debug_assertions)]
             benchmark_query,
+            #[cfg(debug_assertions)]
             toggle_devtools,
             get_current_path,
             load_view_config,

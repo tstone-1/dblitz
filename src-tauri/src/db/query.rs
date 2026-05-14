@@ -356,7 +356,10 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
     }
 
     if where_clause.is_empty() {
-        if req.sort_column.is_none() {
+        // The sparse rowid index is chunk-based: it can answer "give me chunk N"
+        // cheaply, but arbitrary offsets inside a chunk must use LIMIT/OFFSET
+        // to preserve the public query_table contract.
+        if req.sort_column.is_none() && offset % limit == 0 {
             if let Some(result) = query_with_rowid_index(
                 conn,
                 state,
@@ -642,5 +645,46 @@ mod tests {
         close_database(&state);
         let _ = std::fs::remove_file(&first_path);
         let _ = std::fs::remove_file(&second_path);
+    }
+
+    #[test]
+    fn query_table_rowid_index_respects_non_chunk_aligned_offset() {
+        let state = DbState::new();
+        let path = create_temp_db_with_rows("offset", 1_200);
+
+        open_database(&state, path.to_str().unwrap()).unwrap();
+        query_table(
+            &state,
+            &QueryRequest {
+                table: "users".to_string(),
+                offset: 0,
+                limit: 500,
+                filters: vec![],
+                global_filter: String::new(),
+                sort_column: None,
+                sort_asc: true,
+            },
+        )
+        .unwrap();
+
+        let result = query_table(
+            &state,
+            &QueryRequest {
+                table: "users".to_string(),
+                offset: 750,
+                limit: 500,
+                filters: vec![],
+                global_filter: String::new(),
+                sort_column: None,
+                sort_asc: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.total_rows, 1_200);
+        assert_eq!(result.rows[0][1].as_deref(), Some("user_750"));
+
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
     }
 }

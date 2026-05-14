@@ -1,5 +1,6 @@
 <script lang="ts">
   import "../app.css";
+  import { dev } from "$app/environment";
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { appState, initTheme, openDatabase, closeDatabase } from "$lib/store.svelte";
@@ -23,6 +24,7 @@
     });
 
     function onKeyDown(e: KeyboardEvent) {
+      if (!dev) return;
       if (e.key === "F12") {
         e.preventDefault();
         invoke("toggle_devtools");

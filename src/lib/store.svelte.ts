@@ -73,6 +73,15 @@ export interface SqlHistoryEntry {
 
 export type Theme = "light" | "dark";
 
+function getLocalStorage(): Storage | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
 function isSqlHistoryEntry(value: unknown): value is SqlHistoryEntry {
   return typeof value === "object"
     && value !== null
@@ -81,21 +90,23 @@ function isSqlHistoryEntry(value: unknown): value is SqlHistoryEntry {
     && typeof (value as SqlHistoryEntry).error === "boolean";
 }
 
-function loadSqlHistory(): SqlHistoryEntry[] {
-  if (typeof localStorage === "undefined") return [];
+export function loadSqlHistory(): SqlHistoryEntry[] {
+  const storage = getLocalStorage();
+  if (!storage) return [];
 
   try {
-    const parsed = JSON.parse(localStorage.getItem("dblitz-sql-history") ?? "[]");
+    const parsed = JSON.parse(storage.getItem("dblitz-sql-history") ?? "[]");
     return Array.isArray(parsed) ? parsed.filter(isSqlHistoryEntry) : [];
   } catch {
     return [];
   }
 }
 
-function loadTheme(): Theme {
-  if (typeof localStorage === "undefined") return "light";
+export function loadTheme(): Theme {
+  const storage = getLocalStorage();
+  if (!storage) return "light";
 
-  const theme = localStorage.getItem("dblitz-theme");
+  const theme = storage.getItem("dblitz-theme");
   return theme === "dark" || theme === "light" ? theme : "light";
 }
 

@@ -198,7 +198,13 @@ dblitz/
 │   ├── src/
 │   │   ├── main.rs               # Entry point
 │   │   ├── lib.rs                # Tauri commands & setup
-│   │   ├── db.rs                 # SQLite operations
+│   │   ├── db/                   # SQLite operations
+│   │   │   ├── mod.rs            # Shared DB state, DTOs, helpers
+│   │   │   ├── schema.rs         # Open/close + schema introspection
+│   │   │   ├── query.rs          # Browse queries, filters, pagination
+│   │   │   ├── sql_exec.rs       # Read-only SQL execution
+│   │   │   ├── export.rs         # xlsx export
+│   │   │   └── benchmark.rs      # Debug-only query benchmark
 │   │   └── config.rs             # Per-DB config persistence
 │   ├── icons/                    # App icons
 │   ├── Cargo.toml                # Rust dependencies

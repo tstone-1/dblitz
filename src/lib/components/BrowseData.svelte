@@ -235,7 +235,7 @@
   // read/write would trigger downstream effects).
   let lastFilterState = "";
 
-  // Must match operator prefixes parsed in db.rs build_where_clause
+  // Must match operator prefixes parsed in db/query.rs build_where_clause
   const INCOMPLETE_OPS = /^(<|>|>=|<=|=)$/;
 
   function hasIncompleteFilter(): boolean {
