@@ -61,15 +61,21 @@ Download either `dblitz_<version>_x64-setup.exe` (installer, registers file asso
 
 ### macOS
 
-Download the `.dmg` matching your architecture: `aarch64` for Apple Silicon, `x64` for Intel. Drag the `.app` into `/Applications`.
+**Recommended — Homebrew:**
 
-> **First-launch quarantine workaround.** macOS Gatekeeper blocks unsigned downloaded apps with a misleading "damaged" message. Once, after copying to Applications, run:
->
-> ```
-> xattr -dr com.apple.quarantine /Applications/dblitz.app
-> ```
->
-> Then double-click normally. A Homebrew Cask is planned to make this automatic.
+```
+brew install --cask tstone-1/dblitz/dblitz
+```
+
+Homebrew strips the macOS quarantine attribute on cask installs, so the app opens normally on first launch.
+
+**Manual download:** grab the `.dmg` matching your architecture (`aarch64` for Apple Silicon, `x64` for Intel) and drag the `.app` into `/Applications`. macOS Gatekeeper refuses to open the unsigned app with a misleading "damaged" message, so once — after copying to Applications — run:
+
+```
+xattr -dr com.apple.quarantine /Applications/dblitz.app
+```
+
+Then double-click normally.
 
 ### Linux
 
