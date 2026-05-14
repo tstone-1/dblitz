@@ -38,7 +38,7 @@
 
   // Row cache: chunks keyed by chunk index
   let rowCache = $state<Map<number, (string | null)[][]>>(new Map());
-  let pendingChunks = new Set<number>();
+  let pendingChunks = new Map<number, Promise<void>>();
   let epoch = 0;
 
   // Auto-select the lone table when opening a single-table DB. The helper
@@ -97,35 +97,59 @@
     return vc.map((col) => fullRow[colIndexMap.get(col) ?? 0] ?? null);
   }
 
-  async function fetchChunk(chunkIdx: number) {
-    if (pendingChunks.has(chunkIdx)) return;
-    pendingChunks.add(chunkIdx);
+  function fetchChunk(chunkIdx: number): Promise<void> {
+    const pending = pendingChunks.get(chunkIdx);
+    if (pending) return pending;
     const myEpoch = epoch;
     const offset = chunkIdx * CHUNK_SIZE;
-    try {
-      const result = await invoke<QueryResult>("query_table", {
-        table: selectedTable,
-        offset,
-        limit: CHUNK_SIZE,
-        filters: buildFilters(),
-        globalFilter: globalFilter.trim(),
-        sortColumn,
-        sortAsc,
-      });
+    const request = (async () => {
+      try {
+        const result = await invoke<QueryResult>("query_table", {
+          table: selectedTable,
+          offset,
+          limit: CHUNK_SIZE,
+          filters: buildFilters(),
+          globalFilter: globalFilter.trim(),
+          sortColumn,
+          sortAsc,
+        });
 
-      if (myEpoch !== epoch) return;
+        if (myEpoch !== epoch) return;
 
-      if (result.total_rows >= 0) totalRows = result.total_rows;
-      if (columns.length === 0) columns = result.columns;
+        if (result.total_rows >= 0) totalRows = result.total_rows;
+        if (columns.length === 0) columns = result.columns;
 
-      const newCache = new Map(rowCache);
-      newCache.set(chunkIdx, result.rows);
-      rowCache = newCache;
-    } catch (e) {
-      if (myEpoch === epoch) appState.error = String(e);
-    } finally {
-      pendingChunks.delete(chunkIdx);
+        const newCache = new Map(rowCache);
+        newCache.set(chunkIdx, result.rows);
+        rowCache = newCache;
+      } catch (e) {
+        if (myEpoch === epoch) appState.error = String(e);
+      } finally {
+        pendingChunks.delete(chunkIdx);
+      }
+    })();
+    pendingChunks.set(chunkIdx, request);
+    return request;
+  }
+
+  async function ensureRowsLoaded(start: number, end: number): Promise<boolean> {
+    if (!selectedTable) return false;
+    const clampedStart = Math.max(0, start);
+    const clampedEnd = Math.min(Math.max(0, totalRows - 1), end);
+    if (clampedEnd < clampedStart) return true;
+    const myEpoch = epoch;
+    const firstChunk = Math.floor(clampedStart / CHUNK_SIZE);
+    const lastChunk = Math.floor(clampedEnd / CHUNK_SIZE);
+    const missing: Promise<void>[] = [];
+    for (let chunkIdx = firstChunk; chunkIdx <= lastChunk; chunkIdx++) {
+      if (!rowCache.has(chunkIdx)) missing.push(fetchChunk(chunkIdx));
     }
+    await Promise.all(missing);
+    if (myEpoch !== epoch) return false;
+    for (let chunkIdx = firstChunk; chunkIdx <= lastChunk; chunkIdx++) {
+      if (!rowCache.has(chunkIdx)) return false;
+    }
+    return true;
   }
 
   async function selectTable(name: string) {
@@ -558,6 +582,7 @@
           columns={visCols()}
           totalRows={totalRows}
           getRow={getVisibleRow}
+          ensureRowsLoaded={ensureRowsLoaded}
           sortColumn={sortColumn}
           sortAsc={sortAsc}
           onSort={handleSort}

@@ -175,7 +175,7 @@ npx kill-port 1420
 ## File Structure
 
 ```
-ECOdb/
+dblitz/
 ├── src/                          # Svelte frontend
 │   ├── routes/
 │   │   └── +page.svelte          # App shell

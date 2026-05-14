@@ -18,6 +18,7 @@
     // Virtual scroll mode: total count + getter
     totalRows?: number;
     getRow?: (index: number) => (string | null)[] | null;
+    ensureRowsLoaded?: (start: number, end: number) => Promise<boolean>;
     // Optional: called when user scrolls to trigger chunk loading
     onScroll?: (scrollTop: number, viewportHeight: number) => void;
     // Optional: sorting
@@ -61,6 +62,7 @@
     rows = undefined,
     totalRows: totalRowsProp = undefined,
     getRow: getRowProp = undefined,
+    ensureRowsLoaded = undefined,
     onScroll = undefined,
     sortColumn = null,
     sortAsc = true,
@@ -206,6 +208,7 @@
     avg: number | null;
     min: number | null;
     max: number | null;
+    partial: boolean;
   }
 
   const selStats = $derived.by((): SelectionStats | null => {
@@ -219,10 +222,15 @@
     let min = Infinity;
     let max = -Infinity;
     let count = 0;
+    let partial = sel.r1 > capRow;
     for (let r = sel.r0; r <= capRow; r++) {
       const row = getRowData(r);
+      if (!row) {
+        partial = true;
+        break;
+      }
       for (let c = sel.c0; c <= sel.c1; c++) {
-        const v = row ? row[c] : null;
+        const v = row[c];
         if (v === null || v === '') continue;
         const n = Number(v);
         if (Number.isNaN(n)) { allNumeric = false; break; }
@@ -236,10 +244,11 @@
     return {
       rows: nRows,
       cols: nCols,
-      sum: allNumeric && count > 0 ? sum : null,
-      avg: allNumeric && count > 0 ? sum / count : null,
-      min: allNumeric && count > 0 ? min : null,
-      max: allNumeric && count > 0 ? max : null,
+      sum: !partial && allNumeric && count > 0 ? sum : null,
+      avg: !partial && allNumeric && count > 0 ? sum / count : null,
+      min: !partial && allNumeric && count > 0 ? min : null,
+      max: !partial && allNumeric && count > 0 ? max : null,
+      partial,
     };
   });
 
@@ -259,14 +268,25 @@
 
   const MAX_COPY_ROWS = 100_000;
 
-  function getSelectionData(): { headers: string[]; rows: string[][] } | null {
+  async function getSelectionData(): Promise<{ headers: string[]; rows: string[][] } | null> {
     const b = sel;
     if (!b) return null;
+    const lastRow = Math.min(b.r1, b.r0 + MAX_COPY_ROWS - 1);
+    if (ensureRowsLoaded) {
+      const loaded = await ensureRowsLoaded(b.r0, lastRow);
+      if (!loaded) {
+        appState.error = "Could not load all selected rows for copy/export.";
+        return null;
+      }
+    }
     const headers = columns.slice(b.c0, b.c1 + 1);
     const selRows: string[][] = [];
-    const lastRow = Math.min(b.r1, b.r0 + MAX_COPY_ROWS - 1);
     for (let r = b.r0; r <= lastRow; r++) {
       const row = getRowData(r);
+      if (!row) {
+        appState.error = "Could not load all selected rows for copy/export.";
+        return null;
+      }
       const cells: string[] = [];
       for (let c = b.c0; c <= b.c1; c++) {
         cells.push(row ? (row[c] ?? '') : '');
@@ -277,7 +297,7 @@
   }
 
   async function copySelection(withHeaders: boolean) {
-    const data = getSelectionData();
+    const data = await getSelectionData();
     if (!data) return;
     const lines: string[] = [];
     if (withHeaders) lines.push(data.headers.join('\t'));
@@ -287,7 +307,7 @@
   }
 
   async function exportToExcel() {
-    const data = getSelectionData();
+    const data = await getSelectionData();
     if (!data) return;
     // Map each exported header to its declared SQLite type so the Rust side
     // can respect TEXT affinity (VARCHAR stays text, INT/REAL becomes number).
@@ -546,6 +566,9 @@
 {#if selStats}
   <div class="sel-status-bar">
     <span>{selStats.rows} row(s), {selStats.cols} column(s)</span>
+    {#if selStats.partial}
+      <span class="sel-stat">Stats partial</span>
+    {/if}
     {#if selStats.sum !== null}
       <span class="sel-stat">Sum: {fmtNum(selStats.sum)}</span>
       <span class="sel-stat">Avg: {fmtNum(selStats.avg!)}</span>

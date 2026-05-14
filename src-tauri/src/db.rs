@@ -3,7 +3,7 @@ use regex::Regex;
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 /// Escape a SQL identifier (table/column name) for safe use in double-quoted contexts.
 fn safe_ident(name: &str) -> String {
@@ -22,7 +22,7 @@ impl<T, E: std::fmt::Display> StrErr<T> for Result<T, E> {
 }
 
 /// Sparse rowid index: maps chunk_index → starting rowid for O(log n) seeks.
-/// Built once per table on first query, invalidated on table switch.
+/// Built once per table on first query, invalidated on close or database open.
 /// External writers cannot stale this cache because we open with
 /// `?immutable=1` — the connection sees a frozen snapshot for its lifetime.
 struct RowidIndex {
@@ -32,9 +32,13 @@ struct RowidIndex {
     total_rows: i64,
 }
 
+const MAX_QUERY_LIMIT: i64 = 10_000;
+
 pub struct DbState {
     pub conn: Mutex<Option<Connection>>,
     pub current_path: Mutex<Option<String>>,
+    /// Keyed as `"{table}\0{chunk_size}"` because rowid boundaries depend on
+    /// the page size used when building the sparse index.
     rowid_indexes: Mutex<HashMap<String, RowidIndex>>,
 }
 
@@ -159,6 +163,7 @@ pub fn open_database(state: &DbState, path: &str) -> Result<Vec<TableInfo>, Stri
 
     *state.conn.lock() = Some(conn);
     *state.current_path.lock() = Some(path.to_string());
+    state.rowid_indexes.lock().clear();
 
     Ok(tables)
 }
@@ -189,7 +194,10 @@ fn get_tables_inner(conn: &Connection) -> Result<Vec<TableInfo>, String> {
                 warn!(table = %name, error = %e, "Failed to count rows");
                 -1
             });
-        tables.push(TableInfo { name, row_count: count });
+        tables.push(TableInfo {
+            name,
+            row_count: count,
+        });
     }
     Ok(tables)
 }
@@ -273,17 +281,27 @@ fn read_row(row: &rusqlite::Row, col_count: usize) -> Vec<Option<String>> {
 /// This turns OFFSET-based queries into O(log n) rowid seeks.
 fn build_rowid_index(conn: &Connection, safe_table: &str, chunk_size: i64) -> Option<RowidIndex> {
     // Check if table has rowid
-    if conn.prepare(&format!("SELECT rowid FROM \"{}\" LIMIT 0", safe_table)).is_err() {
+    if conn
+        .prepare(&format!("SELECT rowid FROM \"{}\" LIMIT 0", safe_table))
+        .is_err()
+    {
         return None;
     }
 
     let total_rows: i64 = conn
-        .query_row(&format!("SELECT COUNT(*) FROM \"{}\"", safe_table), [], |row| row.get(0))
+        .query_row(
+            &format!("SELECT COUNT(*) FROM \"{}\"", safe_table),
+            [],
+            |row| row.get(0),
+        )
         .ok()?;
 
     // Scan all rowids in order — this reads only the B-tree keys, not row data
     let mut stmt = conn
-        .prepare(&format!("SELECT rowid FROM \"{}\" ORDER BY rowid ASC", safe_table))
+        .prepare(&format!(
+            "SELECT rowid FROM \"{}\" ORDER BY rowid ASC",
+            safe_table
+        ))
         .ok()?;
     let mut rows_iter = stmt.query([]).ok()?;
 
@@ -298,7 +316,10 @@ fn build_rowid_index(conn: &Connection, safe_table: &str, chunk_size: i64) -> Op
         idx += 1;
     }
 
-    Some(RowidIndex { boundaries, total_rows })
+    Some(RowidIndex {
+        boundaries,
+        total_rows,
+    })
 }
 
 fn get_column_names(conn: &Connection, safe_table: &str) -> Result<Vec<String>, String> {
@@ -353,10 +374,15 @@ fn build_where_clause(
                 }
             }
         } else {
+            if !columns.iter().any(|c| c == &f.column) {
+                continue;
+            }
             let col_escaped = safe_ident(&f.column);
 
             // Split on semicolon for multi-criteria: exclusions=AND, inclusions=OR
-            let criteria: Vec<&str> = f.value.split(';')
+            let criteria: Vec<&str> = f
+                .value
+                .split(';')
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
                 .collect();
@@ -376,7 +402,10 @@ fn build_where_clause(
                 if let Some(rest) = val.strip_prefix("<>") {
                     if rest.is_empty() {
                         // Bare <> means "non-empty"
-                        and_parts.push(format!("\"{}\" IS NOT NULL AND \"{}\" != ''", col_escaped, col_escaped));
+                        and_parts.push(format!(
+                            "\"{}\" IS NOT NULL AND \"{}\" != ''",
+                            col_escaped, col_escaped
+                        ));
                     } else {
                         // Exclude: NOT LIKE (inverse of default contains-match)
                         and_parts.push(format!("\"{}\" NOT LIKE ?", col_escaped));
@@ -428,7 +457,11 @@ fn build_where_clause(
         format!(" WHERE {}", where_parts.join(" AND "))
     };
 
-    Ok(WhereResult { clause, params, regex_filters })
+    Ok(WhereResult {
+        clause,
+        params,
+        regex_filters,
+    })
 }
 
 /// Execute a prepared statement and collect all rows into a Vec.
@@ -458,33 +491,44 @@ fn query_with_regex_filter(
     limit: i64,
     columns: Vec<String>,
 ) -> Result<QueryResult, String> {
-    let sql = format!("SELECT * FROM \"{}\"{}{}",safe_table, where_clause, order_clause);
+    let sql = format!(
+        "SELECT * FROM \"{}\"{}{}",
+        safe_table, where_clause, order_clause
+    );
     let mut stmt = conn.prepare(&sql).str_err()?;
     let col_count = stmt.column_count();
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-        params.iter().map(|p| p as &dyn rusqlite::types::ToSql).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+        .iter()
+        .map(|p| p as &dyn rusqlite::types::ToSql)
+        .collect();
 
-    let mut all_rows: Vec<Vec<Option<String>>> = Vec::new();
+    let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+    let mut matched_count = 0i64;
     let mut rows_iter = stmt.query(param_refs.as_slice()).str_err()?;
 
     while let Some(row) = rows_iter.next().str_err()? {
         let values = read_row(row, col_count);
         let matches = regex_filters.iter().all(|(idx, re)| {
-            values.get(*idx).and_then(|v| v.as_ref()).map(|s| re.is_match(s)).unwrap_or(false)
+            values
+                .get(*idx)
+                .and_then(|v| v.as_ref())
+                .map(|s| re.is_match(s))
+                .unwrap_or(false)
         });
         if matches {
-            all_rows.push(values);
+            if matched_count >= offset && (rows.len() as i64) < limit {
+                rows.push(values);
+            }
+            matched_count += 1;
         }
     }
 
-    let total_rows = all_rows.len() as i64;
-    let rows: Vec<Vec<Option<String>>> = all_rows
-        .into_iter()
-        .skip(offset as usize)
-        .take(limit as usize)
-        .collect();
-
-    Ok(QueryResult { columns, rows, total_rows, offset })
+    Ok(QueryResult {
+        columns,
+        rows,
+        total_rows: matched_count,
+        offset,
+    })
 }
 
 /// O(log n) seek using sparse rowid index — only when no filters/sort.
@@ -499,18 +543,19 @@ fn query_with_rowid_index(
     columns: Vec<String>,
 ) -> Option<Result<QueryResult, String>> {
     let chunk_idx = offset / limit;
+    let index_key = format!("{table}\0{limit}");
 
     // Build index lazily on first access. The connection is opened with
     // ?immutable=1, so the snapshot is frozen for the connection's lifetime
-    // and the cached index can never go stale until close_database.
+    // and the cached index can never go stale until the connection changes.
     let mut indexes = state.rowid_indexes.lock();
-    if !indexes.contains_key(table) {
+    if let std::collections::hash_map::Entry::Vacant(entry) = indexes.entry(index_key.clone()) {
         if let Some(idx) = build_rowid_index(conn, safe_table, limit) {
-            indexes.insert(table.to_string(), idx);
+            entry.insert(idx);
         }
     }
 
-    let idx = indexes.get(table)?;
+    let idx = indexes.get(&index_key)?;
     let total_rows = idx.total_rows;
     let chunk = chunk_idx as usize;
 
@@ -523,22 +568,34 @@ fn query_with_rowid_index(
         if chunk + 1 < idx.boundaries.len() {
             let end_rid = idx.boundaries[chunk + 1];
             (
-                format!("SELECT * FROM \"{}\" WHERE rowid >= ? AND rowid < ? ORDER BY rowid ASC", safe_table),
+                format!(
+                    "SELECT * FROM \"{}\" WHERE rowid >= ? AND rowid < ? ORDER BY rowid ASC",
+                    safe_table
+                ),
                 vec![Box::new(start_rid), Box::new(end_rid)],
             )
         } else {
             (
-                format!("SELECT * FROM \"{}\" WHERE rowid >= ? ORDER BY rowid ASC LIMIT ?", safe_table),
+                format!(
+                    "SELECT * FROM \"{}\" WHERE rowid >= ? ORDER BY rowid ASC LIMIT ?",
+                    safe_table
+                ),
                 vec![Box::new(start_rid), Box::new(limit)],
             )
         };
 
     drop(indexes); // release lock before querying
 
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = query_params.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        query_params.iter().map(|p| p.as_ref()).collect();
     let result = conn.prepare(&sql).str_err().and_then(|mut stmt| {
         let rows = collect_rows(&mut stmt, &param_refs)?;
-        Ok(QueryResult { columns, rows, total_rows, offset })
+        Ok(QueryResult {
+            columns,
+            rows,
+            total_rows,
+            offset,
+        })
     });
     Some(result)
 }
@@ -574,41 +631,61 @@ fn query_with_offset(
     let mut stmt = conn.prepare(&sql).str_err()?;
     let rows = collect_rows(&mut stmt, &param_refs)?;
 
-    Ok(QueryResult { columns, rows, total_rows, offset })
+    Ok(QueryResult {
+        columns,
+        rows,
+        total_rows,
+        offset,
+    })
 }
 
 /// Query a table with pagination, filtering, sorting, and regex support.
 /// Dispatches to the optimal strategy based on filters and sort state.
-pub fn query_table(
-    state: &DbState,
-    req: &QueryRequest,
-) -> Result<QueryResult, String> {
+pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, String> {
     let guard = state.conn.lock();
     let conn = guard.as_ref().ok_or("No database open")?;
 
     let table = &req.table;
     let offset = req.offset;
     let limit = req.limit;
+    if offset < 0 {
+        return Err("Invalid offset: must be non-negative".to_string());
+    }
+    if !(1..=MAX_QUERY_LIMIT).contains(&limit) {
+        return Err(format!(
+            "Invalid limit: must be between 1 and {MAX_QUERY_LIMIT}"
+        ));
+    }
     let safe_table = safe_ident(table);
     let columns = get_column_names(conn, &safe_table)?;
 
-    let WhereResult { clause: where_clause, params, regex_filters } =
-        build_where_clause(&columns, &req.filters, &req.global_filter)?;
+    let WhereResult {
+        clause: where_clause,
+        params,
+        regex_filters,
+    } = build_where_clause(&columns, &req.filters, &req.global_filter)?;
 
     let order_clause = match &req.sort_column {
-        Some(col) => format!(
+        Some(col) if columns.iter().any(|c| c == col) => format!(
             " ORDER BY \"{}\" {}",
             safe_ident(col),
             if req.sort_asc { "ASC" } else { "DESC" }
         ),
-        None => String::new(),
+        _ => String::new(),
     };
 
     // Path 1: Regex filters require full scan + in-memory filtering
     if !regex_filters.is_empty() {
         return query_with_regex_filter(
-            conn, &safe_table, &where_clause, &order_clause,
-            &params, &regex_filters, offset, limit, columns,
+            conn,
+            &safe_table,
+            &where_clause,
+            &order_clause,
+            &params,
+            &regex_filters,
+            offset,
+            limit,
+            columns,
         );
     }
 
@@ -616,7 +693,13 @@ pub fn query_table(
     if where_clause.is_empty() {
         if req.sort_column.is_none() {
             if let Some(result) = query_with_rowid_index(
-                conn, state, table, &safe_table, offset, limit, columns.clone(),
+                conn,
+                state,
+                table,
+                &safe_table,
+                offset,
+                limit,
+                columns.clone(),
             ) {
                 return result;
             }
@@ -624,19 +707,37 @@ pub fn query_table(
 
         // Fallback: custom sort or no rowid — use LIMIT/OFFSET with known count
         let total_rows: i64 = conn
-            .query_row(&format!("SELECT COUNT(*) FROM \"{}\"", safe_table), [], |row| row.get(0))
+            .query_row(
+                &format!("SELECT COUNT(*) FROM \"{}\"", safe_table),
+                [],
+                |row| row.get(0),
+            )
             .str_err()?;
 
         return query_with_offset(
-            conn, &safe_table, &where_clause, &order_clause,
-            &params, offset, limit, total_rows, columns,
+            conn,
+            &safe_table,
+            &where_clause,
+            &order_clause,
+            &params,
+            offset,
+            limit,
+            total_rows,
+            columns,
         );
     }
 
     // Path 3: With filters — LIMIT/OFFSET, count fetched separately by frontend
     query_with_offset(
-        conn, &safe_table, &where_clause, &order_clause,
-        &params, offset, limit, -1, columns,
+        conn,
+        &safe_table,
+        &where_clause,
+        &order_clause,
+        &params,
+        offset,
+        limit,
+        -1,
+        columns,
     )
 }
 
@@ -653,12 +754,17 @@ pub fn count_rows(
     let columns = get_column_names(conn, &safe_table)?;
 
     // Reuse shared helper; regex filters are ignored for count (applied in-memory by query_table)
-    let WhereResult { clause: where_clause, params, .. } =
-        build_where_clause(&columns, filters, global_filter)?;
+    let WhereResult {
+        clause: where_clause,
+        params,
+        ..
+    } = build_where_clause(&columns, filters, global_filter)?;
 
-    let sql = format!("SELECT COUNT(*) FROM \"{}\"{}",safe_table, where_clause);
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-        params.iter().map(|p| p as &dyn rusqlite::types::ToSql).collect();
+    let sql = format!("SELECT COUNT(*) FROM \"{}\"{}", safe_table, where_clause);
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+        .iter()
+        .map(|p| p as &dyn rusqlite::types::ToSql)
+        .collect();
     conn.query_row(&sql, param_refs.as_slice(), |row| row.get(0))
         .map_err(|e| e.to_string())
 }
@@ -725,7 +831,8 @@ pub fn export_to_xlsx(
             if numeric.get(ci).copied().unwrap_or(true) {
                 if let Ok(n) = val.parse::<i64>() {
                     if n.abs() <= F64_EXACT_INT {
-                        ws.write_number((ri + 1) as u32, ci as u16, n as f64).str_err()?;
+                        ws.write_number((ri + 1) as u32, ci as u16, n as f64)
+                            .str_err()?;
                     } else {
                         ws.write_string((ri + 1) as u32, ci as u16, val).str_err()?;
                     }
@@ -742,15 +849,19 @@ pub fn export_to_xlsx(
 
     // Add table with "Dark Teal, Table Style Medium 2" = TableStyleMedium2
     let last_row = rows.len() as u32; // 0-indexed: header is row 0, last data row
-    let last_col = if headers.is_empty() { 0 } else { (headers.len() - 1) as u16 };
-    let columns: Vec<TableColumn> = headers.iter()
+    let last_col = if headers.is_empty() {
+        0
+    } else {
+        (headers.len() - 1) as u16
+    };
+    let columns: Vec<TableColumn> = headers
+        .iter()
         .map(|h| TableColumn::new().set_header(h))
         .collect();
     let table = Table::new()
         .set_style(TableStyle::Medium2)
         .set_columns(&columns);
-    ws.add_table(0, 0, last_row, last_col, &table)
-        .str_err()?;
+    ws.add_table(0, 0, last_row, last_col, &table).str_err()?;
 
     // Autofit columns
     ws.autofit();
@@ -789,10 +900,17 @@ pub fn benchmark_query(
     let safe_table = safe_ident(table);
 
     let total: i64 = conn
-        .query_row(&format!("SELECT COUNT(*) FROM \"{}\"", safe_table), [], |row| row.get(0))
+        .query_row(
+            &format!("SELECT COUNT(*) FROM \"{}\"", safe_table),
+            [],
+            |row| row.get(0),
+        )
         .str_err()?;
 
     let limit = chunk_size;
+    if limit <= 0 {
+        return Err("chunk_size must be positive".to_string());
+    }
     let offsets: Vec<i64> = vec![0, total / 4, total / 2, total * 3 / 4];
 
     let mut results = Vec::new();
@@ -813,40 +931,63 @@ pub fn benchmark_query(
         drop(stmt);
         let elapsed = t0.elapsed().as_secs_f64() * 1000.0;
         results.push(BenchmarkResult {
-            label: "LIMIT/OFFSET".to_string(), offset: off, ms: elapsed, row_count: count,
+            label: "LIMIT/OFFSET".to_string(),
+            offset: off,
+            ms: elapsed,
+            row_count: count,
         });
     }
 
     // Method 2: rowid index seek
     // Build index if not already cached
     {
+        let index_key = format!("{table}\0{limit}");
         let mut indexes = state.rowid_indexes.lock();
-        if !indexes.contains_key(table) {
+        if let std::collections::hash_map::Entry::Vacant(entry) = indexes.entry(index_key) {
             let t0 = Instant::now();
             if let Some(idx) = build_rowid_index(conn, &safe_table, limit) {
                 let build_ms = t0.elapsed().as_secs_f64() * 1000.0;
                 results.push(BenchmarkResult {
-                    label: "index build".to_string(), offset: 0, ms: build_ms,
+                    label: "index build".to_string(),
+                    offset: 0,
+                    ms: build_ms,
                     row_count: idx.boundaries.len(),
                 });
-                indexes.insert(table.to_string(), idx);
+                entry.insert(idx);
             }
         }
     }
 
+    let index_key = format!("{table}\0{limit}");
     let indexes = state.rowid_indexes.lock();
-    if let Some(idx) = indexes.get(table) {
+    if let Some(idx) = indexes.get(&index_key) {
         for &off in &offsets {
             let chunk = (off / limit) as usize;
-            if chunk >= idx.boundaries.len() { continue; }
+            if chunk >= idx.boundaries.len() {
+                continue;
+            }
             let start_rid = idx.boundaries[chunk];
 
             let t0 = Instant::now();
             let (sql, p1, p2): (String, i64, i64) = if chunk + 1 < idx.boundaries.len() {
                 let end_rid = idx.boundaries[chunk + 1];
-                (format!("SELECT * FROM \"{}\" WHERE rowid >= ? AND rowid < ? ORDER BY rowid ASC", safe_table), start_rid, end_rid)
+                (
+                    format!(
+                        "SELECT * FROM \"{}\" WHERE rowid >= ? AND rowid < ? ORDER BY rowid ASC",
+                        safe_table
+                    ),
+                    start_rid,
+                    end_rid,
+                )
             } else {
-                (format!("SELECT * FROM \"{}\" WHERE rowid >= ? ORDER BY rowid ASC LIMIT ?", safe_table), start_rid, limit)
+                (
+                    format!(
+                        "SELECT * FROM \"{}\" WHERE rowid >= ? ORDER BY rowid ASC LIMIT ?",
+                        safe_table
+                    ),
+                    start_rid,
+                    limit,
+                )
             };
 
             let mut stmt = conn.prepare(&sql).str_err()?;
@@ -861,7 +1002,10 @@ pub fn benchmark_query(
             drop(stmt);
             let elapsed = t0.elapsed().as_secs_f64() * 1000.0;
             results.push(BenchmarkResult {
-                label: "rowid index".to_string(), offset: off, ms: elapsed, row_count: count,
+                label: "rowid index".to_string(),
+                offset: off,
+                ms: elapsed,
+                row_count: count,
             });
         }
     }
@@ -877,7 +1021,9 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
         Some(c) => c,
         None => {
             return SqlResult {
-                columns: vec![], rows: vec![], rows_affected: 0,
+                columns: vec![],
+                rows: vec![],
+                rows_affected: 0,
                 error: Some("No database open".to_string()),
             }
         }
@@ -893,7 +1039,9 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
         Ok(s) => s,
         Err(e) => {
             return SqlResult {
-                columns: vec![], rows: vec![], rows_affected: 0,
+                columns: vec![],
+                rows: vec![],
+                rows_affected: 0,
                 error: Some(e.to_string()),
             };
         }
@@ -923,7 +1071,12 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
                     Ok(Some(row)) => rows.push(read_row(row, col_count)),
                     Ok(None) => break,
                     Err(e) => {
-                        return SqlResult { columns, rows, rows_affected: 0, error: Some(e.to_string()) };
+                        return SqlResult {
+                            columns,
+                            rows,
+                            rows_affected: 0,
+                            error: Some(e.to_string()),
+                        };
                     }
                 }
             }
@@ -932,9 +1085,19 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
             } else {
                 None
             };
-            SqlResult { columns, rows, rows_affected: 0, error }
+            SqlResult {
+                columns,
+                rows,
+                rows_affected: 0,
+                error,
+            }
         }
-        Err(e) => SqlResult { columns: vec![], rows: vec![], rows_affected: 0, error: Some(e.to_string()) },
+        Err(e) => SqlResult {
+            columns: vec![],
+            rows: vec![],
+            rows_affected: 0,
+            error: Some(e.to_string()),
+        },
     };
 }
 
@@ -947,11 +1110,19 @@ mod tests {
     }
 
     fn filter(column: &str, value: &str) -> ColumnFilter {
-        ColumnFilter { column: column.to_string(), value: value.to_string(), is_regex: false }
+        ColumnFilter {
+            column: column.to_string(),
+            value: value.to_string(),
+            is_regex: false,
+        }
     }
 
     fn regex_filter(column: &str, value: &str) -> ColumnFilter {
-        ColumnFilter { column: column.to_string(), value: value.to_string(), is_regex: true }
+        ColumnFilter {
+            column: column.to_string(),
+            value: value.to_string(),
+            is_regex: true,
+        }
     }
 
     #[test]
@@ -1141,6 +1312,72 @@ mod tests {
         (state, path)
     }
 
+    fn create_temp_db_with_rows(name: &str, row_count: usize) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("dblitz_test_{name}_{nanos}.sqlite"));
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")
+            .unwrap();
+        for idx in 0..row_count {
+            conn.execute(
+                "INSERT INTO users (name) VALUES (?)",
+                [format!("user_{idx}")],
+            )
+            .unwrap();
+        }
+
+        path
+    }
+
+    #[test]
+    fn open_database_clears_rowid_index_cache_between_files() {
+        let state = DbState::new();
+        let first_path = create_temp_db_with_rows("first", 3);
+        let second_path = create_temp_db_with_rows("second", 7);
+
+        open_database(&state, first_path.to_str().unwrap()).unwrap();
+        let first = query_table(
+            &state,
+            &QueryRequest {
+                table: "users".to_string(),
+                offset: 0,
+                limit: 2,
+                filters: vec![],
+                global_filter: String::new(),
+                sort_column: None,
+                sort_asc: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(first.total_rows, 3);
+
+        open_database(&state, second_path.to_str().unwrap()).unwrap();
+        let second = query_table(
+            &state,
+            &QueryRequest {
+                table: "users".to_string(),
+                offset: 0,
+                limit: 2,
+                filters: vec![],
+                global_filter: String::new(),
+                sort_column: None,
+                sort_asc: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(second.total_rows, 7);
+        assert_eq!(second.rows.len(), 2);
+
+        close_database(&state);
+        let _ = std::fs::remove_file(&first_path);
+        let _ = std::fs::remove_file(&second_path);
+    }
+
     #[test]
     fn execute_sql_rejects_writes_with_friendly_message() {
         let (state, path) = setup_temp_db_with_table();
@@ -1166,7 +1403,11 @@ mod tests {
 
         let result = execute_sql(&state, "SELECT name FROM users");
 
-        assert!(result.error.is_none(), "SELECT should succeed, got: {:?}", result.error);
+        assert!(
+            result.error.is_none(),
+            "SELECT should succeed, got: {:?}",
+            result.error
+        );
         assert_eq!(result.columns, vec!["name"]);
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0].as_deref(), Some("alice"));

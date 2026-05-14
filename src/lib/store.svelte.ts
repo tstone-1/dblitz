@@ -73,6 +73,32 @@ export interface SqlHistoryEntry {
 
 export type Theme = "light" | "dark";
 
+function isSqlHistoryEntry(value: unknown): value is SqlHistoryEntry {
+  return typeof value === "object"
+    && value !== null
+    && typeof (value as SqlHistoryEntry).sql === "string"
+    && typeof (value as SqlHistoryEntry).timestamp === "number"
+    && typeof (value as SqlHistoryEntry).error === "boolean";
+}
+
+function loadSqlHistory(): SqlHistoryEntry[] {
+  if (typeof localStorage === "undefined") return [];
+
+  try {
+    const parsed = JSON.parse(localStorage.getItem("dblitz-sql-history") ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter(isSqlHistoryEntry) : [];
+  } catch {
+    return [];
+  }
+}
+
+function loadTheme(): Theme {
+  if (typeof localStorage === "undefined") return "light";
+
+  const theme = localStorage.getItem("dblitz-theme");
+  return theme === "dark" || theme === "light" ? theme : "light";
+}
+
 // Global reactive state
 export const appState = $state({
   dbPath: null as string | null,
@@ -83,12 +109,8 @@ export const appState = $state({
   tableColumns: {} as Record<string, string[]>, // table name -> column names for autocomplete
   tableColumnTypes: {} as Record<string, Record<string, string>>, // table -> col -> declared type (for xlsx export)
   fileConfig: { tables: {}, tint: null, label: null } as FileConfig,
-  sqlHistory: (typeof localStorage !== "undefined"
-    ? JSON.parse(localStorage.getItem("dblitz-sql-history") ?? "[]")
-    : []) as SqlHistoryEntry[],
-  theme: (typeof localStorage !== "undefined"
-    ? (localStorage.getItem("dblitz-theme") as Theme) ?? "light"
-    : "light") as Theme,
+  sqlHistory: loadSqlHistory(),
+  theme: loadTheme(),
 });
 
 export function setTheme(theme: Theme) {
