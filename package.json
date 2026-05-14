@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "quality": "npm run check && npm run build && cd src-tauri && cargo fmt --check && cargo test && cargo clippy --all-targets --all-features -- -D warnings",
     "tauri": "tauri"
   },
   "license": "MIT",

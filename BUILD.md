@@ -25,6 +25,9 @@ Starts the Tauri dev server with hot-reload for frontend changes. Rust backend c
 ### Code Quality Commands
 
 ```bash
+# Full local quality gate
+npm run quality
+
 # Frontend type-check
 npm run check
 
@@ -63,6 +66,7 @@ cd src-tauri && cargo fmt
 - [ ] No npm vulnerabilities: `npm audit`
 
 **Code quality:**
+- [ ] Full local quality gate passes: `npm run quality`
 - [ ] Frontend type-check passes: `npm run check`
 - [ ] Rust linter passes: `cd src-tauri && cargo clippy`
 - [ ] All changes tested and working: `npm run tauri dev`
