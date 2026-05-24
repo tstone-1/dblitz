@@ -15,6 +15,7 @@
   import ColumnFinder from "./ColumnFinder.svelte";
   import { createPinnedFilters } from "./pinnedFilters.svelte";
   import { createAutoSelectFirstTable } from "./autoSelectFirstTable.svelte";
+  import { createVirtualRows } from "./virtualRows.svelte";
 
   const CHUNK_SIZE = 500;
   const FILTER_DEBOUNCE_MS = 500;
@@ -35,11 +36,6 @@
   let locateRequest = $state<{ col: string; n: number } | null>(null);
   let filterDebounce: ReturnType<typeof setTimeout> | null = null;
   let sidebarCollapsed = $state(false);
-
-  // Row cache: chunks keyed by chunk index
-  let rowCache = $state<Map<number, (string | null)[][]>>(new Map());
-  let pendingChunks = new Map<number, Promise<void>>();
-  let epoch = 0;
 
   // Auto-select the lone table when opening a single-table DB. The helper
   // owns the "did we already auto-select for this db path?" bookkeeping.
@@ -76,90 +72,37 @@
       .map(([col, f]) => ({ column: col, value: f.value, is_regex: f.is_regex }));
   }
 
-  function getRow(index: number): (string | null)[] | null {
-    const chunkIdx = Math.floor(index / CHUNK_SIZE);
-    const chunk = rowCache.get(chunkIdx);
-    if (!chunk) {
-      void fetchChunk(chunkIdx);
-      return null;
-    }
-    return chunk[index - chunkIdx * CHUNK_SIZE] ?? null;
-  }
-
   // Precomputed column name -> index for O(1) lookups
   let colIndexMap = $derived(new Map(columns.map((c, i) => [c, i])));
 
-  // Map visible column data back to full-row indices for DataGrid
-  function getVisibleRow(index: number): (string | null)[] | null {
-    const fullRow = getRow(index);
-    if (!fullRow) return null;
-    const vc = visCols();
-    return vc.map((col) => fullRow[colIndexMap.get(col) ?? 0] ?? null);
-  }
-
-  function fetchChunk(chunkIdx: number): Promise<void> {
-    const pending = pendingChunks.get(chunkIdx);
-    if (pending) return pending;
-    const myEpoch = epoch;
-    const offset = chunkIdx * CHUNK_SIZE;
-    let task: Promise<void>;
-    task = (async () => {
-      const result = await invoke<QueryResult>("query_table", {
-        table: selectedTable,
-        offset,
-        limit: CHUNK_SIZE,
-        filters: buildFilters(),
-        globalFilter: globalFilter.trim(),
-        sortColumn,
-        sortAsc,
-      });
-
-      if (myEpoch !== epoch) return;
-
-      if (result.total_rows !== null) totalRows = result.total_rows;
-      if (columns.length === 0) columns = result.columns;
-
-      const newCache = new Map(rowCache);
-      newCache.set(chunkIdx, result.rows);
-      rowCache = newCache;
-    })().catch((e) => {
-      if (myEpoch === epoch) appState.error = String(e);
-      throw e;
-    }).finally(() => {
-      if (pendingChunks.get(chunkIdx) === task) pendingChunks.delete(chunkIdx);
+  function loadChunk(
+    offset: number,
+    limit: number,
+    filters: ColumnFilter[] = buildFilters(),
+  ): Promise<QueryResult> {
+    return invoke<QueryResult>("query_table", {
+      table: selectedTable,
+      offset,
+      limit,
+      filters,
+      globalFilter: globalFilter.trim(),
+      sortColumn,
+      sortAsc,
     });
-
-    pendingChunks.set(chunkIdx, task);
-    return task;
   }
 
-  async function getVisibleRows(start: number, end: number): Promise<(string | null)[][]> {
-    if (!selectedTable) return [];
-    const myEpoch = epoch;
-    const firstChunk = Math.floor(start / CHUNK_SIZE);
-    const lastChunk = Math.floor(end / CHUNK_SIZE);
-    const loads: Promise<void>[] = [];
-    for (let chunkIdx = firstChunk; chunkIdx <= lastChunk; chunkIdx++) {
-      if (!rowCache.has(chunkIdx)) loads.push(fetchChunk(chunkIdx));
-    }
-    await Promise.all(loads);
-    if (myEpoch !== epoch) {
-      throw new Error("Selection changed while rows were loading. Try again.");
-    }
-
-    const vc = visCols();
-    const out: (string | null)[][] = [];
-    for (let idx = start; idx <= end; idx++) {
-      const chunkIdx = Math.floor(idx / CHUNK_SIZE);
-      const chunk = rowCache.get(chunkIdx);
-      const fullRow = chunk?.[idx - chunkIdx * CHUNK_SIZE];
-      if (!fullRow) {
-        throw new Error("Selection contains rows that could not be loaded.");
-      }
-      out.push(vc.map((col) => fullRow[colIndexMap.get(col) ?? 0] ?? null));
-    }
-    return out;
-  }
+  const virtualRows = createVirtualRows({
+    chunkSize: CHUNK_SIZE,
+    getSelectedTable: () => selectedTable,
+    loadChunk,
+    cancelQueries: () => invoke("cancel_queries"),
+    getVisibleColumns: () => visCols(),
+    getColumnIndex: (col) => colIndexMap.get(col),
+    hasColumns: () => columns.length > 0,
+    setColumns: (nextColumns) => { columns = nextColumns; },
+    setTotalRows: (nextTotalRows) => { totalRows = nextTotalRows; },
+    setError: (message) => { appState.error = message; },
+  });
 
   async function selectTable(name: string) {
     // Cancel any pending debounced reload from the outgoing table so it can't
@@ -204,24 +147,12 @@
   async function reloadData() {
     if (!selectedTable) return;
     loading = true;
-    epoch++;
-    const myEpoch = epoch;
-    await invoke("cancel_queries");
-    if (myEpoch !== epoch) return;
-    rowCache = new Map();
-    pendingChunks.clear();
+    const myEpoch = await virtualRows.beginReload();
+    if (myEpoch === null) return;
     try {
       const filters = buildFilters();
-
-      const result = await invoke<QueryResult>("query_table", {
-        table: selectedTable, offset: 0, limit: CHUNK_SIZE,
-        filters, globalFilter: globalFilter.trim(), sortColumn, sortAsc,
-      });
-
-      if (myEpoch !== epoch) return;
-
-      if (result.columns.length > 0) columns = result.columns;
-      rowCache = new Map([[0, result.rows]]);
+      const result = await loadChunk(0, CHUNK_SIZE, filters);
+      if (!virtualRows.applyFirstChunk(myEpoch, result)) return;
 
       if (result.total_rows !== null) {
         totalRows = result.total_rows;
@@ -232,7 +163,7 @@
         invoke<number>("count_rows", {
           table: selectedTable, filters, globalFilter: globalFilter.trim(),
         }).then((count) => {
-          if (myEpoch === epoch) {
+          if (virtualRows.isCurrent(myEpoch)) {
             totalRows = count;
             countPending = false;
           }
@@ -241,9 +172,9 @@
 
       await tick();
     } catch (e) {
-      if (myEpoch === epoch) appState.error = String(e);
+      if (virtualRows.isCurrent(myEpoch)) appState.error = String(e);
     } finally {
-      if (myEpoch === epoch) loading = false;
+      if (virtualRows.isCurrent(myEpoch)) loading = false;
     }
   }
 
@@ -331,7 +262,7 @@
 
     const vc = visCols();
     const widths: Record<string, number> = {};
-    const chunk0 = rowCache.get(0) ?? [];
+    const chunk0 = virtualRows.rowCache.get(0) ?? [];
     const n = Math.min(chunk0.length, MAX_SAMPLE);
 
     for (const col of vc) {
@@ -598,8 +529,8 @@
         <DataGrid
           columns={visCols()}
           totalRows={totalRows}
-          getRow={getVisibleRow}
-          getRows={getVisibleRows}
+          getRow={virtualRows.getVisibleRow}
+          getRows={virtualRows.getVisibleRows}
           sortColumn={sortColumn}
           sortAsc={sortAsc}
           onSort={handleSort}
