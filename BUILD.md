@@ -175,7 +175,7 @@ npx kill-port 1420
 ## File Structure
 
 ```
-ECOdb/
+dblitz/
 ├── src/                          # Svelte frontend
 │   ├── routes/
 │   │   └── +page.svelte          # App shell
@@ -194,7 +194,8 @@ ECOdb/
 │   ├── src/
 │   │   ├── main.rs               # Entry point
 │   │   ├── lib.rs                # Tauri commands & setup
-│   │   ├── db.rs                 # SQLite operations
+│   │   ├── db.rs                 # Database facade
+│   │   ├── db/                   # Schema/query/export/SQL modules
 │   │   └── config.rs             # Per-DB config persistence
 │   ├── icons/                    # App icons
 │   ├── Cargo.toml                # Rust dependencies

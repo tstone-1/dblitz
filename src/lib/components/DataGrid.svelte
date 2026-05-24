@@ -4,6 +4,7 @@
   import { appState } from "$lib/store.svelte";
   import { createCellSelection } from "./cellSelection.svelte";
   import { createDragReorder } from "./dragReorder.svelte";
+  import { buildSelectionData } from "./selectionData";
 
   const ROW_HEIGHT = 26;
   const HEADER_HEIGHT = 26;
@@ -18,6 +19,7 @@
     // Virtual scroll mode: total count + getter
     totalRows?: number;
     getRow?: (index: number) => (string | null)[] | null;
+    getRows?: (start: number, end: number) => Promise<(string | null)[][]>;
     // Optional: called when user scrolls to trigger chunk loading
     onScroll?: (scrollTop: number, viewportHeight: number) => void;
     // Optional: sorting
@@ -61,6 +63,7 @@
     rows = undefined,
     totalRows: totalRowsProp = undefined,
     getRow: getRowProp = undefined,
+    getRows: getRowsProp = undefined,
     onScroll = undefined,
     sortColumn = null,
     sortAsc = true,
@@ -206,6 +209,7 @@
     avg: number | null;
     min: number | null;
     max: number | null;
+    numericPending: boolean;
   }
 
   const selStats = $derived.by((): SelectionStats | null => {
@@ -219,10 +223,16 @@
     let min = Infinity;
     let max = -Infinity;
     let count = 0;
+    let numericPending = false;
     for (let r = sel.r0; r <= capRow; r++) {
       const row = getRowData(r);
+      if (!row) {
+        allNumeric = false;
+        numericPending = true;
+        break;
+      }
       for (let c = sel.c0; c <= sel.c1; c++) {
-        const v = row ? row[c] : null;
+        const v = row[c];
         if (v === null || v === '') continue;
         const n = Number(v);
         if (Number.isNaN(n)) { allNumeric = false; break; }
@@ -240,6 +250,7 @@
       avg: allNumeric && count > 0 ? sum / count : null,
       min: allNumeric && count > 0 ? min : null,
       max: allNumeric && count > 0 ? max : null,
+      numericPending,
     };
   });
 
@@ -249,6 +260,7 @@
 
   // Context menu
   let ctxMenu = $state<{ x: number; y: number } | null>(null);
+  let materializingSelection = $state(false);
 
   function handleContextMenu(e: MouseEvent, rowIdx: number) {
     const pos = selection.handleContextMenu(e, rowIdx);
@@ -259,49 +271,54 @@
 
   const MAX_COPY_ROWS = 100_000;
 
-  function getSelectionData(): { headers: string[]; rows: string[][] } | null {
-    const b = sel;
-    if (!b) return null;
-    const headers = columns.slice(b.c0, b.c1 + 1);
-    const selRows: string[][] = [];
-    const lastRow = Math.min(b.r1, b.r0 + MAX_COPY_ROWS - 1);
-    for (let r = b.r0; r <= lastRow; r++) {
-      const row = getRowData(r);
-      const cells: string[] = [];
-      for (let c = b.c0; c <= b.c1; c++) {
-        cells.push(row ? (row[c] ?? '') : '');
-      }
-      selRows.push(cells);
-    }
-    return { headers, rows: selRows };
-  }
-
   async function copySelection(withHeaders: boolean) {
-    const data = getSelectionData();
-    if (!data) return;
-    const lines: string[] = [];
-    if (withHeaders) lines.push(data.headers.join('\t'));
-    for (const row of data.rows) lines.push(row.join('\t'));
-    await navigator.clipboard.writeText(lines.join('\n'));
-    ctxMenu = null;
+    materializingSelection = true;
+    try {
+      const data = await buildSelectionData({
+        selection: sel,
+        columns,
+        getRow: getRowData,
+        getRows: getRowsProp,
+        maxRows: MAX_COPY_ROWS,
+      });
+      if (!data) return;
+      const lines: string[] = [];
+      if (withHeaders) lines.push(data.headers.join('\t'));
+      for (const row of data.rows) lines.push(row.join('\t'));
+      await navigator.clipboard.writeText(lines.join('\n'));
+      ctxMenu = null;
+    } catch (e) {
+      appState.error = String(e);
+    } finally {
+      materializingSelection = false;
+    }
   }
 
   async function exportToExcel() {
-    const data = getSelectionData();
-    if (!data) return;
-    // Map each exported header to its declared SQLite type so the Rust side
-    // can respect TEXT affinity (VARCHAR stays text, INT/REAL becomes number).
-    const types = data.headers.map((h) => columnTypes?.[h] ?? "");
+    materializingSelection = true;
     try {
+      const data = await buildSelectionData({
+        selection: sel,
+        columns,
+        getRow: getRowData,
+        getRows: getRowsProp,
+        maxRows: MAX_COPY_ROWS,
+      });
+      if (!data) return;
+      // Map each exported header to its declared SQLite type so the Rust side
+      // can respect TEXT affinity (VARCHAR stays text, INT/REAL becomes number).
+      const types = data.headers.map((h) => columnTypes?.[h] ?? "");
       await invoke("export_to_xlsx", {
         headers: data.headers,
         rows: data.rows,
         columnTypes: types,
       });
+      ctxMenu = null;
     } catch (e) {
       appState.error = String(e);
+    } finally {
+      materializingSelection = false;
     }
-    ctxMenu = null;
   }
 
   // Re-seed column widths when the column set changes (table switch / new
@@ -551,6 +568,8 @@
       <span class="sel-stat">Avg: {fmtNum(selStats.avg!)}</span>
       <span class="sel-stat">Min: {fmtNum(selStats.min!)}</span>
       <span class="sel-stat">Max: {fmtNum(selStats.max!)}</span>
+    {:else if selStats.numericPending}
+      <span class="sel-stat">Numeric stats loading</span>
     {/if}
   </div>
 {/if}
@@ -560,10 +579,10 @@
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div class="ctx-backdrop" onclick={closeContextMenu} oncontextmenu={(e) => { e.preventDefault(); closeContextMenu(); }}></div>
   <div class="ctx-menu" style="left: {ctxMenu.x}px; top: {ctxMenu.y}px;">
-    <button class="ctx-item" onclick={() => copySelection(false)}>Copy</button>
-    <button class="ctx-item" onclick={() => copySelection(true)}>Copy with headers</button>
+    <button class="ctx-item" disabled={materializingSelection} onclick={() => copySelection(false)}>Copy</button>
+    <button class="ctx-item" disabled={materializingSelection} onclick={() => copySelection(true)}>Copy with headers</button>
     <div class="ctx-sep"></div>
-    <button class="ctx-item" onclick={exportToExcel}>Open in Excel</button>
+    <button class="ctx-item" disabled={materializingSelection} onclick={exportToExcel}>Open in Excel</button>
   </div>
 {/if}
 

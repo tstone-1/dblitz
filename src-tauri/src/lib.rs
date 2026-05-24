@@ -2,9 +2,12 @@ mod config;
 mod db;
 
 use config::FileConfig;
-use db::{ColumnFilter, ColumnInfo, DbState, QueryRequest, QueryResult, SchemaEntry, SqlResult, StrErr, TableInfo};
 #[cfg(debug_assertions)]
 use db::BenchmarkResult;
+use db::{
+    ColumnFilter, ColumnInfo, DbState, QueryRequest, QueryResult, SchemaEntry, SqlResult, StrErr,
+    TableInfo,
+};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 
@@ -60,8 +63,8 @@ fn update_window_title(app: &AppHandle, path: Option<&str>) {
 
 #[cfg(windows)]
 fn set_app_user_model_id() {
-    use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
     use windows::core::w;
+    use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
     unsafe {
         let _ = SetCurrentProcessExplicitAppUserModelID(w!("com.dblitz.app"));
     }
@@ -144,7 +147,13 @@ fn query_table(
     sort_asc: bool,
 ) -> Result<QueryResult, String> {
     let req = QueryRequest {
-        table, offset, limit, filters, global_filter, sort_column, sort_asc,
+        table,
+        offset,
+        limit,
+        filters,
+        global_filter,
+        sort_column,
+        sort_asc,
     };
     db::query_table(&state, &req)
 }
@@ -215,10 +224,7 @@ fn load_view_config(state: State<'_, Arc<DbState>>) -> FileConfig {
 }
 
 #[tauri::command]
-fn save_view_config(
-    state: State<'_, Arc<DbState>>,
-    config: FileConfig,
-) -> Result<(), String> {
+fn save_view_config(state: State<'_, Arc<DbState>>, config: FileConfig) -> Result<(), String> {
     let path = state.current_path.lock();
     match path.as_ref() {
         Some(p) => config::save_config(p, &config),
@@ -301,7 +307,6 @@ pub fn run() {
         .try_init();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(db_state)

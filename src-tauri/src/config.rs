@@ -63,7 +63,9 @@ pub fn load_config(db_path: &str) -> FileConfig {
         match fs::read_to_string(&path) {
             Ok(s) => match serde_json::from_str(&s) {
                 Ok(config) => return config,
-                Err(e) => warn!(path = %path.display(), error = %e, "Config file corrupted, using defaults"),
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "Config file corrupted, using defaults")
+                }
             },
             Err(e) => warn!(path = %path.display(), error = %e, "Failed to read config file"),
         }
@@ -110,7 +112,9 @@ fn load_app_config_in(dir: &Path) -> AppConfig {
         match fs::read_to_string(&path) {
             Ok(s) => match serde_json::from_str::<AppConfig>(&s) {
                 Ok(c) => return c,
-                Err(e) => warn!(path = %path.display(), error = %e, "App config corrupted, using defaults"),
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "App config corrupted, using defaults")
+                }
             },
             Err(e) => warn!(path = %path.display(), error = %e, "Failed to read app config"),
         }
@@ -139,7 +143,9 @@ fn normalize_for_dedup(p: &str) -> String {
 fn push_recent_file_in(dir: &Path, path: &str) {
     let mut config = load_app_config_in(dir);
     let normalized = normalize_for_dedup(path);
-    config.recent_files.retain(|p| normalize_for_dedup(p) != normalized);
+    config
+        .recent_files
+        .retain(|p| normalize_for_dedup(p) != normalized);
     config.recent_files.insert(0, path.to_string());
     config.recent_files.truncate(RECENT_FILES_MAX);
     if let Err(e) = save_app_config_in(dir, &config) {
@@ -205,7 +211,11 @@ pub fn get_recent_files_enriched() -> Vec<RecentFile> {
         .into_iter()
         .map(|path| {
             let cfg = load_config(&path);
-            RecentFile { path, tint: cfg.tint, label: cfg.label }
+            RecentFile {
+                path,
+                tint: cfg.tint,
+                label: cfg.label,
+            }
         })
         .collect()
 }
