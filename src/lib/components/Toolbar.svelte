@@ -14,6 +14,11 @@
     { value: "#8050c0", name: "Purple" },
     { value: "#c04090", name: "Pink" },
   ];
+  const TINT_VALUES = new Set(TINT_PRESETS.map((preset) => preset.value).filter((value): value is string => value != null));
+
+  function safeTint(value: string | null): string | null {
+    return value && TINT_VALUES.has(value) ? value : null;
+  }
 
   function setTint(value: string | null) {
     appState.fileConfig.tint = value;
@@ -33,13 +38,13 @@
   // Mix tint with toolbar bg so the strip is tinted, not solid — keeps the UI
   // readable in both themes. 22% tint reads clearly without overwhelming.
   let toolbarStyle = $derived(
-    appState.fileConfig.tint
-      ? `background: color-mix(in srgb, ${appState.fileConfig.tint} 22%, var(--bg-secondary));`
+    safeTint(appState.fileConfig.tint)
+      ? `background: color-mix(in srgb, ${safeTint(appState.fileConfig.tint)} 22%, var(--bg-secondary));`
       : "",
   );
   let pillStyle = $derived(
-    appState.fileConfig.tint
-      ? `background: ${appState.fileConfig.tint}; color: white; border-color: ${appState.fileConfig.tint};`
+    safeTint(appState.fileConfig.tint)
+      ? `background: ${safeTint(appState.fileConfig.tint)}; color: white; border-color: ${safeTint(appState.fileConfig.tint)};`
       : "",
   );
 

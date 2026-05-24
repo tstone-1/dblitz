@@ -19,8 +19,15 @@ pub use types::{
 };
 pub(crate) use util::StrErr;
 
+pub fn cancel_queries(state: &DbState) {
+    state
+        .query_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub fn close_database(state: &DbState) {
     tracing::info!("Closing database");
+    cancel_queries(state);
     *state.conn.lock() = None;
     *state.current_path.lock() = None;
     state.rowid_indexes.lock().clear();

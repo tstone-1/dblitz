@@ -1,5 +1,6 @@
 use regex::Regex;
 use rusqlite::Connection;
+use std::sync::atomic::Ordering;
 
 use super::filters::{build_where_clause, WhereResult};
 use super::types::{ColumnFilter, DbState, QueryRequest, QueryResult, RowidIndex};
@@ -68,6 +69,8 @@ fn get_column_names(conn: &Connection, safe_table: &str) -> Result<Vec<String>, 
 #[allow(clippy::too_many_arguments)]
 fn query_with_regex_filter(
     conn: &Connection,
+    state: &DbState,
+    generation: u64,
     safe_table: &str,
     where_clause: &str,
     order_clause: &str,
@@ -93,6 +96,9 @@ fn query_with_regex_filter(
     let mut rows_iter = stmt.query(param_refs.as_slice()).str_err()?;
 
     while let Some(row) = rows_iter.next().str_err()? {
+        if state.query_generation.load(Ordering::Relaxed) != generation {
+            return Err("Query cancelled by a newer request".to_string());
+        }
         let values = read_row(row, col_count);
         let matches = regex_filters.iter().all(|(idx, re)| {
             values
@@ -112,7 +118,7 @@ fn query_with_regex_filter(
     Ok(QueryResult {
         columns,
         rows,
-        total_rows: matched,
+        total_rows: Some(matched),
         offset,
     })
 }
@@ -180,7 +186,7 @@ fn query_with_rowid_index(
         Ok(QueryResult {
             columns,
             rows,
-            total_rows,
+            total_rows: Some(total_rows),
             offset,
         })
     });
@@ -196,7 +202,7 @@ fn query_with_offset(
     params: &[String],
     offset: i64,
     limit: i64,
-    total_rows: i64,
+    total_rows: Option<i64>,
     columns: Vec<String>,
 ) -> Result<QueryResult, String> {
     let sql = format!(
@@ -226,8 +232,16 @@ fn query_with_offset(
 }
 
 pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, String> {
+    if req.limit <= 0 {
+        return Err("Query limit must be greater than zero".to_string());
+    }
+    if req.offset < 0 {
+        return Err("Query offset must be zero or greater".to_string());
+    }
+
     let guard = state.conn.lock();
     let conn = guard.as_ref().ok_or("No database open")?;
+    let generation = state.query_generation.load(Ordering::Relaxed);
 
     let table = &req.table;
     let offset = req.offset;
@@ -258,6 +272,8 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
     if !regex_filters.is_empty() {
         return query_with_regex_filter(
             conn,
+            state,
+            generation,
             &safe_table,
             &where_clause,
             &order_clause,
@@ -270,7 +286,7 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
     }
 
     if where_clause.is_empty() {
-        if req.sort_column.is_none() {
+        if req.sort_column.is_none() && offset % limit == 0 {
             if let Some(result) = query_with_rowid_index(
                 conn,
                 state,
@@ -300,7 +316,7 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
             &params,
             offset,
             limit,
-            total_rows,
+            Some(total_rows),
             columns,
         );
     }
@@ -313,7 +329,7 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
         &params,
         offset,
         limit,
-        -1,
+        None,
         columns,
     )
 }
@@ -347,6 +363,9 @@ pub fn count_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::schema::open_database;
+    use rusqlite::params;
+    use tempfile::TempDir;
 
     fn regex_filter(column: &str, value: &str) -> ColumnFilter {
         ColumnFilter {
@@ -362,6 +381,21 @@ mod tests {
         let state = DbState::new();
         *state.conn.lock() = Some(conn);
         state
+    }
+
+    fn temp_db_with_items(dir: &TempDir, name: &str, count: usize) -> std::path::PathBuf {
+        let path = dir.path().join(name);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);")
+            .unwrap();
+        for idx in 0..count {
+            conn.execute(
+                "INSERT INTO items (name) VALUES (?)",
+                params![format!("{name}-{idx}")],
+            )
+            .unwrap();
+        }
+        path
     }
 
     #[test]
@@ -414,7 +448,7 @@ mod tests {
 
         let result = query_table(&state, &req).unwrap();
 
-        assert_eq!(result.total_rows, 1_200);
+        assert_eq!(result.total_rows, Some(1_200));
         assert_eq!(result.rows.len(), 7);
         assert_eq!(result.rows[0][1].as_deref(), Some("match-5"));
         assert_eq!(result.rows[6][1].as_deref(), Some("match-11"));
@@ -464,5 +498,89 @@ mod tests {
             query_table(&state, &second).unwrap().rows[0][1].as_deref(),
             Some("item-1000")
         );
+    }
+
+    #[test]
+    fn open_database_clears_rowid_indexes() {
+        let dir = TempDir::new().unwrap();
+        let first_path = temp_db_with_items(&dir, "first.sqlite", 1_500);
+        let second_path = temp_db_with_items(&dir, "second.sqlite", 700);
+        let state = DbState::new();
+
+        open_database(&state, first_path.to_str().unwrap()).unwrap();
+        let first = QueryRequest {
+            table: "items".to_string(),
+            offset: 1_000,
+            limit: 500,
+            filters: vec![],
+            global_filter: String::new(),
+            sort_column: None,
+            sort_asc: true,
+        };
+        assert_eq!(query_table(&state, &first).unwrap().total_rows, Some(1_500));
+
+        open_database(&state, second_path.to_str().unwrap()).unwrap();
+        let second = QueryRequest {
+            table: "items".to_string(),
+            offset: 0,
+            limit: 500,
+            filters: vec![],
+            global_filter: String::new(),
+            sort_column: None,
+            sort_asc: true,
+        };
+        let result = query_table(&state, &second).unwrap();
+
+        assert_eq!(result.total_rows, Some(700));
+        assert_eq!(result.rows[0][1].as_deref(), Some("second.sqlite-0"));
+    }
+
+    #[test]
+    fn query_table_rejects_zero_limit() {
+        let state = state_with_memory_db("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);");
+        let req = QueryRequest {
+            table: "items".to_string(),
+            offset: 0,
+            limit: 0,
+            filters: vec![],
+            global_filter: String::new(),
+            sort_column: None,
+            sort_asc: true,
+        };
+
+        let err = query_table(&state, &req).unwrap_err();
+
+        assert!(err.contains("limit"));
+    }
+
+    #[test]
+    fn query_table_non_boundary_offset_uses_requested_page() {
+        let state = state_with_memory_db("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);");
+        {
+            let mut guard = state.conn.lock();
+            let conn = guard.as_mut().unwrap();
+            let tx = conn.transaction().unwrap();
+            for idx in 0..1_000 {
+                tx.execute(
+                    "INSERT INTO items (name) VALUES (?)",
+                    [format!("item-{idx}")],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let req = QueryRequest {
+            table: "items".to_string(),
+            offset: 250,
+            limit: 500,
+            filters: vec![],
+            global_filter: String::new(),
+            sort_column: None,
+            sort_asc: true,
+        };
+
+        let result = query_table(&state, &req).unwrap();
+
+        assert_eq!(result.rows[0][1].as_deref(), Some("item-250"));
     }
 }

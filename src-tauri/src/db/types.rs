@@ -2,6 +2,7 @@ use parking_lot::Mutex;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 
 /// Sparse rowid index: maps chunk_index -> starting rowid for O(log n) seeks.
 /// Built once per table on first query, invalidated on table switch.
@@ -20,6 +21,7 @@ pub struct DbState {
     pub conn: Mutex<Option<Connection>>,
     pub current_path: Mutex<Option<String>>,
     pub(super) rowid_indexes: Mutex<HashMap<String, RowidIndex>>,
+    pub(super) query_generation: AtomicU64,
 }
 
 impl DbState {
@@ -28,6 +30,7 @@ impl DbState {
             conn: Mutex::new(None),
             current_path: Mutex::new(None),
             rowid_indexes: Mutex::new(HashMap::new()),
+            query_generation: AtomicU64::new(0),
         }
     }
 }
@@ -78,7 +81,7 @@ pub struct QueryRequest {
 pub struct QueryResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Option<String>>>,
-    pub total_rows: i64,
+    pub total_rows: Option<i64>,
     pub offset: i64,
 }
 

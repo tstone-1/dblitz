@@ -31,7 +31,7 @@ export interface ColumnFilter {
 export interface QueryResult {
   columns: string[];
   rows: (string | null)[][];
-  total_rows: number;
+  total_rows: number | null;
   offset: number;
 }
 

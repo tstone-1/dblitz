@@ -1,4 +1,5 @@
 use rusqlite::{Connection, OpenFlags};
+use std::sync::atomic::Ordering;
 use tracing::{error, info, warn};
 
 use super::types::{ColumnInfo, DbState, SchemaEntry, TableInfo};
@@ -6,6 +7,7 @@ use super::util::{path_to_sqlite_uri, safe_ident, StrErr};
 
 pub fn open_database(state: &DbState, path: &str) -> Result<Vec<TableInfo>, String> {
     info!(path, "Opening database (read-only, immutable)");
+    state.query_generation.fetch_add(1, Ordering::Relaxed);
     // dblitz is a viewer, not an editor. Two layers of read-only:
     //   1. SQLITE_OPEN_READ_ONLY at the connection layer.
     //   2. ?immutable=1 in the URI tells SQLite to treat the file as a
@@ -22,6 +24,7 @@ pub fn open_database(state: &DbState, path: &str) -> Result<Vec<TableInfo>, Stri
 
     *state.conn.lock() = Some(conn);
     *state.current_path.lock() = Some(path.to_string());
+    state.rowid_indexes.lock().clear();
 
     Ok(tables)
 }
