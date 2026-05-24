@@ -110,4 +110,4 @@ See [BUILD.md](BUILD.md) for prerequisites, dev workflow, code-quality checks, b
 
 ## License
 
-MIT — see `package.json`.
+MIT — see [LICENSE](LICENSE).
