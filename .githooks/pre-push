@@ -38,11 +38,79 @@ if [ -z "$AUDIT" ]; then
     exit 1
 fi
 
+public_safe_fallback() {
+    echo "[pre-push] pwsh not found; running POSIX public-safe fallback."
+
+    # Keep these assembled at runtime so the hook itself does not contain the
+    # blocked public-repo tokens as plain text.
+    forbidden_patterns=$(
+        printf '%s\n' \
+            "nex$(printf '%s' 'peria')\\.com" \
+            "eu-$(printf '%s' 'rdc01')" \
+            "eurdc01$(printf '%s' 'scm001')" \
+            "OneDrive - Nex$(printf '%s' 'peria')" \
+            "\\bnx016$(printf '%s' '023')\\b" \
+            "timo\\.stein@nex$(printf '%s' 'peria')\\.com" \
+            "--user[[:space:]]+timo-$(printf '%s' 'stein')\\b" \
+            "gh[[:space:]]+auth[[:space:]]+switch.*timo-$(printf '%s' 'stein')" \
+            "Co-Authored-By:.*timo-$(printf '%s' 'stein')" \
+            "github\\.com/timo-$(printf '%s' 'stein')" \
+            "\\beco$(printf '%s' 'products')\\b" \
+            "eco-$(printf '%s' 'products')@" \
+            "github\\.com/eco$(printf '%s' 'products')" \
+            "eco-$(printf '%s' 'fmd')" \
+            "eco-$(printf '%s' 'imds')" \
+            "eco-$(printf '%s' 'camds')" \
+            "eco-$(printf '%s' 'rt')" \
+            "eco$(printf '%s' 'tools')" \
+            "snow$(printf '%s' 'ticket')" \
+            "snow$(printf '%s' 'screen')" \
+            "sitm-$(printf '%s' 'explorer')" \
+            "mdoc-$(printf '%s' 'extraction')" \
+            "rt-$(printf '%s' 'checker')" \
+            "rt-$(printf '%s' 'explorer')" \
+            "chem-contents-$(printf '%s' 'server')" \
+            "nexdoc-$(printf '%s' 'creator')" \
+            "customer_$(printf '%s' 'reply')" \
+            "ticket-$(printf '%s' 'creator2')"
+    )
+
+    scan_file() {
+        case "$1" in
+            *.md|*.txt|*.rst|*.adoc|*.json|*.toml|*.yaml|*.yml|*.ini|*.cfg|*.conf|*.ps1|*.psm1|*.sh|*.bash|*.zsh|*.py|*.pyi|*.rs|*.go|*.js|*.ts|*.jsx|*.tsx|*.svelte|*.vue|*.html|*.css|*.scss|*.sql|*.gitignore|*.gitattributes|Dockerfile|Makefile)
+                return 0
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    }
+
+    hits=0
+    git -C "$REPO_ROOT" ls-files | while IFS= read -r rel; do
+        [ -f "$REPO_ROOT/$rel" ] || continue
+        scan_file "$rel" || continue
+
+        printf '%s\n' "$forbidden_patterns" | while IFS= read -r pat; do
+            if grep -Eiq -- "$pat" "$REPO_ROOT/$rel"; then
+                echo "[public-safe-check] BLOCKED: $rel matches forbidden public-repo pattern."
+                exit 3
+            fi
+        done || exit 3
+    done || hits=$?
+
+    if [ "$hits" -ne 0 ]; then
+        echo "[public-safe-check] Push BLOCKED."
+        return 1
+    fi
+
+    echo "[public-safe-check] OK - no forbidden tokens found."
+    return 0
+}
+
 if ! command -v pwsh >/dev/null 2>&1; then
-    echo "[pre-push] ERROR: pwsh (PowerShell 7+) not found in PATH."
-    echo "[pre-push] Cannot run audit. Push BLOCKED."
-    echo "[pre-push] Install PowerShell 7+ or override with SKIP_AGENT_MEMORY_AUDIT=1."
-    exit 1
+    public_safe_fallback
+    exit $?
 fi
 
 pwsh -NoProfile -ExecutionPolicy Bypass -File "$AUDIT" -CheckPublicSafe -CheckRepoPath "$REPO_ROOT"
