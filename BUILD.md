@@ -28,14 +28,23 @@ Starts the Tauri dev server with hot-reload for frontend changes. Rust backend c
 # Frontend type-check
 npm run check
 
+# Frontend unit tests
+npm test
+
 # Rust check (no full build)
 cd src-tauri && cargo check
 
 # Rust linter
 cd src-tauri && cargo clippy
 
-# Rust formatter
+# Rust unit tests
+cd src-tauri && cargo test
+
+# Rust formatter (apply)
 cd src-tauri && cargo fmt
+
+# Rust formatter (CI-style, fails on diff)
+cd src-tauri && cargo fmt --check
 ```
 
 ## Build Output
