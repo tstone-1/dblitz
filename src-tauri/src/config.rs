@@ -45,6 +45,19 @@ pub struct FileConfig {
     pub label: Option<String>,
 }
 
+const TINT_PRESETS: &[&str] = &[
+    "#d94040", "#e0a030", "#4aa84a", "#3080d0", "#8050c0", "#c04090",
+];
+
+fn sanitize_tint(tint: Option<String>) -> Option<String> {
+    tint.filter(|value| TINT_PRESETS.contains(&value.as_str()))
+}
+
+fn sanitize_file_config(mut config: FileConfig) -> FileConfig {
+    config.tint = sanitize_tint(config.tint);
+    config
+}
+
 fn config_dir() -> PathBuf {
     let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
     base.join("dblitz")
@@ -62,7 +75,7 @@ pub fn load_config(db_path: &str) -> FileConfig {
     if path.exists() {
         match fs::read_to_string(&path) {
             Ok(s) => match serde_json::from_str(&s) {
-                Ok(config) => return config,
+                Ok(config) => return sanitize_file_config(config),
                 Err(e) => {
                     warn!(path = %path.display(), error = %e, "Config file corrupted, using defaults")
                 }
@@ -77,7 +90,7 @@ pub fn save_config(db_path: &str, config: &FileConfig) -> Result<(), String> {
     let dir = config_dir();
     fs::create_dir_all(&dir).str_err()?;
     let path = config_path_for_db(db_path);
-    let json = serde_json::to_string_pretty(config).str_err()?;
+    let json = serde_json::to_string_pretty(&sanitize_file_config(config.clone())).str_err()?;
     fs::write(&path, json).str_err()?;
     info!(path = %path.display(), "Saved view config");
     Ok(())
@@ -316,5 +329,28 @@ mod tests {
         // Read path must enforce the cap even though storage overflowed.
         let visible = get_recent_files_in(dir.path());
         assert_eq!(visible.len(), RECENT_FILES_MAX);
+    }
+
+    #[test]
+    fn sanitize_file_config_drops_unknown_tint() {
+        let config = FileConfig {
+            tint: Some("background: red".to_string()),
+            ..FileConfig::default()
+        };
+
+        assert_eq!(sanitize_file_config(config).tint, None);
+    }
+
+    #[test]
+    fn sanitize_file_config_keeps_preset_tint() {
+        let config = FileConfig {
+            tint: Some("#3080d0".to_string()),
+            ..FileConfig::default()
+        };
+
+        assert_eq!(
+            sanitize_file_config(config).tint.as_deref(),
+            Some("#3080d0")
+        );
     }
 }

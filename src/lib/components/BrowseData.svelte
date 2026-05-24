@@ -116,7 +116,7 @@
 
       if (myEpoch !== epoch) return;
 
-      if (result.total_rows >= 0) totalRows = result.total_rows;
+      if (result.total_rows !== null) totalRows = result.total_rows;
       if (columns.length === 0) columns = result.columns;
 
       const newCache = new Map(rowCache);
@@ -205,9 +205,11 @@
     if (!selectedTable) return;
     loading = true;
     epoch++;
+    const myEpoch = epoch;
+    await invoke("cancel_queries");
+    if (myEpoch !== epoch) return;
     rowCache = new Map();
     pendingChunks.clear();
-    const myEpoch = epoch;
     try {
       const filters = buildFilters();
 
@@ -221,7 +223,7 @@
       if (result.columns.length > 0) columns = result.columns;
       rowCache = new Map([[0, result.rows]]);
 
-      if (result.total_rows >= 0) {
+      if (result.total_rows !== null) {
         totalRows = result.total_rows;
         countPending = false;
       } else {

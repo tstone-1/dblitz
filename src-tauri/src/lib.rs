@@ -86,6 +86,11 @@ fn close_database(app: AppHandle, state: State<'_, Arc<DbState>>) {
 }
 
 #[tauri::command]
+fn cancel_queries(state: State<'_, Arc<DbState>>) {
+    db::cancel_queries(&state);
+}
+
+#[tauri::command]
 fn open_database(
     app: AppHandle,
     state: State<'_, Arc<DbState>>,
@@ -198,6 +203,7 @@ fn benchmark_query(
     db::benchmark_query(&state, &table, chunk_size)
 }
 
+#[cfg(debug_assertions)]
 #[tauri::command]
 fn toggle_devtools(app: tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -312,6 +318,7 @@ pub fn run() {
         .manage(db_state)
         .invoke_handler(tauri::generate_handler![
             close_database,
+            cancel_queries,
             open_database,
             get_tables,
             get_columns,
@@ -322,6 +329,7 @@ pub fn run() {
             export_to_xlsx,
             #[cfg(debug_assertions)]
             benchmark_query,
+            #[cfg(debug_assertions)]
             toggle_devtools,
             get_current_path,
             load_view_config,
