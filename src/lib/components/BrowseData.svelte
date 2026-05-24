@@ -38,7 +38,7 @@
 
   // Row cache: chunks keyed by chunk index
   let rowCache = $state<Map<number, (string | null)[][]>>(new Map());
-  let pendingChunks = new Set<number>();
+  let pendingChunks = new Map<number, Promise<void>>();
   let epoch = 0;
 
   // Auto-select the lone table when opening a single-table DB. The helper
@@ -80,7 +80,7 @@
     const chunkIdx = Math.floor(index / CHUNK_SIZE);
     const chunk = rowCache.get(chunkIdx);
     if (!chunk) {
-      fetchChunk(chunkIdx);
+      void fetchChunk(chunkIdx);
       return null;
     }
     return chunk[index - chunkIdx * CHUNK_SIZE] ?? null;
@@ -97,12 +97,13 @@
     return vc.map((col) => fullRow[colIndexMap.get(col) ?? 0] ?? null);
   }
 
-  async function fetchChunk(chunkIdx: number) {
-    if (pendingChunks.has(chunkIdx)) return;
-    pendingChunks.add(chunkIdx);
+  function fetchChunk(chunkIdx: number): Promise<void> {
+    const pending = pendingChunks.get(chunkIdx);
+    if (pending) return pending;
     const myEpoch = epoch;
     const offset = chunkIdx * CHUNK_SIZE;
-    try {
+    let task: Promise<void>;
+    task = (async () => {
       const result = await invoke<QueryResult>("query_table", {
         table: selectedTable,
         offset,
@@ -121,11 +122,43 @@
       const newCache = new Map(rowCache);
       newCache.set(chunkIdx, result.rows);
       rowCache = newCache;
-    } catch (e) {
+    })().catch((e) => {
       if (myEpoch === epoch) appState.error = String(e);
-    } finally {
-      pendingChunks.delete(chunkIdx);
+      throw e;
+    }).finally(() => {
+      if (pendingChunks.get(chunkIdx) === task) pendingChunks.delete(chunkIdx);
+    });
+
+    pendingChunks.set(chunkIdx, task);
+    return task;
+  }
+
+  async function getVisibleRows(start: number, end: number): Promise<(string | null)[][]> {
+    if (!selectedTable) return [];
+    const myEpoch = epoch;
+    const firstChunk = Math.floor(start / CHUNK_SIZE);
+    const lastChunk = Math.floor(end / CHUNK_SIZE);
+    const loads: Promise<void>[] = [];
+    for (let chunkIdx = firstChunk; chunkIdx <= lastChunk; chunkIdx++) {
+      if (!rowCache.has(chunkIdx)) loads.push(fetchChunk(chunkIdx));
     }
+    await Promise.all(loads);
+    if (myEpoch !== epoch) {
+      throw new Error("Selection changed while rows were loading. Try again.");
+    }
+
+    const vc = visCols();
+    const out: (string | null)[][] = [];
+    for (let idx = start; idx <= end; idx++) {
+      const chunkIdx = Math.floor(idx / CHUNK_SIZE);
+      const chunk = rowCache.get(chunkIdx);
+      const fullRow = chunk?.[idx - chunkIdx * CHUNK_SIZE];
+      if (!fullRow) {
+        throw new Error("Selection contains rows that could not be loaded.");
+      }
+      out.push(vc.map((col) => fullRow[colIndexMap.get(col) ?? 0] ?? null));
+    }
+    return out;
   }
 
   async function selectTable(name: string) {
@@ -139,6 +172,12 @@
     // the very first query after a table switch because `valid` is empty.
     columns = appState.tableColumns[name] ?? [];
     const cfg = ensureTableConfig(name);
+    if (cfg.sort_column && !columns.includes(cfg.sort_column)) {
+      cfg.sort_column = null;
+      cfg.sort_asc = true;
+      commitTableConfig(name, cfg);
+      saveViewConfig();
+    }
     sortColumn = cfg.sort_column;
     sortAsc = cfg.sort_asc;
     // Hydrate ephemeral filter state from pinned defaults.
@@ -558,6 +597,7 @@
           columns={visCols()}
           totalRows={totalRows}
           getRow={getVisibleRow}
+          getRows={getVisibleRows}
           sortColumn={sortColumn}
           sortAsc={sortAsc}
           onSort={handleSort}

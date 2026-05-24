@@ -10,9 +10,18 @@ Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 ### Added
 - **Find column (Ctrl+F)**: a search palette that locates any column by substring, intended for tables with hundreds of columns where horizontal scrolling alone is too slow. Type a fragment (e.g. `SLBU`) to filter the list, use Up/Down to navigate, Enter to scroll the grid to the matched header (centered) and pulse it briefly. Hidden columns appear in the results with a `hidden` badge and are unhidden automatically when located. Also reachable via the new **Find** button next to **Columns**.
 
+### Fixed
+- **Copy/export loads virtualized selection rows before serializing**: copying or opening a large selection in Excel now materializes unloaded chunks first instead of writing blank cells for rows that were not yet in the scroll cache.
+- **Defensive persisted-state recovery**: corrupt SQL history in browser storage now falls back to an empty history instead of breaking startup, and unsupported theme values fall back to light mode.
+- **Stale persisted sort columns are ignored and repaired** when a table schema changes, so a renamed/dropped column no longer breaks the first query after reopening a database.
+- **Regex filters page through matches without retaining the full match set**, avoiding large intermediate allocations on broad regex searches.
+
 ### Internal
+- Split the Rust database backend from a single `db.rs` into focused modules for schema, query, filters, SQL execution, export, benchmarking, shared types, and utilities.
+- Removed unused Tauri shell plugin/global API surface; native access now stays on the module-based imports actually used by the app.
+- Added targeted frontend unit tests for selection materialization and persisted localStorage recovery.
 - Bumped npm devdeps to latest minor/patch: `svelte 5.55.5`, `@sveltejs/kit 2.58.0`, `vite 8.0.10`, `@codemirror/search 6.7.0`, `@codemirror/view 6.41.1`.
-- Bumped `rusqlite 0.34 → 0.39` (also `libsqlite3-sys 0.32 → 0.37`). All 22 unit tests pass; no API churn in the surface we use (Connection, Statement, Row, Value, params!).
+- Bumped `rusqlite 0.34 → 0.39` (also `libsqlite3-sys 0.32 → 0.37`). All 24 Rust unit tests pass; no API churn in the surface we use (Connection, Statement, Row, Value, params!).
 - Bumped `sha2 0.10 → 0.11`. `Digest` trait + `Sha256::new()` unchanged at our call site (Win32 path-hash for duplicate-window detection).
 - Bumped `windows 0.61 → 0.62`. Tauri still pins 0.61 transitively, so both versions live in the lockfile; the only place where they meet is `update_window_title`, which now rewraps `Tauri's HWND.0` into our 0.62 `HWND` (identical struct layout — `pub *mut c_void`). All other Win32 calls already use HWNDs sourced from EnumWindows so no further rewraps were needed.
 

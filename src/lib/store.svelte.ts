@@ -73,6 +73,40 @@ export interface SqlHistoryEntry {
 
 export type Theme = "light" | "dark";
 
+function browserStorage(): Storage | null {
+  return typeof window === "undefined" ? null : window.localStorage;
+}
+
+export function loadSqlHistory(): SqlHistoryEntry[] {
+  const storage = browserStorage();
+  if (!storage) return [];
+  const raw = storage.getItem("dblitz-sql-history");
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new Error("SQL history is not an array");
+    return parsed
+      .filter((entry): entry is SqlHistoryEntry =>
+        typeof entry === "object" &&
+        entry !== null &&
+        typeof (entry as SqlHistoryEntry).sql === "string" &&
+        typeof (entry as SqlHistoryEntry).timestamp === "number" &&
+        typeof (entry as SqlHistoryEntry).error === "boolean",
+      )
+      .slice(0, 100);
+  } catch {
+    storage.removeItem("dblitz-sql-history");
+    return [];
+  }
+}
+
+export function loadTheme(): Theme {
+  const storage = browserStorage();
+  if (!storage) return "light";
+  const raw = storage.getItem("dblitz-theme");
+  return raw === "dark" || raw === "light" ? raw : "light";
+}
+
 // Global reactive state
 export const appState = $state({
   dbPath: null as string | null,
@@ -83,18 +117,14 @@ export const appState = $state({
   tableColumns: {} as Record<string, string[]>, // table name -> column names for autocomplete
   tableColumnTypes: {} as Record<string, Record<string, string>>, // table -> col -> declared type (for xlsx export)
   fileConfig: { tables: {}, tint: null, label: null } as FileConfig,
-  sqlHistory: (typeof localStorage !== "undefined"
-    ? JSON.parse(localStorage.getItem("dblitz-sql-history") ?? "[]")
-    : []) as SqlHistoryEntry[],
-  theme: (typeof localStorage !== "undefined"
-    ? (localStorage.getItem("dblitz-theme") as Theme) ?? "light"
-    : "light") as Theme,
+  sqlHistory: loadSqlHistory(),
+  theme: loadTheme(),
 });
 
 export function setTheme(theme: Theme) {
   appState.theme = theme;
   document.documentElement.setAttribute("data-theme", theme);
-  localStorage.setItem("dblitz-theme", theme);
+  browserStorage()?.setItem("dblitz-theme", theme);
 }
 
 export function initTheme() {
@@ -171,7 +201,7 @@ export async function closeDatabase() {
 }
 
 export function persistSqlHistory() {
-  localStorage.setItem(
+  browserStorage()?.setItem(
     "dblitz-sql-history",
     JSON.stringify(appState.sqlHistory),
   );
