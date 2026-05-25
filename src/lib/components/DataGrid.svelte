@@ -5,6 +5,7 @@
   import { createCellSelection } from "./cellSelection.svelte";
   import { createDragReorder } from "./dragReorder.svelte";
   import { buildSelectionData } from "./selectionData";
+  import { buildSelectionStats } from "./selectionStats";
 
   const ROW_HEIGHT = 26;
   const HEADER_HEIGHT = 26;
@@ -199,60 +200,7 @@
   const selection = createCellSelection();
   const sel = $derived(selection.sel);
 
-  // Selection statistics for status bar
-  const MAX_STATS_ROWS = 100_000;
-
-  interface SelectionStats {
-    rows: number;
-    cols: number;
-    sum: number | null;
-    avg: number | null;
-    min: number | null;
-    max: number | null;
-    numericPending: boolean;
-  }
-
-  const selStats = $derived.by((): SelectionStats | null => {
-    if (!sel) return null;
-    const nRows = sel.r1 - sel.r0 + 1;
-    const nCols = sel.c1 - sel.c0 + 1;
-    if (nRows === 1 && nCols === 1) return null; // single cell — no bar
-    const capRow = Math.min(sel.r1, sel.r0 + MAX_STATS_ROWS - 1);
-    let allNumeric = true;
-    let sum = 0;
-    let min = Infinity;
-    let max = -Infinity;
-    let count = 0;
-    let numericPending = false;
-    for (let r = sel.r0; r <= capRow; r++) {
-      const row = getRowData(r);
-      if (!row) {
-        allNumeric = false;
-        numericPending = true;
-        break;
-      }
-      for (let c = sel.c0; c <= sel.c1; c++) {
-        const v = row[c];
-        if (v === null || v === '') continue;
-        const n = Number(v);
-        if (Number.isNaN(n)) { allNumeric = false; break; }
-        sum += n;
-        if (n < min) min = n;
-        if (n > max) max = n;
-        count++;
-      }
-      if (!allNumeric) break;
-    }
-    return {
-      rows: nRows,
-      cols: nCols,
-      sum: allNumeric && count > 0 ? sum : null,
-      avg: allNumeric && count > 0 ? sum / count : null,
-      min: allNumeric && count > 0 ? min : null,
-      max: allNumeric && count > 0 ? max : null,
-      numericPending,
-    };
-  });
+  const selStats = $derived(buildSelectionStats({ selection: sel, getRow: getRowData }));
 
   function fmtNum(n: number): string {
     return Number.isInteger(n) ? n.toLocaleString() : n.toLocaleString(undefined, { maximumFractionDigits: 6 });

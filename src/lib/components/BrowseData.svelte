@@ -16,6 +16,12 @@
   import { createPinnedFilters } from "./pinnedFilters.svelte";
   import { createAutoSelectFirstTable } from "./autoSelectFirstTable.svelte";
   import { createVirtualRows } from "./virtualRows.svelte";
+  import {
+    buildActiveFilters,
+    colorPresetsForTheme,
+    orderColumns,
+    visibleColumns,
+  } from "./columnView";
 
   const CHUNK_SIZE = 500;
   const FILTER_DEBOUNCE_MS = 500;
@@ -48,28 +54,19 @@
   function allColsOrdered(): string[] {
     if (!selectedTable) return columns;
     const cfg = getTableConfig(selectedTable);
-    if (cfg.column_order.length > 0) {
-      const inOrder = new Set(cfg.column_order);
-      const newCols = columns.filter((c) => !inOrder.has(c));
-      return [...cfg.column_order.filter((c) => columns.includes(c)), ...newCols];
-    }
-    return columns;
+    return orderColumns(columns, cfg.column_order);
   }
 
   function visCols(): string[] {
     if (!selectedTable) return columns;
     const cfg = getTableConfig(selectedTable);
-    const hiddenSet = new Set(cfg.hidden_columns);
-    return allColsOrdered().filter((c) => !hiddenSet.has(c));
+    return visibleColumns(allColsOrdered(), cfg.hidden_columns);
   }
 
   function buildFilters(): ColumnFilter[] {
     // Drop filters for columns that no longer exist in the schema
     // (e.g. a pinned filter on a column that was renamed externally).
-    const valid = new Set(columns);
-    return Object.entries(columnFilters)
-      .filter(([col, f]) => valid.has(col) && f.value.trim() !== "")
-      .map(([col, f]) => ({ column: col, value: f.value, is_regex: f.is_regex }));
+    return buildActiveFilters(columns, columnFilters);
   }
 
   // Precomputed column name -> index for O(1) lookups
@@ -339,10 +336,7 @@
   let showFilterHelp = $state(false);
 
   function colorPresets(): string[] {
-    if (appState.theme === "dark") {
-      return ["", "#3b1c1c", "#1c3b1c", "#1c1c3b", "#3b3b1c", "#3b1c3b", "#1c3b3b", "#2d1f1f", "#1f2d1f"];
-    }
-    return ["", "#fde8e8", "#e8fde8", "#e8e8fd", "#fdfde8", "#fde8fd", "#e8fdfd", "#f5eded", "#edf5ed"];
+    return colorPresetsForTheme(appState.theme);
   }
 
   function reorderColumns(fromCol: string, toCol: string) {

@@ -2,23 +2,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { invoke } from "@tauri-apps/api/core";
   import { appState, openDatabase, closeDatabase, setTheme, saveViewConfig, type Theme } from "$lib/store.svelte";
-
-  // Preset tints — enough variety to disambiguate ~6 parallel windows without
-  // drowning the user in a color picker. `null` is the "no tint" option.
-  const TINT_PRESETS: { value: string | null; name: string }[] = [
-    { value: null, name: "None" },
-    { value: "#d94040", name: "Red" },
-    { value: "#e0a030", name: "Amber" },
-    { value: "#4aa84a", name: "Green" },
-    { value: "#3080d0", name: "Blue" },
-    { value: "#8050c0", name: "Purple" },
-    { value: "#c04090", name: "Pink" },
-  ];
-  const TINT_VALUES = new Set(TINT_PRESETS.map((preset) => preset.value).filter((value): value is string => value != null));
-
-  function safeTint(value: string | null): string | null {
-    return value && TINT_VALUES.has(value) ? value : null;
-  }
+  import { fileName, parentDir, TINT_PRESETS, tintPillStyle, toolbarTintStyle } from "./toolbarUtils";
 
   function setTint(value: string | null) {
     appState.fileConfig.tint = value;
@@ -35,18 +19,8 @@
     saveViewConfig();
   }
 
-  // Mix tint with toolbar bg so the strip is tinted, not solid — keeps the UI
-  // readable in both themes. 22% tint reads clearly without overwhelming.
-  let toolbarStyle = $derived(
-    safeTint(appState.fileConfig.tint)
-      ? `background: color-mix(in srgb, ${safeTint(appState.fileConfig.tint)} 22%, var(--bg-secondary));`
-      : "",
-  );
-  let pillStyle = $derived(
-    safeTint(appState.fileConfig.tint)
-      ? `background: ${safeTint(appState.fileConfig.tint)}; color: white; border-color: ${safeTint(appState.fileConfig.tint)};`
-      : "",
-  );
+  let toolbarStyle = $derived(toolbarTintStyle(appState.fileConfig.tint));
+  let pillStyle = $derived(tintPillStyle(appState.fileConfig.tint));
 
   interface RecentFile { path: string; tint: string | null; label: string | null; }
 
@@ -97,18 +71,6 @@
       console.error("Failed to clear recent files:", e);
     }
     showRecents = false;
-  }
-
-  function fileName(path: string | null): string {
-    if (!path) return "No file open";
-    const parts = path.replace(/\\/g, "/").split("/");
-    return parts[parts.length - 1];
-  }
-
-  function parentDir(path: string): string {
-    const norm = path.replace(/\\/g, "/");
-    const idx = norm.lastIndexOf("/");
-    return idx > 0 ? norm.slice(0, idx) : "";
   }
 
   function handleClickOutside(e: MouseEvent) {
