@@ -5,6 +5,20 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [Unreleased]
+
+### Added
+- **`LICENSE` file** committed to the repo (MIT). The README has claimed MIT licensing since the initial commit; the file itself was missing.
+- **CI checks workflow** (`.github/workflows/checks.yml`) running frontend type-check + vitest and backend `cargo fmt --check` / `cargo clippy --all-targets --all-features -- -D warnings` / `cargo test` on every push and PR to `main`. Sister to the existing `release.yml` which only fires on tag push.
+
+### Security
+- **ATTACH / DETACH explicitly rejected** in the SQL editor. SQLite's `stmt.readonly()` reports them as read-only because they don't touch the *current* database file — but they let a user reach a second database file through dblitz's read-only viewer surface. Both forms (`ATTACH …`, `ATTACH DATABASE …`, `DETACH …`, `DETACH DATABASE …`, case-insensitive) are blocked at the input boundary with a dedicated error message before `prepare()`.
+
+### Internal
+- Expanded `db/sql.rs` test module from 2 cases to 9. New coverage: ATTACH/DETACH rejection (across casing + form variants, plus an identifier-shadowing sanity check), write PRAGMA rejection (`journal_mode`), `CREATE TEMP TABLE` rejection, `BEGIN IMMEDIATE` rejection, multi-statement rejection (rusqlite's `prepare` refuses outright — stronger than "only first runs"), read-only PRAGMA acceptance (`table_info`), and a load-bearing assertion that opening + reading a database creates no `-wal` / `-shm` / `-journal` sidecars (backs the README's immutable promise with an actual test).
+- README rewritten to lead with "Why dblitz?" positioning vs DB Browser for SQLite, design-rationale subsections (read-only by design, large tables, persistence, multi-window), feature regrouping by theme, and concrete OS-by-OS paths for the config directory. Stale Project Layout (predated the `db.rs` refactor) and Versioning sections moved to `BUILD.md`.
+- `BUILD.md` Code Quality Commands block now includes `npm test`, `cargo test`, and `cargo fmt --check`.
+
 ## [26.4.9] - 2026-04-30
 
 ### Added
