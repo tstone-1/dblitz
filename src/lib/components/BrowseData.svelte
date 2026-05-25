@@ -22,6 +22,7 @@
     orderColumns,
     visibleColumns,
   } from "./columnView";
+  import { computeAutoWidths } from "./columnWidths";
 
   const CHUNK_SIZE = 500;
   const FILTER_DEBOUNCE_MS = 500;
@@ -247,51 +248,21 @@
   }
 
   /** Compute reasonable column widths by measuring content with canvas. */
-  function computeAutoWidths(): Record<string, number> {
+  function measureAutoWidths(): Record<string, number> {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d')!;
-
-    const CELL_PAD = 24;   // 4px left + 8px right + border + buffer
-    const HDR_EXTRA = 24;  // sort arrow + pin glyph space
-    const MIN_W = 60;
-    const MAX_W = 400;
-    const MAX_SAMPLE = 100;
-
-    const vc = visCols();
-    const widths: Record<string, number> = {};
-    const chunk0 = virtualRows.rowCache.get(0) ?? [];
-    const n = Math.min(chunk0.length, MAX_SAMPLE);
-
-    for (const col of vc) {
-      // Keep font strings in sync with DataGrid.svelte .grid-cell font
-      // Header text (bold)
-      ctx.font = '600 12px "Cascadia Code","Cascadia Mono","Fira Code","Consolas",monospace';
-      let maxW = ctx.measureText(col).width + CELL_PAD + HDR_EXTRA;
-
-      // Data cells (normal weight)
-      ctx.font = '12px "Cascadia Code","Cascadia Mono","Fira Code","Consolas",monospace';
-      const ci = colIndexMap.get(col);
-      if (ci !== undefined) {
-        for (let i = 0; i < n; i++) {
-          const val = chunk0[i][ci];
-          if (val === null) {
-            const w = ctx.measureText('NULL').width + CELL_PAD;
-            if (w > maxW) maxW = w;
-          } else if (val) {
-            const w = ctx.measureText(val).width + CELL_PAD;
-            if (w > maxW) maxW = w;
-          }
-        }
-      }
-      widths[col] = Math.round(Math.min(MAX_W, Math.max(MIN_W, maxW)));
-    }
-    return widths;
+    return computeAutoWidths({
+      columns: visCols(),
+      rows: virtualRows.rowCache.get(0) ?? [],
+      getColumnIndex: (col) => colIndexMap.get(col),
+      measurer: ctx,
+    });
   }
 
   /** Apply auto-fit widths and persist them. */
   function applyAutoWidths() {
     if (!selectedTable) return;
-    const widths = computeAutoWidths();
+    const widths = measureAutoWidths();
     const cfg = ensureTableConfig(selectedTable);
     cfg.column_widths = widths;
     commitTableConfig(selectedTable, cfg);
