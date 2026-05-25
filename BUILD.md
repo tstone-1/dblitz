@@ -4,6 +4,7 @@
 
 - **Node.js** 18+ (for frontend tooling)
 - **Rust** (latest stable via [rustup](https://rustup.rs/))
+- **ripgrep** (`rg`) for release checklist verification commands
 - **Windows**: Visual Studio Build Tools with "Desktop development with C++" workload
 
 ## Development
@@ -81,6 +82,10 @@ cd src-tauri && cargo fmt --check
   - `src-tauri/Cargo.toml` (line 3)
   - `src-tauri/tauri.conf.json` (line 4)
   - `package.json` (line 3)
+- [ ] Verify all version files agree:
+  ```bash
+  rg -n '"version"|^version =' package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json
+  ```
 - [ ] Update `CHANGELOG.md` with new version entry and date
 
 ### 2. Build Release
@@ -103,6 +108,11 @@ git tag vYY.M.MICRO
 git push origin main --tags
 ```
 
+**Release hygiene checks:**
+- [ ] Local tag matches the version files exactly: `git describe --tags --exact-match`
+- [ ] GitHub has the pushed tag: `git ls-remote --tags origin vYY.M.MICRO`
+- [ ] Published GitHub release is created for the same tag: `gh release view vYY.M.MICRO`
+
 ### 4. Deploy to Shared Tools
 
 Copy the portable exe to a shared tools folder (stable filename, no version suffix):
@@ -116,6 +126,7 @@ cp src-tauri/target/release/dblitz.exe /path/to/shared/tools/dblitz.exe
 - [ ] Run exe from build output to verify it works
 - [ ] Open a .sqlite file via double-click (file association test)
 - [ ] Check that jump list populates after opening files
+- [ ] Confirm GitHub shows the new release as latest: `gh release list --limit 5`
 
 ## Quick Reference
 
@@ -129,11 +140,17 @@ cd src-tauri && cargo audit && cd ..
 npm run check
 cd src-tauri && cargo clippy && cd ..
 # Update version in Cargo.toml, tauri.conf.json, package.json
+# Verify all three version files match
+rg -n '"version"|^version =' package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json
 # Update CHANGELOG.md
 npx tauri build
 cp src-tauri/target/release/dblitz.exe /path/to/shared/tools/dblitz.exe
 git add -A && git commit -m "Release vYY.M.MICRO: Description"
 git tag vYY.M.MICRO && git push origin main --tags
+git describe --tags --exact-match
+git ls-remote --tags origin vYY.M.MICRO
+gh release view vYY.M.MICRO
+gh release list --limit 5
 ```
 
 ## Version Management
@@ -152,6 +169,10 @@ Version must be updated in three files:
 - `src-tauri/Cargo.toml` - Rust package version
 - `src-tauri/tauri.conf.json` - Tauri app version
 - `package.json` - npm package version
+
+Before publishing, the exact same `YY.M.MICRO` value must appear in all three
+files, the local tag must be `vYY.M.MICRO`, and the GitHub release must point to
+that tag. Do not leave a tag, release, or version file behind on an older patch.
 
 ## Icons
 

@@ -10,6 +10,7 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .claude/
 docs/reviews/
+*_REVIEW_FOLLOWUP.md
 
 # Tauri icon outputs that aren't used by the Windows build target.
 # All of these are regenerable from src-tauri/icons/sqlite.svg via
