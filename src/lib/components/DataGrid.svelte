@@ -6,6 +6,7 @@
   import { createDragReorder } from "./dragReorder.svelte";
   import { buildSelectionData } from "./selectionData";
   import { buildSelectionStats } from "./selectionStats";
+  import { buildGridTemplate, visibleRowIndices as getVisibleRowIndices } from "./gridGeometry";
 
   const ROW_HEIGHT = 26;
   const HEADER_HEIGHT = 26;
@@ -113,16 +114,6 @@
   let viewportHeight = $state(600);
   let scrollContainer: HTMLDivElement | undefined = $state();
 
-  function firstVisible(): number {
-    const dataScroll = Math.max(0, scrollTop - stickyHeight);
-    return Math.max(0, Math.floor(dataScroll / ROW_HEIGHT) - OVERSCAN);
-  }
-
-  function lastVisible(): number {
-    const dataScroll = Math.max(0, scrollTop - stickyHeight);
-    return Math.min(rowCount - 1, Math.ceil((dataScroll + viewportHeight) / ROW_HEIGHT) + OVERSCAN);
-  }
-
   function handleScroll(e: Event) {
     const el = e.target as HTMLDivElement;
     scrollTop = el.scrollTop;
@@ -130,12 +121,14 @@
   }
 
   function visibleRowIndices(): number[] {
-    if (rowCount === 0) return [];
-    const first = firstVisible();
-    const last = lastVisible();
-    const indices: number[] = [];
-    for (let i = first; i <= last; i++) indices.push(i);
-    return indices;
+    return getVisibleRowIndices({
+      rowCount,
+      rowHeight: ROW_HEIGHT,
+      scrollTop,
+      stickyHeight,
+      viewportHeight,
+      overscan: OVERSCAN,
+    });
   }
 
   // Column widths — plain object, not reactive. The `$effect` below seeds
@@ -143,17 +136,9 @@
   let columnWidths: Record<string, number> = {};
   let gridContainer: HTMLDivElement | undefined = $state();
 
-  function buildGridTpl(): string {
-    const cols = columns.map((c) => {
-      const w = columnWidths[c];
-      return w ? `${w}px` : 'minmax(80px, 1fr)';
-    });
-    return `60px ${cols.join(' ')}`;
-  }
-
   function syncGridTplToDOM() {
     if (gridContainer) {
-      gridContainer.style.setProperty('--grid-tpl', buildGridTpl());
+      gridContainer.style.setProperty('--grid-tpl', buildGridTemplate(columns, columnWidths));
     }
   }
 
