@@ -1,7 +1,7 @@
 {
   "name": "dblitz",
-  "version": "26.4.9",
-  "description": "Blazingly fast SQLite browser",
+  "version": "26.5.3",
+  "description": "Read-only SQLite browser",
   "type": "module",
   "scripts": {
     "dev": "vite dev",
@@ -9,6 +9,7 @@
     "test": "vitest run",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "quality": "npm run check && npm test && npm run build && cd src-tauri && cargo fmt --check && cargo test && cargo clippy --all-targets --all-features -- -D warnings",
     "tauri": "tauri"
   },
   "license": "MIT",

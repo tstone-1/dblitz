@@ -5,11 +5,17 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
-## [Unreleased]
+## [26.5.3] - 2026-05-25
+
+> **Versioning note**: `v26.5.0`/`v26.5.1`/`v26.5.2` were cut on 2026-05-14 from a parallel implementation built on a separate machine; the tags exist on GitHub but the underlying commits were never reconciled with `main`'s history (`git merge-base main v26.5.2` found no common ancestor). `26.5.3` picks up where the visible release line left off and is built from `main`, which contains the long-running history through `26.4.9` plus subsequent refactor and hardening work. The Tauri bundle identifier (`com.tstone.dblitz`) is preserved from `v26.5.x` so existing macOS/Windows installs upgrade in place.
 
 ### Added
-- **`LICENSE` file** committed to the repo (MIT). The README has claimed MIT licensing since the initial commit; the file itself was missing.
+- **`LICENSE` file** committed to the repo (MIT). The README has claimed MIT licensing since the initial commit; the file itself was missing on `main`.
 - **CI checks workflow** (`.github/workflows/checks.yml`) running frontend type-check + vitest and backend `cargo fmt --check` / `cargo clippy --all-targets --all-features -- -D warnings` / `cargo test` on every push and PR to `main`. Sister to the existing `release.yml` which only fires on tag push.
+- **`quality` npm script** that runs the full local quality gate end-to-end: `npm run quality` covers frontend check + tests + build, then backend fmt + tests + clippy.
+
+### Changed
+- **`package.json` / `Cargo.toml` `description`** now reads "Read-only SQLite browser" instead of "Blazingly fast SQLite browser" — same honest framing the README rewrite settled on. Removes unsubstantiated marketing language from the npm/crate metadata.
 
 ### Security
 - **ATTACH / DETACH explicitly rejected** in the SQL editor. SQLite's `stmt.readonly()` reports them as read-only because they don't touch the *current* database file — but they let a user reach a second database file through dblitz's read-only viewer surface. Both forms (`ATTACH …`, `ATTACH DATABASE …`, `DETACH …`, `DETACH DATABASE …`, case-insensitive) are blocked at the input boundary with a dedicated error message before `prepare()`.

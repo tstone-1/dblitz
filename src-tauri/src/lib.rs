@@ -66,7 +66,7 @@ fn set_app_user_model_id() {
     use windows::core::w;
     use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
     unsafe {
-        let _ = SetCurrentProcessExplicitAppUserModelID(w!("com.dblitz.app"));
+        let _ = SetCurrentProcessExplicitAppUserModelID(w!("com.tstone.dblitz"));
     }
 }
 

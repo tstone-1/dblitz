@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "dblitz",
-  "version": "26.4.9",
-  "identifier": "com.dblitz.app",
+  "version": "26.5.3",
+  "identifier": "com.tstone.dblitz",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
