@@ -5,6 +5,11 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.5.4] - 2026-05-25
+
+### Fixed
+- **Release workflow restores Intel macOS and Linux artifacts**. `v26.5.3` shipped only Windows + macOS arm64 because `main`'s `release.yml` matrix was missing `x86_64-apple-darwin` cross-compile and `ubuntu-latest`. Both are back, plus a `quality` gate that runs the full `npm run quality` before any builds start so a broken commit never produces partial release artifacts.
+
 ## [26.5.3] - 2026-05-25
 
 > **Versioning note**: `v26.5.0`/`v26.5.1`/`v26.5.2` were cut on 2026-05-14 from a parallel implementation built on a separate machine; the tags exist on GitHub but the underlying commits were never reconciled with `main`'s history (`git merge-base main v26.5.2` found no common ancestor). `26.5.3` picks up where the visible release line left off and is built from `main`, which contains the long-running history through `26.4.9` plus subsequent refactor and hardening work. The Tauri bundle identifier (`com.tstone.dblitz`) is preserved from `v26.5.x` so existing macOS/Windows installs upgrade in place.
