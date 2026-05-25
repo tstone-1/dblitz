@@ -1,9 +1,4 @@
-export interface SelectionBounds {
-  r0: number;
-  r1: number;
-  c0: number;
-  c1: number;
-}
+import type { SelectionBounds } from "./cellSelection.svelte";
 
 export interface SelectionDataOptions {
   selection: SelectionBounds | null;
