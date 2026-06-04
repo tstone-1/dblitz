@@ -16,6 +16,37 @@ fn is_numeric_affinity(declared: &str) -> bool {
     true
 }
 
+/// Largest absolute integer that an f64 can represent exactly. Integers beyond
+/// this lose precision when stored as a number, so we emit them as text.
+const F64_EXACT_INT: i64 = 1i64 << 53;
+
+/// How a cell value should be written to the worksheet.
+#[derive(Debug, PartialEq)]
+enum CellValue {
+    Number(f64),
+    Text,
+}
+
+/// Decide whether a cell is written as a number or as text. Numeric-affinity
+/// columns try i64 first (emitting values beyond ±2^53 as text to preserve
+/// precision), then f64; everything else stays text.
+fn classify_cell(numeric: bool, val: &str) -> CellValue {
+    if !numeric {
+        return CellValue::Text;
+    }
+    if let Ok(n) = val.parse::<i64>() {
+        if n.abs() <= F64_EXACT_INT {
+            CellValue::Number(n as f64)
+        } else {
+            CellValue::Text
+        }
+    } else if let Ok(n) = val.parse::<f64>() {
+        CellValue::Number(n)
+    } else {
+        CellValue::Text
+    }
+}
+
 pub fn export_to_xlsx(
     headers: &[String],
     rows: &[Vec<String>],
@@ -40,24 +71,15 @@ pub fn export_to_xlsx(
     for (ci, h) in headers.iter().enumerate() {
         ws.write_string(0, ci as u16, h).str_err()?;
     }
-    const F64_EXACT_INT: i64 = 1i64 << 53;
     for (ri, row) in rows.iter().enumerate() {
         for (ci, val) in row.iter().enumerate() {
-            if numeric[ci] {
-                if let Ok(n) = val.parse::<i64>() {
-                    if n.abs() <= F64_EXACT_INT {
-                        ws.write_number((ri + 1) as u32, ci as u16, n as f64)
-                            .str_err()?;
-                    } else {
-                        ws.write_string((ri + 1) as u32, ci as u16, val).str_err()?;
-                    }
-                } else if let Ok(n) = val.parse::<f64>() {
+            match classify_cell(numeric[ci], val) {
+                CellValue::Number(n) => {
                     ws.write_number((ri + 1) as u32, ci as u16, n).str_err()?;
-                } else {
+                }
+                CellValue::Text => {
                     ws.write_string((ri + 1) as u32, ci as u16, val).str_err()?;
                 }
-            } else {
-                ws.write_string((ri + 1) as u32, ci as u16, val).str_err()?;
             }
         }
     }
@@ -88,4 +110,63 @@ pub fn export_to_xlsx(
     wb.save(&path).str_err()?;
 
     Ok(path_str)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numeric_affinity_classifies_declared_types() {
+        for t in ["INTEGER", "BIGINT", "REAL", "NUMERIC", "DOUBLE", "int"] {
+            assert!(is_numeric_affinity(t), "{t} should be numeric");
+        }
+        for t in ["VARCHAR(20)", "TEXT", "CLOB", "CHARACTER", "BLOB", ""] {
+            assert!(!is_numeric_affinity(t), "{t} should not be numeric");
+        }
+    }
+
+    #[test]
+    fn non_numeric_columns_always_stay_text() {
+        assert_eq!(classify_cell(false, "123"), CellValue::Text);
+        assert_eq!(classify_cell(false, "1.5"), CellValue::Text);
+    }
+
+    #[test]
+    fn numeric_columns_emit_integers_and_floats_as_numbers() {
+        assert_eq!(classify_cell(true, "42"), CellValue::Number(42.0));
+        assert_eq!(classify_cell(true, "-7"), CellValue::Number(-7.0));
+        assert_eq!(classify_cell(true, "1.5"), CellValue::Number(1.5));
+    }
+
+    #[test]
+    fn numeric_columns_keep_non_numeric_text_as_text() {
+        assert_eq!(classify_cell(true, ""), CellValue::Text);
+        assert_eq!(classify_cell(true, "N/A"), CellValue::Text);
+    }
+
+    #[test]
+    fn bigints_beyond_f64_exact_range_stay_text() {
+        // 2^53 is exactly representable; 2^53 + 1 is not.
+        assert_eq!(
+            classify_cell(true, "9007199254740992"),
+            CellValue::Number(9007199254740992.0)
+        );
+        assert_eq!(classify_cell(true, "9007199254740993"), CellValue::Text);
+        assert_eq!(classify_cell(true, "-9007199254740993"), CellValue::Text);
+    }
+
+    #[test]
+    fn export_rejects_empty_data() {
+        let err = export_to_xlsx(&[], &[], &[]).unwrap_err();
+        assert_eq!(err, "No data to export");
+    }
+
+    #[test]
+    fn export_rejects_row_wider_than_headers() {
+        let headers = vec!["id".to_string()];
+        let rows = vec![vec!["a".to_string(), "b".to_string()]];
+        let err = export_to_xlsx(&headers, &rows, &[]).unwrap_err();
+        assert!(err.contains("more cells than headers"), "got: {err}");
+    }
 }

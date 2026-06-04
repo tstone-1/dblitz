@@ -5,6 +5,21 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.6.0] - 2026-06-04
+
+### Changed
+- **Filter syntax help** now notes that empty (NULL) cells are excluded by any active column filter, matching the actual query behavior.
+
+### Internal
+- **Defensive upper bound on table paging**: `query_table` now rejects a `limit` above 100,000 rows. The UI only ever requests a fixed chunk size, so this is insurance against an out-of-range caller materializing an unreasonable result set in one go.
+- **xlsx export cell-typing is now unit-tested**: the number-vs-text decision was extracted into a pure `classify_cell` helper, with tests covering numeric-affinity classification, the `i64`/`f64` paths, the ±2^53 precision boundary (large IDs emitted as strings), and the empty-data / row-wider-than-headers error paths. `export.rs` previously had no tests.
+- **Column-filter operators consolidated**: the frontend derives its incomplete-operator check from a single `OPERAND_REQUIRED_OPS` constant, with cross-references between `BrowseData.svelte` and `db/filters.rs` so the operator set stays in sync across the IPC boundary.
+- **`AGENTS.md` architecture section** rewritten to describe the `db/` module layout; it still described the pre-split `db.rs`.
+
+### Dependencies
+- Bumped `rusqlite 0.39 → 0.40` (also `libsqlite3-sys 0.37 → 0.38`) and `rust_xlsxwriter 0.94 → 0.95`. All 45 Rust unit tests pass; no API churn in the surface we use.
+- Bumped npm deps to latest minor/patch: `svelte 5.56.1`, `@sveltejs/kit 2.63.0`, `vite 8.0.16`, `vitest 4.1.8`, `svelte-check 4.6.0`, `@codemirror/autocomplete 6.20.3`. `npm audit` and `cargo audit` both clean.
+
 ## [26.5.4] - 2026-05-25
 
 ### Fixed
