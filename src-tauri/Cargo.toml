@@ -1,6 +1,6 @@
 [package]
 name = "dblitz"
-version = "26.5.4"
+version = "26.6.0"
 description = "Read-only SQLite browser"
 authors = ["tstone-1"]
 edition = "2021"
@@ -17,7 +17,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 regex = "1"
 sha2 = "0.11"
 hex = "0.4"
@@ -25,7 +25,7 @@ dirs = "6"
 parking_lot = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rust_xlsxwriter = "0.94.0"
+rust_xlsxwriter = "0.95.0"
 tauri-plugin-opener = "2.5.3"
 
 [target.'cfg(windows)'.dependencies]

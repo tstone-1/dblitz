@@ -22,7 +22,14 @@
 
 - Frontend code lives under `src/`.
 - Tauri/Rust backend code lives under `src-tauri/`.
-- SQLite backend code currently lives in `src-tauri/src/db.rs`.
+- SQLite backend code lives under `src-tauri/src/db/`, with `src-tauri/src/db.rs` as a thin facade that re-exports the submodules:
+  - `schema.rs` — table/column introspection and row counts
+  - `query.rs` — table paging, the rowid-index fast path, and regex filtering
+  - `filters.rs` — the `WHERE` clause builder and column-filter operator parsing
+  - `sql.rs` — arbitrary SQL execution plus the read-only / ATTACH-DETACH rejection gate
+  - `export.rs` — XLSX export
+  - `types.rs`, `util.rs` — shared DTOs and helpers (`safe_ident`, `read_row`, `StrErr`)
+  - `benchmark.rs` — `cfg(debug_assertions)` paging benchmarks
 - `dblitz` is intended to be a read-only SQLite viewer. Preserve the read-only behavior when changing query execution or database opening logic.
 
 ## Release

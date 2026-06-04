@@ -231,9 +231,17 @@ fn query_with_offset(
     })
 }
 
+/// Defensive ceiling on a single page request. The UI only ever asks for a
+/// fixed chunk size, so this is insurance against a caller passing a value that
+/// would materialize an unreasonable number of rows into memory at once.
+const MAX_QUERY_LIMIT: i64 = 100_000;
+
 pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, String> {
     if req.limit <= 0 {
         return Err("Query limit must be greater than zero".to_string());
+    }
+    if req.limit > MAX_QUERY_LIMIT {
+        return Err(format!("Query limit must not exceed {MAX_QUERY_LIMIT}"));
     }
     if req.offset < 0 {
         return Err("Query offset must be zero or greater".to_string());
@@ -551,6 +559,24 @@ mod tests {
         let err = query_table(&state, &req).unwrap_err();
 
         assert!(err.contains("limit"));
+    }
+
+    #[test]
+    fn query_table_rejects_limit_above_ceiling() {
+        let state = state_with_memory_db("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);");
+        let req = QueryRequest {
+            table: "items".to_string(),
+            offset: 0,
+            limit: MAX_QUERY_LIMIT + 1,
+            filters: vec![],
+            global_filter: String::new(),
+            sort_column: None,
+            sort_asc: true,
+        };
+
+        let err = query_table(&state, &req).unwrap_err();
+
+        assert!(err.contains("exceed"), "got: {err}");
     }
 
     #[test]

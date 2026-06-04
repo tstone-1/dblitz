@@ -181,8 +181,14 @@
   // read/write would trigger downstream effects).
   let lastFilterState = "";
 
-  // Must match operator prefixes parsed in db.rs build_where_clause
-  const INCOMPLETE_OPS = /^(<|>|>=|<=|=)$/;
+  // Operator prefixes that require an operand to the right. These mirror the
+  // prefixes parsed by the backend in src-tauri/src/db/filters.rs
+  // (build_where_clause) — keep the two in sync. A bare operator here (e.g. ">"
+  // with nothing after it) is a half-typed filter, so we suppress the query
+  // until the user finishes. Note: "<>" is intentionally absent — bare "<>" is
+  // a complete filter ("non-empty values only"), not an incomplete one.
+  const OPERAND_REQUIRED_OPS = ["<", ">", ">=", "<=", "="];
+  const INCOMPLETE_OPS = new RegExp(`^(${OPERAND_REQUIRED_OPS.join("|")})$`);
 
   function hasIncompleteFilter(): boolean {
     return Object.values(columnFilters).some((f) => {
@@ -456,6 +462,7 @@
                 </tbody></table>
                 <div class="help-divider"></div>
                 <div class="help-hint">Toggle <code>.*</code> for regex mode</div>
+                <div class="help-hint">Empty (NULL) cells are excluded by any active filter</div>
               </div>
             {/if}
           </div>

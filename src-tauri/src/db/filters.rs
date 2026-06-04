@@ -62,6 +62,10 @@ pub(super) fn build_where_clause(
             let mut or_parts: Vec<String> = Vec::new();
             let mut or_params: Vec<String> = Vec::new();
 
+            // Operator prefixes recognized below: "<>", ">=", "<=", ">", "<",
+            // "=". The frontend mirrors the operand-requiring subset in
+            // src/lib/components/BrowseData.svelte (OPERAND_REQUIRED_OPS) to
+            // gate half-typed filters — keep the two in sync when adding ops.
             for val in &criteria {
                 if let Some(rest) = val.strip_prefix("<>") {
                     if rest.is_empty() {
