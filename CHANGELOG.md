@@ -5,6 +5,20 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.6.1] - 2026-06-05
+
+### Added
+- **Column colors carry into Execute SQL results**: colors set on a table in Browse Data now apply to matching result columns when a query's primary `FROM` table is that table. Resolution is name-based and limited to the FROM table (the new `primaryTableFromSql` scanner skips subquery/CTE-body FROMs, quoted/bracketed identifiers, and comments/string literals); joins, aliases, and expressions stay uncolored.
+
+### Changed
+- **Execute SQL row cap raised 10,000 → 50,000**: a `LIMIT` larger than the old cap no longer silently stopped at 10k rows. The cap stays below `query_table`'s 100k ceiling because Execute SQL materializes the whole result in one IPC round-trip rather than paging; the truncation banner now suggests narrowing the query or paging with `OFFSET` instead of "add a LIMIT clause".
+
+### Internal
+- **`primaryTableFromSql` / `resolveResultColumnColors`** extracted to `src/lib/components/sqlTable.ts` as pure, dependency-free helpers with full Vitest coverage (FROM detection across quoting/comments/subqueries/CTEs, case-insensitive table resolution, name-based color mapping).
+
+### Dependencies
+- Bumped Rust `chrono 0.4.44 → 0.4.45` and `serde_with 3.20.0 → 3.21.0` (with `serde_with_macros`); bumped npm `svelte 5.56.1 → 5.56.2`. All minor/patch — no API churn. `npm audit` and `cargo audit` clean (only the known Linux-only gtk-rs unmaintained advisories remain).
+
 ## [26.6.0] - 2026-06-04
 
 ### Changed

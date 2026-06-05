@@ -40,6 +40,9 @@ export interface SqlResult {
   rows: (string | null)[][];
   rows_affected: number;
   error: string | null;
+  // Non-fatal: set when the result exceeded the 50,000-row cap and only the
+  // first N rows were returned. Travels alongside `rows`, not in `error`.
+  truncated: boolean;
 }
 
 export interface PinnedFilter {
