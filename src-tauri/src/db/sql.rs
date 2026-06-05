@@ -1,7 +1,12 @@
 use super::types::{DbState, SqlResult};
 use super::util::read_row;
 
-const SQL_RESULT_LIMIT: usize = 10_000;
+// Execute SQL materializes the whole result set in one IPC round-trip (Rust
+// Vec -> JSON -> JS), unlike Browse Data which pages in chunks. Keep this cap
+// below `query_table`'s 100k `MAX_QUERY_LIMIT` so an ad-hoc query can't become
+// the single heaviest allocation+serialization path in the app. 50k still
+// covers any realistic interactive result; beyond that, page with LIMIT/OFFSET.
+const SQL_RESULT_LIMIT: usize = 50_000;
 
 /// True if `sql` (already trimmed) starts with the keyword ATTACH or DETACH,
 /// case-insensitive, followed by a non-identifier character. Catches the
@@ -30,6 +35,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
                 rows: vec![],
                 rows_affected: 0,
                 error: Some("No database open".to_string()),
+                truncated: false,
             }
         }
     };
@@ -49,6 +55,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
             error: Some(
                 "dblitz is a read-only viewer - ATTACH and DETACH are not allowed.".to_string(),
             ),
+            truncated: false,
         };
     }
 
@@ -60,6 +67,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
                 rows: vec![],
                 rows_affected: 0,
                 error: Some(e.to_string()),
+                truncated: false,
             };
         }
     };
@@ -72,6 +80,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
             error: Some(
                 "dblitz is a read-only viewer - write statements (INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, etc.) are not supported.".to_string(),
             ),
+            truncated: false,
         };
     }
 
@@ -83,12 +92,18 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
             let mut rows: Vec<Vec<Option<String>>> = Vec::new();
             let mut truncated = false;
             loop {
-                if rows.len() >= SQL_RESULT_LIMIT {
-                    truncated = true;
-                    break;
-                }
                 match rows_iter.next() {
-                    Ok(Some(row)) => rows.push(read_row(row, col_count)),
+                    Ok(Some(row)) => {
+                        // Only flag truncation once we've collected the cap
+                        // AND confirmed at least one more row exists. Checking
+                        // before the fetch would falsely truncate a result
+                        // that lands exactly on the cap.
+                        if rows.len() >= SQL_RESULT_LIMIT {
+                            truncated = true;
+                            break;
+                        }
+                        rows.push(read_row(row, col_count));
+                    }
                     Ok(None) => break,
                     Err(e) => {
                         return SqlResult {
@@ -96,20 +111,17 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
                             rows,
                             rows_affected: 0,
                             error: Some(e.to_string()),
+                            truncated: false,
                         };
                     }
                 }
             }
-            let error = if truncated {
-                Some(format!("Result truncated to {} rows", SQL_RESULT_LIMIT))
-            } else {
-                None
-            };
             SqlResult {
                 columns,
                 rows,
                 rows_affected: 0,
-                error,
+                error: None,
+                truncated,
             }
         }
         Err(e) => SqlResult {
@@ -117,6 +129,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
             rows: vec![],
             rows_affected: 0,
             error: Some(e.to_string()),
+            truncated: false,
         },
     }
 }
@@ -284,6 +297,61 @@ mod tests {
         let check = execute_sql(&state, "SELECT COUNT(*) FROM users");
         assert!(check.error.is_none(), "users table must still exist");
         assert_eq!(check.rows[0][0].as_deref(), Some("1"));
+
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn execute_sql_truncates_large_result_without_erroring() {
+        // A result set larger than SQL_RESULT_LIMIT must return the first N
+        // rows WITH `truncated = true` and NO `error`. The truncation notice
+        // is a non-fatal warning that travels alongside the rows - folding it
+        // into `error` made the frontend hide all 10k rows it had received.
+        let (state, path) = setup_temp_db_with_table();
+
+        // A recursive CTE generates SQL_RESULT_LIMIT + 1 rows on a read-only
+        // connection without needing any table data.
+        let sql = format!(
+            "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < {}) SELECT x FROM c",
+            SQL_RESULT_LIMIT + 1
+        );
+        let result = execute_sql(&state, &sql);
+
+        assert!(
+            result.error.is_none(),
+            "truncation must not surface as an error, got: {:?}",
+            result.error
+        );
+        assert!(result.truncated, "result should be flagged truncated");
+        assert_eq!(
+            result.rows.len(),
+            SQL_RESULT_LIMIT,
+            "exactly the row cap should be returned"
+        );
+
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn execute_sql_does_not_flag_exact_limit_as_truncated() {
+        // Exactly SQL_RESULT_LIMIT rows is a complete result - the loop hits
+        // `Ok(None)` before tripping the cap, so `truncated` stays false.
+        let (state, path) = setup_temp_db_with_table();
+
+        let sql = format!(
+            "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < {}) SELECT x FROM c",
+            SQL_RESULT_LIMIT
+        );
+        let result = execute_sql(&state, &sql);
+
+        assert!(result.error.is_none());
+        assert!(
+            !result.truncated,
+            "an exactly-at-cap result is complete, not truncated"
+        );
+        assert_eq!(result.rows.len(), SQL_RESULT_LIMIT);
 
         close_database(&state);
         let _ = std::fs::remove_file(&path);

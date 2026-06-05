@@ -91,4 +91,9 @@ pub struct SqlResult {
     pub rows: Vec<Vec<Option<String>>>,
     pub rows_affected: usize,
     pub error: Option<String>,
+    /// True when the result set exceeded `SQL_RESULT_LIMIT` and only the
+    /// first N rows are returned. This is a non-fatal warning that travels
+    /// *alongside* the rows - it is NOT folded into `error`, so the frontend
+    /// can render the rows and a banner together.
+    pub truncated: bool,
 }

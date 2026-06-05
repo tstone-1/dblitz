@@ -1,16 +1,40 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { appState, persistSqlHistory, type SqlResult } from "$lib/store.svelte";
+  import {
+    appState,
+    getTableConfig,
+    persistSqlHistory,
+    type SqlResult,
+  } from "$lib/store.svelte";
   import DataGrid from "./DataGrid.svelte";
   import SqlEditor from "./SqlEditor.svelte";
+  import { resolveResultColumnColors } from "./sqlTable";
 
   let sql = $state("");
   let result = $state<SqlResult | null>(null);
+  // The query that produced `result` — the editor `sql` may change afterwards,
+  // so color lookup must key off what actually ran, not the current text.
+  let executedSql = $state("");
   let running = $state(false);
   let showHistory = $state(false);
 
   // Schema for autocomplete: { tableName: [col1, col2, ...] }
   let sqlSchema = $derived(appState.tableColumns);
+
+  // Reuse the per-table column colors from Browse Data for result columns that
+  // came from the query's primary (FROM) table. The resolution logic lives in
+  // `resolveResultColumnColors` (pure + tested); this derived just feeds it
+  // reactive state so a recolor in Browse Data updates the SQL grid live.
+  let resultColumnColors = $derived.by<Record<string, string>>(() =>
+    result
+      ? resolveResultColumnColors({
+          sql: executedSql,
+          columns: result.columns,
+          tableNames: appState.tables.map((t) => t.name),
+          getColumnColors: (t) => getTableConfig(t).column_colors,
+        })
+      : {},
+  );
 
   async function executeSql() {
     const trimmed = sql.trim();
@@ -20,6 +44,7 @@
     result = null;
     try {
       result = await invoke<SqlResult>("execute_sql", { sql: trimmed });
+      executedSql = trimmed;
 
       appState.sqlHistory = [
         {
@@ -36,6 +61,7 @@
         rows: [],
         rows_affected: 0,
         error: String(e),
+        truncated: false,
       };
     } finally {
       running = false;
@@ -120,10 +146,17 @@
               Query executed successfully
             {/if}
           </div>
+          {#if result.truncated}
+            <div class="result-warning">
+              Showing the first {result.rows.length.toLocaleString()} rows (result
+              cap) — narrow your query or page with OFFSET to see more.
+            </div>
+          {/if}
           {#if result.columns.length > 0}
             <DataGrid
               columns={result.columns}
               rows={result.rows}
+              columnColors={resultColumnColors}
             />
           {/if}
         {/if}
@@ -275,6 +308,15 @@
   .result-info {
     padding: 4px 8px;
     color: var(--success);
+    font-size: 12px;
+    border-bottom: 1px solid var(--border-color);
+    flex-shrink: 0;
+  }
+
+  .result-warning {
+    padding: 4px 8px;
+    background: rgba(249, 226, 175, 0.15);
+    color: var(--warning);
     font-size: 12px;
     border-bottom: 1px solid var(--border-color);
     flex-shrink: 0;
