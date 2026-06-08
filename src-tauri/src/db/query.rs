@@ -1,9 +1,10 @@
 use regex::Regex;
 use rusqlite::Connection;
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
 use super::filters::{build_where_clause, WhereResult};
-use super::types::{ColumnFilter, DbState, QueryRequest, QueryResult, RowidIndex};
+use super::types::{ColumnFilter, DbState, QueryRequest, QueryResult, RowidIndex, SortedOrder};
 use super::util::{collect_rows, read_row, safe_ident, StrErr};
 
 /// Build a sparse rowid index for a table: sample the rowid at every chunk_size boundary.
@@ -193,6 +194,171 @@ fn query_with_rowid_index(
     Some(result)
 }
 
+/// Materialize the full rowid order for one sort key with a single
+/// `ORDER BY`. Returns `Ok(None)` if a newer request bumps the generation
+/// mid-build. Note: SQLite materializes a non-indexed sort on the first
+/// `next()`, so this only bails *during row collection* once superseded — it
+/// cannot interrupt the sort step itself.
+fn build_sorted_order(
+    conn: &Connection,
+    state: &DbState,
+    generation: u64,
+    safe_table: &str,
+    sort_column: &str,
+    sort_asc: bool,
+) -> Result<Option<Vec<i64>>, String> {
+    let sql = format!(
+        "SELECT rowid FROM \"{}\" ORDER BY \"{}\" {}",
+        safe_table,
+        safe_ident(sort_column),
+        if sort_asc { "ASC" } else { "DESC" }
+    );
+    let mut stmt = conn.prepare(&sql).str_err()?;
+    let mut rows_iter = stmt.query([]).str_err()?;
+    let mut rowids: Vec<i64> = Vec::new();
+    while let Some(row) = rows_iter.next().str_err()? {
+        if state.query_generation.load(Ordering::Relaxed) != generation {
+            return Ok(None);
+        }
+        rowids.push(row.get(0).str_err()?);
+    }
+    Ok(Some(rowids))
+}
+
+/// Fetch the given rowids and return their rows in the requested order.
+/// `WHERE rowid IN (...)` doesn't preserve order, so we index by rowid and
+/// re-emit by the caller's sequence.
+fn fetch_rows_by_rowids(
+    conn: &Connection,
+    safe_table: &str,
+    rowids: &[i64],
+) -> Result<Vec<Vec<Option<String>>>, String> {
+    if rowids.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Stay under the oldest `SQLITE_MAX_VARIABLE_NUMBER` (999) so an arbitrarily
+    // large page (callers may request up to MAX_QUERY_LIMIT) can't blow the
+    // bound-parameter limit. Order is reconstructed from `rowids` afterwards,
+    // so batch boundaries don't matter.
+    const BATCH: usize = 900;
+    let mut by_rowid: HashMap<i64, Vec<Option<String>>> = HashMap::with_capacity(rowids.len());
+
+    for batch in rowids.chunks(BATCH) {
+        let mut placeholders = String::with_capacity(batch.len() * 2);
+        for i in 0..batch.len() {
+            if i > 0 {
+                placeholders.push(',');
+            }
+            placeholders.push('?');
+        }
+        let sql = format!(
+            "SELECT rowid, * FROM \"{}\" WHERE rowid IN ({})",
+            safe_table, placeholders
+        );
+        let mut stmt = conn.prepare(&sql).str_err()?;
+        let col_count = stmt.column_count();
+        let params: Vec<&dyn rusqlite::types::ToSql> = batch
+            .iter()
+            .map(|r| r as &dyn rusqlite::types::ToSql)
+            .collect();
+
+        let mut rows_iter = stmt.query(params.as_slice()).str_err()?;
+        while let Some(row) = rows_iter.next().str_err()? {
+            let rid: i64 = row.get(0).str_err()?;
+            // read_row includes the leading rowid at index 0; drop it so the
+            // emitted row aligns with the table's declared columns.
+            let full = read_row(row, col_count);
+            by_rowid.insert(rid, full[1..].to_vec());
+        }
+    }
+
+    let mut out = Vec::with_capacity(rowids.len());
+    for rid in rowids {
+        if let Some(r) = by_rowid.remove(rid) {
+            out.push(r);
+        }
+    }
+    Ok(out)
+}
+
+/// Serve a sorted, unfiltered page from the cached rowid order, building the
+/// order on first use (or when the sort key changes). Turns each chunk into a
+/// rowid lookup instead of a fresh full-table `ORDER BY`.
+///
+/// Returns `None` when the table has no usable rowid (`WITHOUT ROWID`),
+/// signalling the caller to fall back to an `ORDER BY` + `OFFSET` query.
+/// `Some(Err(..))` is a real failure or a cancellation.
+#[allow(clippy::too_many_arguments)]
+fn query_with_sorted_order(
+    conn: &Connection,
+    state: &DbState,
+    generation: u64,
+    table: &str,
+    safe_table: &str,
+    sort_column: &str,
+    sort_asc: bool,
+    offset: i64,
+    limit: i64,
+    columns: Vec<String>,
+) -> Option<Result<QueryResult, String>> {
+    // WITHOUT ROWID tables have no `rowid` column, so the cache can't address
+    // their rows. Probe cheaply and bail to the offset path. Mirrors the guard
+    // in build_rowid_index.
+    if conn
+        .prepare(&format!("SELECT rowid FROM \"{}\" LIMIT 0", safe_table))
+        .is_err()
+    {
+        return None;
+    }
+
+    let mut orders = state.sorted_orders.lock();
+    let fresh = orders
+        .get(table)
+        .is_some_and(|o| o.sort_column == sort_column && o.sort_asc == sort_asc);
+    if !fresh {
+        match build_sorted_order(conn, state, generation, safe_table, sort_column, sort_asc) {
+            Ok(Some(rowids)) => {
+                tracing::debug!(
+                    table,
+                    rows = rowids.len(),
+                    sort_column,
+                    sort_asc,
+                    "built sorted order"
+                );
+                orders.insert(
+                    table.to_string(),
+                    SortedOrder {
+                        sort_column: sort_column.to_string(),
+                        sort_asc,
+                        rowids,
+                    },
+                );
+            }
+            Ok(None) => return Some(Err("Query cancelled by a newer request".to_string())),
+            Err(e) => return Some(Err(e)),
+        }
+    }
+
+    let order = match orders.get(table) {
+        Some(o) => o,
+        None => return Some(Err("Sorted order missing after build".to_string())),
+    };
+    let total_rows = order.rowids.len() as i64;
+    let start = offset.min(total_rows) as usize;
+    let end = offset.saturating_add(limit).min(total_rows) as usize;
+    let page: Vec<i64> = order.rowids[start..end].to_vec();
+    drop(orders);
+
+    Some(
+        fetch_rows_by_rowids(conn, safe_table, &page).map(|rows| QueryResult {
+            columns,
+            rows,
+            total_rows: Some(total_rows),
+            offset,
+        }),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn query_with_offset(
     conn: &Connection,
@@ -294,7 +460,27 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
     }
 
     if where_clause.is_empty() {
-        if req.sort_column.is_none() && offset % limit == 0 {
+        // Sorted, unfiltered: serve pages from a cached rowid order so each
+        // chunk is a rowid lookup, not a fresh full-table ORDER BY. A stale
+        // sort column (valid_sort_column == None) falls through to the
+        // unsorted fast paths below. A WITHOUT ROWID table returns None and
+        // falls through to the ORDER BY + OFFSET path (order_clause is set).
+        if let Some(col) = valid_sort_column {
+            if let Some(result) = query_with_sorted_order(
+                conn,
+                state,
+                generation,
+                table,
+                &safe_table,
+                col,
+                req.sort_asc,
+                offset,
+                limit,
+                columns.clone(),
+            ) {
+                return result;
+            }
+        } else if offset % limit == 0 {
             if let Some(result) = query_with_rowid_index(
                 conn,
                 state,
@@ -541,6 +727,153 @@ mod tests {
 
         assert_eq!(result.total_rows, Some(700));
         assert_eq!(result.rows[0][1].as_deref(), Some("second.sqlite-0"));
+    }
+
+    #[test]
+    fn sorted_query_pages_in_sort_order_via_cache() {
+        let state = state_with_memory_db("CREATE TABLE items (id INTEGER PRIMARY KEY, n INTEGER);");
+        {
+            let mut guard = state.conn.lock();
+            let conn = guard.as_mut().unwrap();
+            let tx = conn.transaction().unwrap();
+            // Insert in reverse so insertion (rowid) order differs from sort order.
+            for n in (0..1_500).rev() {
+                tx.execute("INSERT INTO items (n) VALUES (?)", [n]).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        let page = |offset: i64, asc: bool| QueryRequest {
+            table: "items".to_string(),
+            offset,
+            limit: 500,
+            filters: vec![],
+            global_filter: String::new(),
+            sort_column: Some("n".to_string()),
+            sort_asc: asc,
+        };
+
+        // Ascending: first page starts at 0, second page at 500.
+        let first = query_table(&state, &page(0, true)).unwrap();
+        assert_eq!(first.total_rows, Some(1_500));
+        assert_eq!(first.rows.len(), 500);
+        assert_eq!(first.rows[0][1].as_deref(), Some("0"));
+        assert_eq!(first.rows[499][1].as_deref(), Some("499"));
+
+        // Scroll to the bottom: last page is served from the same cached order.
+        let last = query_table(&state, &page(1_000, true)).unwrap();
+        assert_eq!(last.rows.len(), 500);
+        assert_eq!(last.rows[0][1].as_deref(), Some("1000"));
+        assert_eq!(last.rows[499][1].as_deref(), Some("1499"));
+
+        // Flipping the direction rebuilds the cache and reverses the order.
+        let desc = query_table(&state, &page(0, false)).unwrap();
+        assert_eq!(desc.rows[0][1].as_deref(), Some("1499"));
+        assert_eq!(desc.rows[499][1].as_deref(), Some("1000"));
+    }
+
+    #[test]
+    fn sorted_query_clamps_offset_past_end() {
+        let state = state_with_memory_db(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, n INTEGER);
+             INSERT INTO items (n) VALUES (3), (1), (2);",
+        );
+        let req = QueryRequest {
+            table: "items".to_string(),
+            offset: 500,
+            limit: 500,
+            filters: vec![],
+            global_filter: String::new(),
+            sort_column: Some("n".to_string()),
+            sort_asc: true,
+        };
+
+        let result = query_table(&state, &req).unwrap();
+
+        assert_eq!(result.total_rows, Some(3));
+        assert!(result.rows.is_empty());
+    }
+
+    #[test]
+    fn sorted_query_falls_back_on_without_rowid_table() {
+        // WITHOUT ROWID tables have no rowid, so the sorted-order cache can't
+        // address them. The query must fall back to ORDER BY + OFFSET and still
+        // return correctly ordered rows (regression: this used to error out).
+        let state = state_with_memory_db(
+            "CREATE TABLE t (k TEXT PRIMARY KEY, v INTEGER) WITHOUT ROWID;
+             INSERT INTO t (k, v) VALUES ('c', 3), ('a', 1), ('b', 2);",
+        );
+        let req = QueryRequest {
+            table: "t".to_string(),
+            offset: 0,
+            limit: 10,
+            filters: vec![],
+            global_filter: String::new(),
+            sort_column: Some("v".to_string()),
+            sort_asc: true,
+        };
+
+        let result = query_table(&state, &req).unwrap();
+
+        assert_eq!(result.total_rows, Some(3));
+        let ks: Vec<_> = result.rows.iter().map(|r| r[0].as_deref()).collect();
+        assert_eq!(ks, vec![Some("a"), Some("b"), Some("c")]);
+    }
+
+    #[test]
+    fn sorted_query_handles_page_larger_than_variable_cap() {
+        // A page bigger than SQLITE_MAX_VARIABLE_NUMBER (oldest cap 999) must be
+        // batched, not blow up the IN(...) bound-parameter limit.
+        let state = state_with_memory_db("CREATE TABLE items (id INTEGER PRIMARY KEY, n INTEGER);");
+        {
+            let mut guard = state.conn.lock();
+            let conn = guard.as_mut().unwrap();
+            let tx = conn.transaction().unwrap();
+            for n in (0..2_000).rev() {
+                tx.execute("INSERT INTO items (n) VALUES (?)", [n]).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let req = QueryRequest {
+            table: "items".to_string(),
+            offset: 0,
+            limit: 1_500,
+            filters: vec![],
+            global_filter: String::new(),
+            sort_column: Some("n".to_string()),
+            sort_asc: true,
+        };
+
+        let result = query_table(&state, &req).unwrap();
+
+        assert_eq!(result.rows.len(), 1_500);
+        assert_eq!(result.rows[0][1].as_deref(), Some("0"));
+        // Crossing the 900-row batch boundary preserves order.
+        assert_eq!(result.rows[899][1].as_deref(), Some("899"));
+        assert_eq!(result.rows[900][1].as_deref(), Some("900"));
+        assert_eq!(result.rows[1_499][1].as_deref(), Some("1499"));
+    }
+
+    #[test]
+    fn sorted_query_handles_extreme_offset_without_panic() {
+        let state = state_with_memory_db(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, n INTEGER);
+             INSERT INTO items (n) VALUES (3), (1), (2);",
+        );
+        let req = QueryRequest {
+            table: "items".to_string(),
+            offset: i64::MAX,
+            limit: 500,
+            filters: vec![],
+            global_filter: String::new(),
+            sort_column: Some("n".to_string()),
+            sort_asc: true,
+        };
+
+        let result = query_table(&state, &req).unwrap();
+
+        assert_eq!(result.total_rows, Some(3));
+        assert!(result.rows.is_empty());
     }
 
     #[test]
