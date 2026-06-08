@@ -5,6 +5,14 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.6.2] - 2026-06-08
+
+### Fixed
+- **Sorting a large table and scrolling to the bottom no longer freezes the app**. Every browse chunk on a sorted column re-ran a full-table `ORDER BY` (plus a per-chunk `COUNT(*)`) against a non-indexed column, and none of it was cancellable — so fling-scrolling a large sorted table to the bottom queued dozens of full sorts that serialized on the connection lock and hung the UI. A sorted, unfiltered table now materializes its rowid order **once** per sort key (cached, cancellable mid-build, cleared on db open/close), and each chunk becomes a rowid lookup instead of a fresh sort. `WITHOUT ROWID` tables fall back to the previous `ORDER BY` + `OFFSET` path; the rowid-`IN` page fetch is batched to stay under SQLite's bound-parameter limit.
+
+### Dependencies
+- Bumped Rust `rusqlite 0.40.0 → 0.40.1` (also `libsqlite3-sys 0.38.0 → 0.38.1`, `hashlink 0.11.0 → 0.12.0`) and npm `@sveltejs/kit 2.63.0 → 2.63.1`, `svelte 5.56.2 → 5.56.3`, `@types/node 25.9.1 → 25.9.2`. All minor/patch — no API churn. `npm audit` and `cargo audit` clean (only the known Linux-only gtk-rs unmaintained advisories remain).
+
 ## [26.6.1] - 2026-06-05
 
 ### Added

@@ -17,10 +17,24 @@ pub(super) struct RowidIndex {
     pub(super) chunk_size: i64,
 }
 
+/// Full sorted rowid order for a table under one specific sort key. Lets a
+/// sorted browse turn each chunk into a rowid lookup instead of a fresh
+/// full-table `ORDER BY` per chunk (the latter froze the UI when fling-
+/// scrolling a large sorted table to the bottom). One entry per table,
+/// replaced when the sort column/direction changes. Valid for the
+/// connection's lifetime because the DB is opened `?immutable=1`.
+pub(super) struct SortedOrder {
+    pub(super) sort_column: String,
+    pub(super) sort_asc: bool,
+    /// every rowid in fully sorted order
+    pub(super) rowids: Vec<i64>,
+}
+
 pub struct DbState {
     pub conn: Mutex<Option<Connection>>,
     pub current_path: Mutex<Option<String>>,
     pub(super) rowid_indexes: Mutex<HashMap<String, RowidIndex>>,
+    pub(super) sorted_orders: Mutex<HashMap<String, SortedOrder>>,
     pub(super) query_generation: AtomicU64,
 }
 
@@ -30,6 +44,7 @@ impl DbState {
             conn: Mutex::new(None),
             current_path: Mutex::new(None),
             rowid_indexes: Mutex::new(HashMap::new()),
+            sorted_orders: Mutex::new(HashMap::new()),
             query_generation: AtomicU64::new(0),
         }
     }

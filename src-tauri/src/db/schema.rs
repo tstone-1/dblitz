@@ -25,6 +25,7 @@ pub fn open_database(state: &DbState, path: &str) -> Result<Vec<TableInfo>, Stri
     *state.conn.lock() = Some(conn);
     *state.current_path.lock() = Some(path.to_string());
     state.rowid_indexes.lock().clear();
+    state.sorted_orders.lock().clear();
 
     Ok(tables)
 }

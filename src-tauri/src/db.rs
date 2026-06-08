@@ -31,4 +31,5 @@ pub fn close_database(state: &DbState) {
     *state.conn.lock() = None;
     *state.current_path.lock() = None;
     state.rowid_indexes.lock().clear();
+    state.sorted_orders.lock().clear();
 }
