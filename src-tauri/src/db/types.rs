@@ -6,8 +6,8 @@ use std::sync::atomic::AtomicU64;
 
 /// Sparse rowid index: maps chunk_index -> starting rowid for O(log n) seeks.
 /// Built once per table on first query, invalidated on table switch.
-/// External writers cannot stale this cache because we open with
-/// `?immutable=1` - the connection sees a frozen snapshot for its lifetime.
+/// Valid only under dblitz's open-time promise that the file is not modified
+/// while this immutable connection is alive.
 pub(super) struct RowidIndex {
     /// chunk_index -> rowid of first row in that chunk
     pub(super) boundaries: Vec<i64>,
@@ -22,7 +22,7 @@ pub(super) struct RowidIndex {
 /// full-table `ORDER BY` per chunk (the latter froze the UI when fling-
 /// scrolling a large sorted table to the bottom). One entry per table,
 /// replaced when the sort column/direction changes. Valid for the
-/// connection's lifetime because the DB is opened `?immutable=1`.
+/// connection's lifetime under the same immutable-file promise.
 pub(super) struct SortedOrder {
     pub(super) sort_column: String,
     pub(super) sort_asc: bool,
@@ -104,7 +104,6 @@ pub struct QueryResult {
 pub struct SqlResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Option<String>>>,
-    pub rows_affected: usize,
     pub error: Option<String>,
     /// True when the result set exceeded `SQL_RESULT_LIMIT` and only the
     /// first N rows are returned. This is a non-fatal warning that travels

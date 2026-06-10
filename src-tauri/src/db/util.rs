@@ -26,9 +26,14 @@ pub(super) fn path_to_sqlite_uri(path: &str) -> String {
         .replace('?', "%3F")
         .replace('#', "%23")
         .replace('\\', "/");
+    // UNC path "//server/share/db.sqlite" -> "file:////server/share/db.sqlite?immutable=1".
+    // The four-slash form keeps the URI authority empty; "file://server/..."
+    // would be parsed as a non-local authority and rejected by SQLite.
+    if encoded.starts_with("//") {
+        format!("file://{}?immutable=1", encoded)
     // Unix path "/foo/bar" -> "file:/foo/bar?immutable=1"
     // Windows path "C:/foo/bar" -> "file:/C:/foo/bar?immutable=1"
-    if encoded.starts_with('/') {
+    } else if encoded.starts_with('/') {
         format!("file:{}?immutable=1", encoded)
     } else {
         format!("file:/{}?immutable=1", encoded)
@@ -104,6 +109,10 @@ mod tests {
         assert_eq!(
             path_to_sqlite_uri(r"C:\with%percent\db.sqlite"),
             "file:/C:/with%25percent/db.sqlite?immutable=1"
+        );
+        assert_eq!(
+            path_to_sqlite_uri(r"\\server\share\db.sqlite"),
+            "file:////server/share/db.sqlite?immutable=1"
         );
     }
 }

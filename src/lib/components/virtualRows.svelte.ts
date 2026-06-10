@@ -58,7 +58,6 @@ export function createVirtualRows(deps: VirtualRowsDeps) {
       applyResult(chunkIdx, result, "if-empty");
     })().catch((e) => {
       if (isCurrent(myEpoch)) deps.setError(String(e));
-      throw e;
     }).finally(() => {
       if (pendingChunks.get(chunkIdx) === task) pendingChunks.delete(chunkIdx);
     });

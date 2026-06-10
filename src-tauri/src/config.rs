@@ -21,7 +21,6 @@ pub struct ViewConfig {
     pub column_colors: HashMap<String, String>,
     pub sort_column: Option<String>,
     pub sort_asc: bool,
-    pub selected_table: Option<String>,
     #[serde(default)]
     pub column_order: Vec<String>,
     #[serde(default)]
@@ -45,7 +44,7 @@ pub struct FileConfig {
     pub label: Option<String>,
 }
 
-const TINT_PRESETS: &[&str] = &[
+pub const TINT_PRESETS: &[&str] = &[
     "#d94040", "#e0a030", "#4aa84a", "#3080d0", "#8050c0", "#c04090",
 ];
 
@@ -351,6 +350,14 @@ mod tests {
         assert_eq!(
             sanitize_file_config(config).tint.as_deref(),
             Some("#3080d0")
+        );
+    }
+
+    #[test]
+    fn tint_presets_match_frontend_toolbar_utils() {
+        assert_eq!(
+            TINT_PRESETS,
+            ["#d94040", "#e0a030", "#4aa84a", "#3080d0", "#8050c0", "#c04090"]
         );
     }
 }

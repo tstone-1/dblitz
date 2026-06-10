@@ -8,6 +8,7 @@
     commitTableConfig,
     saveViewConfig,
     type ColumnFilter,
+    type ColumnFilterValue,
     type QueryResult,
   } from "$lib/store.svelte";
   import DataGrid from "./DataGrid.svelte";
@@ -23,6 +24,7 @@
     visibleColumns,
   } from "./columnView";
   import { computeAutoWidths } from "./columnWidths";
+  import { INCOMPLETE_OPS } from "./filterOperators";
 
   const CHUNK_SIZE = 500;
   const FILTER_DEBOUNCE_MS = 500;
@@ -31,7 +33,7 @@
   let columns = $state<string[]>([]);
   let totalRows = $state(0);
   let globalFilter = $state("");
-  let columnFilters = $state<Record<string, { value: string; is_regex: boolean }>>({});
+  let columnFilters = $state<Record<string, ColumnFilterValue>>({});
   let sortColumn = $state<string | null>(null);
   let sortAsc = $state(true);
   let loading = $state(false);
@@ -165,6 +167,11 @@
             totalRows = count;
             countPending = false;
           }
+        }).catch((e) => {
+          if (virtualRows.isCurrent(myEpoch)) {
+            countPending = false;
+            appState.error = String(e);
+          }
         });
       }
 
@@ -180,15 +187,6 @@
   // not reactive state. Tracking it via `$state` would defeat the dedup (every
   // read/write would trigger downstream effects).
   let lastFilterState = "";
-
-  // Operator prefixes that require an operand to the right. These mirror the
-  // prefixes parsed by the backend in src-tauri/src/db/filters.rs
-  // (build_where_clause) — keep the two in sync. A bare operator here (e.g. ">"
-  // with nothing after it) is a half-typed filter, so we suppress the query
-  // until the user finishes. Note: "<>" is intentionally absent — bare "<>" is
-  // a complete filter ("non-empty values only"), not an incomplete one.
-  const OPERAND_REQUIRED_OPS = ["<", ">", ">=", "<=", "="];
-  const INCOMPLETE_OPS = new RegExp(`^(${OPERAND_REQUIRED_OPS.join("|")})$`);
 
   function hasIncompleteFilter(): boolean {
     return Object.values(columnFilters).some((f) => {
@@ -221,6 +219,7 @@
       cfg.sort_asc = sortAsc;
       saveViewConfig();
     }
+    if (hasIncompleteFilter()) return;
     reloadData();
   }
 

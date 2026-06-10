@@ -112,7 +112,7 @@ and in the recent-files dropdown, so PROD and QA stay visually distinct.
   object in `sqlite_master` (tables, indexes, views, triggers)
 - SELECT-only SQL editor with CodeMirror syntax highlighting and schema-aware
   autocomplete (table and column names)
-- Results capped at 10,000 rows with a clear truncation message
+- Results capped at 50,000 rows with a clear truncation message
 - SQL history persisted in the WebView's local storage
 
 **Export and copy**

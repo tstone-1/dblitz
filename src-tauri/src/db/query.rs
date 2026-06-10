@@ -542,8 +542,11 @@ pub fn count_rows(
     let WhereResult {
         clause: where_clause,
         params,
-        ..
+        regex_filters,
     } = build_where_clause(&columns, filters, global_filter)?;
+    if !regex_filters.is_empty() {
+        return Err("count_rows does not support regex filters".to_string());
+    }
 
     let sql = format!("SELECT COUNT(*) FROM \"{}\"{}", safe_table, where_clause);
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
@@ -551,7 +554,7 @@ pub fn count_rows(
         .map(|p| p as &dyn rusqlite::types::ToSql)
         .collect();
     conn.query_row(&sql, param_refs.as_slice(), |row| row.get(0))
-        .map_err(|e| e.to_string())
+        .str_err()
 }
 
 #[cfg(test)]
@@ -941,5 +944,17 @@ mod tests {
         let result = query_table(&state, &req).unwrap();
 
         assert_eq!(result.rows[0][1].as_deref(), Some("item-250"));
+    }
+
+    #[test]
+    fn count_rows_rejects_regex_filters() {
+        let state = state_with_memory_db(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);
+             INSERT INTO users (name) VALUES ('alice'), ('bravo');",
+        );
+
+        let err = count_rows(&state, "users", &[regex_filter("name", "^a")], "").unwrap_err();
+
+        assert!(err.contains("regex"), "got: {err}");
     }
 }

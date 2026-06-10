@@ -111,6 +111,28 @@ describe("createVirtualRows", () => {
 
     await expect(materialized).rejects.toThrow("Selection changed");
   });
+
+  it("reports background chunk errors without rethrowing unhandled rejections", async () => {
+    const errors: string[] = [];
+    const rows = createVirtualRows({
+      chunkSize: 2,
+      getSelectedTable: () => "items",
+      loadChunk: async () => {
+        throw new Error("load failed");
+      },
+      cancelQueries: async () => {},
+      getVisibleColumns: () => ["id"],
+      getColumnIndex: () => 0,
+      hasColumns: () => true,
+      setColumns: () => {},
+      setTotalRows: () => {},
+      setError: (message) => errors.push(message),
+    });
+
+    expect(rows.getVisibleRow(0)).toBeNull();
+    await expect(rows.fetchChunk(0)).resolves.toBeUndefined();
+    expect(errors[0]).toContain("load failed");
+  });
 });
 
 async function loadsSettled() {

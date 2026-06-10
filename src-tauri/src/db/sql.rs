@@ -33,7 +33,6 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
             return SqlResult {
                 columns: vec![],
                 rows: vec![],
-                rows_affected: 0,
                 error: Some("No database open".to_string()),
                 truncated: false,
             }
@@ -51,7 +50,6 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
         return SqlResult {
             columns: vec![],
             rows: vec![],
-            rows_affected: 0,
             error: Some(
                 "dblitz is a read-only viewer - ATTACH and DETACH are not allowed.".to_string(),
             ),
@@ -65,7 +63,6 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
             return SqlResult {
                 columns: vec![],
                 rows: vec![],
-                rows_affected: 0,
                 error: Some(e.to_string()),
                 truncated: false,
             };
@@ -76,7 +73,6 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
         return SqlResult {
             columns: vec![],
             rows: vec![],
-            rows_affected: 0,
             error: Some(
                 "dblitz is a read-only viewer - write statements (INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, etc.) are not supported.".to_string(),
             ),
@@ -109,7 +105,6 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
                         return SqlResult {
                             columns,
                             rows,
-                            rows_affected: 0,
                             error: Some(e.to_string()),
                             truncated: false,
                         };
@@ -119,7 +114,6 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
             SqlResult {
                 columns,
                 rows,
-                rows_affected: 0,
                 error: None,
                 truncated,
             }
@@ -127,7 +121,6 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
         Err(e) => SqlResult {
             columns: vec![],
             rows: vec![],
-            rows_affected: 0,
             error: Some(e.to_string()),
             truncated: false,
         },
@@ -173,7 +166,6 @@ mod tests {
             "expected friendly read-only message, got: {err}"
         );
         assert!(result.rows.is_empty());
-        assert_eq!(result.rows_affected, 0);
 
         close_database(&state);
         let _ = std::fs::remove_file(&path);
@@ -208,7 +200,6 @@ mod tests {
             result.rows.is_empty(),
             "rejected statement must return no rows"
         );
-        assert_eq!(result.rows_affected, 0);
     }
 
     #[test]
