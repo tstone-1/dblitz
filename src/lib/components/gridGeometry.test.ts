@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildGridTemplate, visibleRowIndices } from "./gridGeometry";
+import {
+  buildGridTemplate,
+  rowIndexToVirtualTop,
+  virtualScrollGeometry,
+  virtualScrollTopToDataScroll,
+  visibleRowIndices,
+} from "./gridGeometry";
 
 describe("grid geometry helpers", () => {
   it("returns no visible indices for an empty grid", () => {
@@ -59,6 +65,25 @@ describe("grid geometry helpers", () => {
   it("builds grid template tracks from persisted widths and defaults", () => {
     expect(buildGridTemplate(["id", "name"], { id: 120 })).toBe(
       "60px 120px minmax(80px, 1fr)",
+    );
+  });
+
+  it("compresses virtual spacer height while preserving row mapping", () => {
+    const geometry = virtualScrollGeometry({
+      rowCount: 5_000_000,
+      rowHeight: 26,
+      maxSpacerHeight: 20_000_000,
+    });
+
+    expect(geometry.spacerHeight).toBe(20_000_000);
+    expect(geometry.scale).toBe(6.5);
+    expect(virtualScrollTopToDataScroll(0, geometry, 600)).toBe(0);
+    expect(
+      virtualScrollTopToDataScroll(geometry.spacerHeight - 600, geometry, 600),
+    ).toBe(geometry.naturalHeight - 600);
+    expect(rowIndexToVirtualTop(0, 26, geometry, 600)).toBe(0);
+    expect(rowIndexToVirtualTop(4_999_000, 26, geometry, 600)).toBeLessThan(
+      geometry.spacerHeight,
     );
   });
 });

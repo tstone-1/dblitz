@@ -1,9 +1,4 @@
-import type { ColumnFilter, Theme } from "$lib/store.svelte";
-
-export interface ColumnFilterState {
-  value: string;
-  is_regex: boolean;
-}
+import type { ColumnFilter, ColumnFilterValue, Theme } from "$lib/store.svelte";
 
 export function orderColumns(columns: string[], configuredOrder: string[]): string[] {
   if (configuredOrder.length === 0) return columns;
@@ -21,7 +16,7 @@ export function visibleColumns(columns: string[], hiddenColumns: string[]): stri
 
 export function buildActiveFilters(
   columns: string[],
-  columnFilters: Record<string, ColumnFilterState>,
+  columnFilters: Record<string, ColumnFilterValue>,
 ): ColumnFilter[] {
   const validColumns = new Set(columns);
   return Object.entries(columnFilters)

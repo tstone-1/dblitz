@@ -28,6 +28,11 @@ export interface ColumnFilter {
   is_regex: boolean;
 }
 
+export interface ColumnFilterValue {
+  value: string;
+  is_regex: boolean;
+}
+
 export interface QueryResult {
   columns: string[];
   rows: (string | null)[][];
@@ -38,7 +43,6 @@ export interface QueryResult {
 export interface SqlResult {
   columns: string[];
   rows: (string | null)[][];
-  rows_affected: number;
   error: string | null;
   // Non-fatal: set when the result exceeded the 50,000-row cap and only the
   // first N rows were returned. Travels alongside `rows`, not in `error`.
@@ -50,12 +54,17 @@ export interface PinnedFilter {
   is_regex: boolean;
 }
 
+export interface RecentFile {
+  path: string;
+  tint: string | null;
+  label: string | null;
+}
+
 export interface ViewConfig {
   hidden_columns: string[];
   column_colors: Record<string, string>;
   sort_column: string | null;
   sort_asc: boolean;
-  selected_table: string | null;
   column_order: string[];
   pinned_filters: Record<string, PinnedFilter>;
   pinned_global_filter: string | null;
@@ -232,7 +241,6 @@ const defaultViewConfig: ViewConfig = {
   column_colors: {},
   sort_column: null,
   sort_asc: true,
-  selected_table: null,
   column_order: [],
   pinned_filters: {},
   pinned_global_filter: null,
@@ -263,7 +271,6 @@ export function ensureTableConfig(tableName: string): ViewConfig {
       column_colors: {},
       sort_column: null,
       sort_asc: true,
-      selected_table: null,
       column_order: [],
       pinned_filters: {},
       pinned_global_filter: null,

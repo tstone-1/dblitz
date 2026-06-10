@@ -59,7 +59,6 @@
       result = {
         columns: [],
         rows: [],
-        rows_affected: 0,
         error: String(e),
         truncated: false,
       };
@@ -140,8 +139,6 @@
           <div class="result-info">
             {#if result.rows.length > 0}
               {result.rows.length} row{result.rows.length !== 1 ? 's' : ''} returned
-            {:else if result.rows_affected > 0}
-              {result.rows_affected} row{result.rows_affected !== 1 ? 's' : ''} affected
             {:else}
               Query executed successfully
             {/if}

@@ -24,6 +24,22 @@ describe("buildSelectionData", () => {
         ["2", "bravo"],
         ["3", "charlie"],
       ],
+      truncated: false,
+    });
+  });
+
+  it("reports when a selection is truncated by the row cap", async () => {
+    const data = await buildSelectionData({
+      selection: { r0: 0, r1: 2, c0: 0, c1: 0 },
+      columns: ["id"],
+      getRow: (index) => [String(index)],
+      maxRows: 2,
+    });
+
+    expect(data).toEqual({
+      headers: ["id"],
+      rows: [["0"], ["1"]],
+      truncated: true,
     });
   });
 

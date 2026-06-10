@@ -5,6 +5,29 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.6.3] - 2026-06-10
+
+### Fixed
+- **UNC network-share database paths now open correctly**. SQLite URI generation now preserves an empty URI authority for paths like `\\server\share\db.sqlite` instead of producing a non-local `file://server/...` authority.
+- **Very large Browse Data tables remain scrollable past Chromium's layout-height cap**. The grid compresses the virtual spacer once it would exceed a safe pixel height and maps scrollbar position back to row indices by ratio, so multi-million-row tables can still reach the bottom.
+- **Hidden grids no longer race on Ctrl+C**. Window-level copy handling now checks that the grid is visible, preventing inactive mounted tabs from writing stale selections to the clipboard.
+- **Background chunk/count failures now settle cleanly**. Chunk load errors still surface in the error bar without producing unhandled promise rejections, and failed async row counts clear the `counting...` state.
+- **Sorting no longer bypasses the incomplete-filter gate**. Header clicks now avoid firing a query while a half-typed operator such as `>` is still incomplete.
+- **Excel export handles duplicate result column names** by deduping table captions before handing them to `rust_xlsxwriter`.
+- **Copy and Excel export now report selection truncation** when a selection exceeds the 100k materialization cap.
+
+### Changed
+- README now documents the current 50,000-row Execute SQL cap.
+
+### Internal
+- Removed dead read-only `rows_affected` plumbing and the unused persisted `selected_table` field.
+- Consolidated the frontend column-filter value and recent-file boundary types.
+- Added regression tests for UNC URI conversion, regex count rejection, large virtual-scroll mapping, hidden-grid copy gating, operator/tint preset sync, duplicate-header XLSX export, selection truncation, and background chunk errors.
+- Corrected the `immutable=1` cache comment to describe the file-stability promise instead of a frozen snapshot.
+
+### Dependencies
+- Bumped npm dependencies to the latest compatible patch/minor versions (`@codemirror/view 6.43.1`, `@sveltejs/kit 2.64.0`) and refreshed Rust transitive lockfile entries (`bitflags 2.13.0`, `http 1.4.2`, `regex 1.12.4`, `uuid 1.23.3`, `wasm-bindgen 0.2.123`, and related crates). `npm audit` is clean; `cargo audit` reports only the known allowed Tauri/GTK transitive advisories.
+
 ## [26.6.2] - 2026-06-08
 
 ### Fixed

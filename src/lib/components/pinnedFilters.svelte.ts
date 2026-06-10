@@ -14,21 +14,17 @@ import {
   commitTableConfig,
   saveViewConfig,
 } from "$lib/store.svelte";
+import type { ColumnFilterValue } from "$lib/store.svelte";
 
 type PinState = "none" | "pinned" | "modified";
-
-interface ColumnFilter {
-  value: string;
-  is_regex: boolean;
-}
 
 export interface PinnedFiltersDeps {
   /** Currently selected table name (or null if none). */
   getSelectedTable: () => string | null;
   /** Live ephemeral column filter map. Mutated in-place by revert/clear. */
-  getColumnFilters: () => Record<string, ColumnFilter>;
+  getColumnFilters: () => Record<string, ColumnFilterValue>;
   /** Wholesale replace the column filter map (used by reset / clear-all). */
-  setColumnFilters: (cf: Record<string, ColumnFilter>) => void;
+  setColumnFilters: (cf: Record<string, ColumnFilterValue>) => void;
   /** Live global filter value. */
   getGlobalFilter: () => string;
   /** Set the global filter value. */

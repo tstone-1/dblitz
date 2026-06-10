@@ -47,6 +47,24 @@ fn classify_cell(numeric: bool, val: &str) -> CellValue {
     }
 }
 
+fn dedupe_headers(headers: &[String]) -> Vec<String> {
+    use std::collections::HashMap;
+
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    headers
+        .iter()
+        .map(|header| {
+            let count = counts.entry(header.as_str()).or_insert(0);
+            *count += 1;
+            if *count == 1 {
+                header.clone()
+            } else {
+                format!("{header}_{count}")
+            }
+        })
+        .collect()
+}
+
 pub fn export_to_xlsx(
     headers: &[String],
     rows: &[Vec<String>],
@@ -67,6 +85,8 @@ pub fn export_to_xlsx(
     if rows.iter().any(|row| row.len() > headers.len()) {
         return Err("Export row has more cells than headers".to_string());
     }
+
+    let table_headers = dedupe_headers(headers);
 
     for (ci, h) in headers.iter().enumerate() {
         ws.write_string(0, ci as u16, h).str_err()?;
@@ -90,7 +110,7 @@ pub fn export_to_xlsx(
     } else {
         (headers.len() - 1) as u16
     };
-    let columns: Vec<TableColumn> = headers
+    let columns: Vec<TableColumn> = table_headers
         .iter()
         .map(|h| TableColumn::new().set_header(h))
         .collect();
@@ -168,5 +188,20 @@ mod tests {
         let rows = vec![vec!["a".to_string(), "b".to_string()]];
         let err = export_to_xlsx(&headers, &rows, &[]).unwrap_err();
         assert!(err.contains("more cells than headers"), "got: {err}");
+    }
+
+    #[test]
+    fn export_allows_duplicate_headers() {
+        let headers = vec!["a".to_string(), "a".to_string()];
+        let rows = vec![vec!["1".to_string(), "2".to_string()]];
+        let path = export_to_xlsx(
+            &headers,
+            &rows,
+            &["INTEGER".to_string(), "INTEGER".to_string()],
+        )
+        .unwrap();
+
+        assert!(std::path::Path::new(&path).exists());
+        let _ = std::fs::remove_file(path);
     }
 }

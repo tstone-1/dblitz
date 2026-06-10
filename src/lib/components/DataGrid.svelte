@@ -6,12 +6,20 @@
   import { createDragReorder } from "./dragReorder.svelte";
   import { buildSelectionData } from "./selectionData";
   import { buildSelectionStats } from "./selectionStats";
-  import { buildGridTemplate, visibleRowIndices as getVisibleRowIndices } from "./gridGeometry";
+  import {
+    buildGridTemplate,
+    rowIndexToVirtualTop,
+    virtualScrollGeometry,
+    virtualScrollTopToDataScroll,
+    visibleRowIndices as getVisibleRowIndices,
+  } from "./gridGeometry";
+  import { shouldHandleWindowCopy } from "./copyGate";
 
   const ROW_HEIGHT = 26;
   const HEADER_HEIGHT = 26;
   const FILTER_ROW_HEIGHT = 28;
   const OVERSCAN = 20;
+  const MAX_SCROLL_SPACER_HEIGHT = 20_000_000;
 
   // Props
   interface Props {
@@ -103,6 +111,11 @@
   // Determine mode
   let isVirtual = $derived(getRowProp != null);
   let rowCount = $derived(isVirtual ? (totalRowsProp ?? 0) : (rows?.length ?? 0));
+  let scrollGeometry = $derived(virtualScrollGeometry({
+    rowCount,
+    rowHeight: ROW_HEIGHT,
+    maxSpacerHeight: MAX_SCROLL_SPACER_HEIGHT,
+  }));
 
   function getRowData(index: number): (string | null)[] | null {
     if (isVirtual) return getRowProp!(index);
@@ -117,14 +130,14 @@
   function handleScroll(e: Event) {
     const el = e.target as HTMLDivElement;
     scrollTop = el.scrollTop;
-    onScroll?.(scrollTop, viewportHeight);
+    onScroll?.(virtualScrollTopToDataScroll(scrollTop, scrollGeometry, viewportHeight), viewportHeight);
   }
 
   function visibleRowIndices(): number[] {
     return getVisibleRowIndices({
       rowCount,
       rowHeight: ROW_HEIGHT,
-      scrollTop,
+      scrollTop: virtualScrollTopToDataScroll(scrollTop, scrollGeometry, viewportHeight),
       stickyHeight,
       viewportHeight,
       overscan: OVERSCAN,
@@ -141,11 +154,6 @@
       gridContainer.style.setProperty('--grid-tpl', buildGridTemplate(columns, columnWidths));
     }
   }
-
-  $effect(() => {
-    void columns;
-    tick().then(syncGridTplToDOM);
-  });
 
   // Column resize
   let resizeCol: string | null = null;
@@ -219,6 +227,9 @@
       if (withHeaders) lines.push(data.headers.join('\t'));
       for (const row of data.rows) lines.push(row.join('\t'));
       await navigator.clipboard.writeText(lines.join('\n'));
+      if (data.truncated) {
+        appState.error = `Selection copied with the first ${data.rows.length.toLocaleString()} rows only.`;
+      }
       ctxMenu = null;
     } catch (e) {
       appState.error = String(e);
@@ -246,6 +257,9 @@
         rows: data.rows,
         columnTypes: types,
       });
+      if (data.truncated) {
+        appState.error = `Excel export included the first ${data.rows.length.toLocaleString()} selected rows only.`;
+      }
       ctxMenu = null;
     } catch (e) {
       appState.error = String(e);
@@ -346,15 +360,15 @@
   // behavior inside filter inputs, SQL editor, etc.
   function handleWindowKeydown(e: KeyboardEvent) {
     if (!(e.ctrlKey || e.metaKey) || e.key !== 'c') return;
-    if (!selection.sel) return;
-    const tag = (e.target as HTMLElement)?.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
     const active = document.activeElement as HTMLElement | null;
-    if (active?.isContentEditable) return;
-    // Don't override the browser's native copy when the user has a text
-    // selection (e.g. highlighted part of a cell value).
     const textSel = window.getSelection();
-    if (textSel && textSel.toString().length > 0) return;
+    if (!shouldHandleWindowCopy({
+      hasSelection: selection.sel != null,
+      targetTag: (e.target as HTMLElement)?.tagName,
+      isContentEditable: active?.isContentEditable ?? false,
+      hasTextSelection: textSel != null && textSel.toString().length > 0,
+      gridVisible: gridContainer?.offsetParent != null,
+    })) return;
     e.preventDefault();
     copySelection(false);
   }
@@ -461,13 +475,13 @@
     </div>
 
     <!-- Data rows -->
-    <div class="scroll-spacer" style="height: {rowCount * ROW_HEIGHT}px;">
+    <div class="scroll-spacer" style="height: {scrollGeometry.spacerHeight}px;">
       {#each visibleRowIndices() as rowIdx (rowIdx)}
         {@const row = getRowData(rowIdx)}
         <div class="grid-row data-row"
           role="row"
           tabindex="-1"
-          style="position: absolute; top: {rowIdx * ROW_HEIGHT}px; height: {ROW_HEIGHT}px; width: 100%;"
+          style="position: absolute; top: {rowIndexToVirtualTop(rowIdx, ROW_HEIGHT, scrollGeometry, viewportHeight)}px; height: {ROW_HEIGHT}px; width: 100%;"
           oncontextmenu={(e) => handleContextMenu(e, rowIdx)}
           onmousedown={(e) => selection.onCellMouseDown(e, rowIdx)}>
           <div class="grid-cell row-num" role="gridcell" tabindex="-1">{rowIdx + 1}</div>

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
   import { invoke } from "@tauri-apps/api/core";
-  import { appState, openDatabase, closeDatabase, setTheme, saveViewConfig, type Theme } from "$lib/store.svelte";
+  import { appState, openDatabase, closeDatabase, setTheme, saveViewConfig, type RecentFile } from "$lib/store.svelte";
   import { fileName, parentDir, TINT_PRESETS, tintPillStyle, toolbarTintStyle } from "./toolbarUtils";
 
   function setTint(value: string | null) {
@@ -21,8 +21,6 @@
 
   let toolbarStyle = $derived(toolbarTintStyle(appState.fileConfig.tint));
   let pillStyle = $derived(tintPillStyle(appState.fileConfig.tint));
-
-  interface RecentFile { path: string; tint: string | null; label: string | null; }
 
   let showSettings = $state(false);
   let showRecents = $state(false);

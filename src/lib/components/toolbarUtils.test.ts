@@ -1,11 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { fileName, parentDir, safeTint, tintPillStyle, toolbarTintStyle } from "./toolbarUtils";
+import {
+  fileName,
+  parentDir,
+  safeTint,
+  TINT_PRESETS,
+  tintPillStyle,
+  toolbarTintStyle,
+} from "./toolbarUtils";
 
 describe("toolbar utilities", () => {
   it("accepts only configured tint values", () => {
     expect(safeTint("#d94040")).toBe("#d94040");
     expect(safeTint("#ffffff")).toBeNull();
     expect(safeTint(null)).toBeNull();
+  });
+
+  it("keeps tint presets in sync with the backend whitelist", () => {
+    expect(TINT_PRESETS.map((preset) => preset.value).filter(Boolean)).toEqual([
+      "#d94040",
+      "#e0a030",
+      "#4aa84a",
+      "#3080d0",
+      "#8050c0",
+      "#c04090",
+    ]);
   });
 
   it("builds tint styles only for safe tint values", () => {

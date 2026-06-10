@@ -11,6 +11,7 @@ export interface SelectionDataOptions {
 export interface SelectionData {
   headers: string[];
   rows: string[][];
+  truncated: boolean;
 }
 
 export async function buildSelectionData({
@@ -24,6 +25,7 @@ export async function buildSelectionData({
 
   const headers = columns.slice(selection.c0, selection.c1 + 1);
   const lastRow = Math.min(selection.r1, selection.r0 + maxRows - 1);
+  const truncated = lastRow < selection.r1;
   const materialized = getRows ? await getRows(selection.r0, lastRow) : null;
   const rows: string[][] = [];
 
@@ -43,5 +45,5 @@ export async function buildSelectionData({
     rows.push(cells);
   }
 
-  return { headers, rows };
+  return { headers, rows, truncated };
 }
