@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::sync::atomic::Ordering;
 
 use super::query::build_rowid_index;
 use super::types::DbState;
@@ -62,7 +63,8 @@ pub fn benchmark_query(
         let mut indexes = state.rowid_indexes.lock();
         if !indexes.contains_key(table) {
             let t0 = Instant::now();
-            if let Some(idx) = build_rowid_index(conn, &safe_table, limit) {
+            let generation = state.query_generation.load(Ordering::Relaxed);
+            if let Some(idx) = build_rowid_index(conn, state, generation, &safe_table, limit) {
                 let build_ms = t0.elapsed().as_secs_f64() * 1000.0;
                 results.push(BenchmarkResult {
                     label: "index build".to_string(),

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   fileName,
   parentDir,
@@ -16,14 +17,11 @@ describe("toolbar utilities", () => {
   });
 
   it("keeps tint presets in sync with the backend whitelist", () => {
-    expect(TINT_PRESETS.map((preset) => preset.value).filter(Boolean)).toEqual([
-      "#d94040",
-      "#e0a030",
-      "#4aa84a",
-      "#3080d0",
-      "#8050c0",
-      "#c04090",
-    ]);
+    const rustConfig = readFileSync("src-tauri/src/config.rs", "utf8");
+    const match = rustConfig.match(/pub const TINT_PRESETS: &\[&str\] = &\[(?<values>[^\]]+)\]/);
+    expect(match?.groups?.values).toBeTruthy();
+    const backendValues = [...match!.groups!.values.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+    expect(TINT_PRESETS.map((preset) => preset.value).filter(Boolean)).toEqual(backendValues);
   });
 
   it("builds tint styles only for safe tint values", () => {

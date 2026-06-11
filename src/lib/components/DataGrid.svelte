@@ -1,10 +1,8 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
   import { onDestroy, tick } from "svelte";
-  import { appState } from "$lib/store.svelte";
   import { createCellSelection } from "./cellSelection.svelte";
   import { createDragReorder } from "./dragReorder.svelte";
-  import { buildSelectionData } from "./selectionData";
+  import { buildSelectionData, type SelectionData } from "./selectionData";
   import { buildSelectionStats } from "./selectionStats";
   import {
     buildGridTemplate,
@@ -21,17 +19,19 @@
   const OVERSCAN = 20;
   const MAX_SCROLL_SPACER_HEIGHT = 20_000_000;
 
+  type GridMode =
+    | { kind: "static"; rows: (string | null)[][] }
+    | {
+        kind: "virtual";
+        totalRows: number;
+        getRow: (index: number) => (string | null)[] | null;
+        getRows: (start: number, end: number) => Promise<(string | null)[][]>;
+      };
+
   // Props
   interface Props {
     columns: string[];
-    // Static mode: all rows in memory
-    rows?: (string | null)[][];
-    // Virtual scroll mode: total count + getter
-    totalRows?: number;
-    getRow?: (index: number) => (string | null)[] | null;
-    getRows?: (start: number, end: number) => Promise<(string | null)[][]>;
-    // Optional: called when user scrolls to trigger chunk loading
-    onScroll?: (scrollTop: number, viewportHeight: number) => void;
+    mode: GridMode;
     // Optional: sorting
     sortColumn?: string | null;
     sortAsc?: boolean;
@@ -58,11 +58,11 @@
     onResizeColumn?: (col: string, width: number) => void;
     // Optional: reset all column widths to auto-fit
     onResetColumnWidths?: () => void;
-    // Optional: declared SQLite types per column (VARCHAR, INTEGER, ...).
-    // When provided, "Open in Excel" uses them to decide whether to emit
-    // numeric vs text cells so long text-like IDs don't get coerced to
-    // scientific notation.
-    columnTypes?: Record<string, string>;
+    // Optional: export selected cells. Owners provide the app-level backend
+    // call so this grid remains a presentational leaf.
+    onExport?: (data: SelectionData) => Promise<void>;
+    onNotice?: (message: string) => void;
+    onError?: (message: string) => void;
     // Optional: locate-column signal. Bumping `n` re-triggers the effect for
     // the same column (e.g. user invokes Find on the same column twice).
     locateRequest?: { col: string; n: number } | null;
@@ -70,11 +70,7 @@
 
   let {
     columns,
-    rows = undefined,
-    totalRows: totalRowsProp = undefined,
-    getRow: getRowProp = undefined,
-    getRows: getRowsProp = undefined,
-    onScroll = undefined,
+    mode,
     sortColumn = null,
     sortAsc = true,
     onSort = undefined,
@@ -93,7 +89,9 @@
     initialColumnWidths = undefined,
     onResizeColumn = undefined,
     onResetColumnWidths = undefined,
-    columnTypes = undefined,
+    onExport = undefined,
+    onNotice = undefined,
+    onError = undefined,
     locateRequest = null,
   }: Props = $props();
 
@@ -108,9 +106,7 @@
   // CSS positioning; the sticky wrapper handles that structurally.
   let stickyHeight = $derived(HEADER_HEIGHT + (showFilters ? FILTER_ROW_HEIGHT : 0));
 
-  // Determine mode
-  let isVirtual = $derived(getRowProp != null);
-  let rowCount = $derived(isVirtual ? (totalRowsProp ?? 0) : (rows?.length ?? 0));
+  let rowCount = $derived(mode.kind === "virtual" ? mode.totalRows : mode.rows.length);
   let scrollGeometry = $derived(virtualScrollGeometry({
     rowCount,
     rowHeight: ROW_HEIGHT,
@@ -118,8 +114,8 @@
   }));
 
   function getRowData(index: number): (string | null)[] | null {
-    if (isVirtual) return getRowProp!(index);
-    return rows?.[index] ?? null;
+    if (mode.kind === "virtual") return mode.getRow(index);
+    return mode.rows[index] ?? null;
   }
 
   // Scroll state
@@ -130,7 +126,6 @@
   function handleScroll(e: Event) {
     const el = e.target as HTMLDivElement;
     scrollTop = el.scrollTop;
-    onScroll?.(virtualScrollTopToDataScroll(scrollTop, scrollGeometry, viewportHeight), viewportHeight);
   }
 
   function visibleRowIndices(): number[] {
@@ -219,7 +214,7 @@
         selection: sel,
         columns,
         getRow: getRowData,
-        getRows: getRowsProp,
+        getRows: mode.kind === "virtual" ? mode.getRows : undefined,
         maxRows: MAX_COPY_ROWS,
       });
       if (!data) return;
@@ -228,41 +223,35 @@
       for (const row of data.rows) lines.push(row.join('\t'));
       await navigator.clipboard.writeText(lines.join('\n'));
       if (data.truncated) {
-        appState.error = `Selection copied with the first ${data.rows.length.toLocaleString()} rows only.`;
+        onNotice?.(`Selection copied with the first ${data.rows.length.toLocaleString()} rows only.`);
       }
       ctxMenu = null;
     } catch (e) {
-      appState.error = String(e);
+      onError?.(String(e));
     } finally {
       materializingSelection = false;
     }
   }
 
-  async function exportToExcel() {
+  async function exportSelection() {
+    if (!onExport) return;
     materializingSelection = true;
     try {
       const data = await buildSelectionData({
         selection: sel,
         columns,
         getRow: getRowData,
-        getRows: getRowsProp,
+        getRows: mode.kind === "virtual" ? mode.getRows : undefined,
         maxRows: MAX_COPY_ROWS,
       });
       if (!data) return;
-      // Map each exported header to its declared SQLite type so the Rust side
-      // can respect TEXT affinity (VARCHAR stays text, INT/REAL becomes number).
-      const types = data.headers.map((h) => columnTypes?.[h] ?? "");
-      await invoke("export_to_xlsx", {
-        headers: data.headers,
-        rows: data.rows,
-        columnTypes: types,
-      });
+      await onExport(data);
       if (data.truncated) {
-        appState.error = `Excel export included the first ${data.rows.length.toLocaleString()} selected rows only.`;
+        onNotice?.(`Excel export included the first ${data.rows.length.toLocaleString()} selected rows only.`);
       }
       ctxMenu = null;
     } catch (e) {
-      appState.error = String(e);
+      onError?.(String(e));
     } finally {
       materializingSelection = false;
     }
@@ -529,7 +518,9 @@
     <button class="ctx-item" disabled={materializingSelection} onclick={() => copySelection(false)}>Copy</button>
     <button class="ctx-item" disabled={materializingSelection} onclick={() => copySelection(true)}>Copy with headers</button>
     <div class="ctx-sep"></div>
-    <button class="ctx-item" disabled={materializingSelection} onclick={exportToExcel}>Open in Excel</button>
+    {#if onExport}
+      <button class="ctx-item" disabled={materializingSelection} onclick={exportSelection}>Open in Excel</button>
+    {/if}
   </div>
 {/if}
 

@@ -88,9 +88,6 @@ pub fn export_to_xlsx(
 
     let table_headers = dedupe_headers(headers);
 
-    for (ci, h) in headers.iter().enumerate() {
-        ws.write_string(0, ci as u16, h).str_err()?;
-    }
     for (ri, row) in rows.iter().enumerate() {
         for (ci, val) in row.iter().enumerate() {
             match classify_cell(numeric[ci], val) {
@@ -105,11 +102,7 @@ pub fn export_to_xlsx(
     }
 
     let last_row = rows.len() as u32;
-    let last_col = if headers.is_empty() {
-        0
-    } else {
-        (headers.len() - 1) as u16
-    };
+    let last_col = (headers.len() - 1) as u16;
     let columns: Vec<TableColumn> = table_headers
         .iter()
         .map(|h| TableColumn::new().set_header(h))
@@ -203,5 +196,17 @@ mod tests {
 
         assert!(std::path::Path::new(&path).exists());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn dedupe_headers_suffixes_repeats() {
+        let headers = vec![
+            "a".to_string(),
+            "a".to_string(),
+            "b".to_string(),
+            "a".to_string(),
+        ];
+
+        assert_eq!(dedupe_headers(&headers), vec!["a", "a_2", "b", "a_3"]);
     }
 }

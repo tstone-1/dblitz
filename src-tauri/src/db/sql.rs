@@ -8,14 +8,27 @@ use super::util::read_row;
 // covers any realistic interactive result; beyond that, page with LIMIT/OFFSET.
 const SQL_RESULT_LIMIT: usize = 50_000;
 
-/// True if `sql` (already trimmed) starts with the keyword ATTACH or DETACH,
-/// case-insensitive, followed by a non-identifier character. Catches the
-/// common forms `ATTACH '…' AS x`, `ATTACH DATABASE '…' AS x`, `DETACH x`,
-/// `DETACH DATABASE x` regardless of casing. Does not attempt to skip SQL
-/// comments — anyone crafting `/* x */ ATTACH …` is working hard enough to
-/// bypass that the immutable connection remains the backstop.
+/// Skip leading whitespace and SQL comments so statement-kind guards see the
+/// first executable token, not a prefix comment.
+fn strip_leading_ws_and_comments(mut sql: &str) -> &str {
+    loop {
+        let trimmed = sql.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("--") {
+            sql = rest.split_once('\n').map_or("", |(_, tail)| tail);
+        } else if let Some(rest) = trimmed.strip_prefix("/*") {
+            sql = rest.split_once("*/").map_or("", |(_, tail)| tail);
+        } else {
+            return trimmed;
+        }
+    }
+}
+
+/// True if `sql` starts with the keyword ATTACH or DETACH, case-insensitive,
+/// followed by a non-identifier character. Catches the common forms
+/// `ATTACH '...' AS x`, `ATTACH DATABASE '...' AS x`, `DETACH x`,
+/// `DETACH DATABASE x` regardless of casing and leading SQL comments.
 fn is_attach_or_detach(sql: &str) -> bool {
-    let lower = sql.to_ascii_lowercase();
+    let lower = strip_leading_ws_and_comments(sql).to_ascii_lowercase();
     let after = |kw: &str| -> bool {
         lower
             .strip_prefix(kw)
@@ -223,6 +236,37 @@ mod tests {
         assert!(
             !err.contains("ATTACH and DETACH are not allowed"),
             "guard misfired on identifier 'attached': {err}"
+        );
+
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn execute_sql_rejects_attach_behind_leading_comment_without_creating_file() {
+        let (state, path) = setup_temp_db_with_table();
+        let attach_path = path.with_file_name("dblitz_attach_should_not_exist.sqlite");
+        let _ = std::fs::remove_file(&attach_path);
+        let sql = format!(
+            "/* leading comment */ -- and a line comment\nATTACH '{}' AS other",
+            attach_path.to_string_lossy().replace('\\', "\\\\")
+        );
+
+        let result = execute_sql(&state, &sql);
+
+        assert!(result.error.is_some(), "comment-prefixed ATTACH must fail");
+        assert!(
+            result
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("ATTACH and DETACH are not allowed")),
+            "expected ATTACH/DETACH guard message, got: {:?}",
+            result.error
+        );
+        assert!(
+            !attach_path.exists(),
+            "rejected ATTACH must not create {}",
+            attach_path.display()
         );
 
         close_database(&state);

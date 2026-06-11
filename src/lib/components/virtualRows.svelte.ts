@@ -126,12 +126,14 @@ export function createVirtualRows(deps: VirtualRowsDeps) {
     return true;
   }
 
+  function firstChunkRows(): Row[] {
+    return rowCache.get(0) ?? [];
+  }
+
   return {
-    get rowCache() { return rowCache; },
-    getRow,
     getVisibleRow,
     getVisibleRows,
-    fetchChunk,
+    firstChunkRows,
     beginReload,
     applyFirstChunk,
     isCurrent,

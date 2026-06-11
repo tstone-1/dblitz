@@ -36,7 +36,7 @@ npm test
 cd src-tauri && cargo check
 
 # Rust linter
-cd src-tauri && cargo clippy
+cd src-tauri && cargo clippy --all-targets --all-features -- -D warnings
 
 # Rust unit tests
 cd src-tauri && cargo test
@@ -74,7 +74,7 @@ cd src-tauri && cargo fmt --check
 
 **Code quality:**
 - [ ] Frontend type-check passes: `npm run check`
-- [ ] Rust linter passes: `cd src-tauri && cargo clippy`
+- [ ] Rust linter passes: `cd src-tauri && cargo clippy --all-targets --all-features -- -D warnings`
 - [ ] All changes tested and working: `npm run tauri dev`
 
 **Version & documentation:**
@@ -138,7 +138,7 @@ npm update && npm outdated
 npm audit
 cd src-tauri && cargo audit && cd ..
 npm run check
-cd src-tauri && cargo clippy && cd ..
+cd src-tauri && cargo clippy --all-targets --all-features -- -D warnings && cd ..
 # Update version in Cargo.toml, tauri.conf.json, package.json
 # Verify all three version files match
 rg -n '"version"|^version =' package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json
@@ -211,13 +211,7 @@ dblitz/
 │   │   └── +page.svelte          # App shell
 │   ├── lib/
 │   │   ├── store.svelte.ts       # Global reactive state
-│   │   └── components/
-│   │       ├── Toolbar.svelte
-│   │       ├── BrowseData.svelte
-│   │       ├── DataGrid.svelte
-│   │       ├── DatabaseStructure.svelte
-│   │       ├── ExecuteSQL.svelte
-│   │       └── SqlEditor.svelte
+│   │   └── components/          # UI components plus tested feature helpers
 │   ├── app.css                   # Global styles + theme vars
 │   └── app.html                  # HTML template
 ├── src-tauri/                    # Rust backend

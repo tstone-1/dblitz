@@ -10,8 +10,7 @@
 
 import {
   getTableConfig,
-  ensureTableConfig,
-  commitTableConfig,
+  updateTableConfig,
   saveViewConfig,
 } from "$lib/store.svelte";
 import type { ColumnFilterValue } from "$lib/store.svelte";
@@ -76,19 +75,19 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
     if (!selectedTable) return;
     const f = deps.getColumnFilters()[col];
     if (!f || f.value.trim() === "") return; // no-op for empty input
-    const cfg = ensureTableConfig(selectedTable);
-    cfg.pinned_filters[col] = { value: f.value, is_regex: f.is_regex };
-    commitTableConfig(selectedTable, cfg);
+    updateTableConfig(selectedTable, (cfg) => {
+      cfg.pinned_filters[col] = { value: f.value, is_regex: f.is_regex };
+    });
     saveViewConfig();
   }
 
   function unpinColumnFilter(col: string) {
     const selectedTable = deps.getSelectedTable();
     if (!selectedTable) return;
-    const cfg = ensureTableConfig(selectedTable);
-    if (!(col in cfg.pinned_filters)) return;
-    delete cfg.pinned_filters[col];
-    commitTableConfig(selectedTable, cfg);
+    if (!(col in getTableConfig(selectedTable).pinned_filters)) return;
+    updateTableConfig(selectedTable, (cfg) => {
+      delete cfg.pinned_filters[col];
+    });
     saveViewConfig();
   }
 
@@ -124,19 +123,19 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
     if (!selectedTable) return;
     const gf = deps.getGlobalFilter();
     if (gf.trim() === "") return;
-    const cfg = ensureTableConfig(selectedTable);
-    cfg.pinned_global_filter = gf;
-    commitTableConfig(selectedTable, cfg);
+    updateTableConfig(selectedTable, (cfg) => {
+      cfg.pinned_global_filter = gf;
+    });
     saveViewConfig();
   }
 
   function unpinGlobalFilter() {
     const selectedTable = deps.getSelectedTable();
     if (!selectedTable) return;
-    const cfg = ensureTableConfig(selectedTable);
-    if (cfg.pinned_global_filter == null) return;
-    cfg.pinned_global_filter = null;
-    commitTableConfig(selectedTable, cfg);
+    if (getTableConfig(selectedTable).pinned_global_filter == null) return;
+    updateTableConfig(selectedTable, (cfg) => {
+      cfg.pinned_global_filter = null;
+    });
     saveViewConfig();
   }
 
@@ -184,10 +183,10 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
     if (!selectedTable) return;
     deps.setColumnFilters({});
     deps.setGlobalFilter("");
-    const cfg = ensureTableConfig(selectedTable);
-    cfg.pinned_filters = {};
-    cfg.pinned_global_filter = null;
-    commitTableConfig(selectedTable, cfg);
+    updateTableConfig(selectedTable, (cfg) => {
+      cfg.pinned_filters = {};
+      cfg.pinned_global_filter = null;
+    });
     saveViewConfig();
     deps.triggerReload();
   }

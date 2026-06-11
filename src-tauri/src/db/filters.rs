@@ -10,6 +10,17 @@ pub(super) struct WhereResult {
     pub(super) regex_filters: Vec<(usize, Regex)>,
 }
 
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+fn contains_pattern(value: &str) -> String {
+    format!("%{}%", escape_like(value))
+}
+
 pub(super) fn build_where_clause(
     columns: &[String],
     filters: &[ColumnFilter],
@@ -22,10 +33,10 @@ pub(super) fn build_where_clause(
     if !global_filter.is_empty() {
         let or_conditions: Vec<String> = columns
             .iter()
-            .map(|c| format!("\"{}\" LIKE ?", safe_ident(c)))
+            .map(|c| format!("\"{}\" LIKE ? ESCAPE '\\'", safe_ident(c)))
             .collect();
         where_parts.push(format!("({})", or_conditions.join(" OR ")));
-        let pattern = format!("%{}%", global_filter);
+        let pattern = contains_pattern(global_filter);
         for _ in columns {
             params.push(pattern.clone());
         }
@@ -74,8 +85,8 @@ pub(super) fn build_where_clause(
                             col_escaped, col_escaped
                         ));
                     } else {
-                        and_parts.push(format!("\"{}\" NOT LIKE ?", col_escaped));
-                        and_params.push(format!("%{}%", rest));
+                        and_parts.push(format!("\"{}\" NOT LIKE ? ESCAPE '\\'", col_escaped));
+                        and_params.push(contains_pattern(rest));
                     }
                 } else if let Some(rest) = val.strip_prefix(">=") {
                     and_parts.push(format!("\"{}\" >= ?", col_escaped));
@@ -93,8 +104,8 @@ pub(super) fn build_where_clause(
                     or_parts.push(format!("\"{}\" = ?", col_escaped));
                     or_params.push(rest.to_string());
                 } else {
-                    or_parts.push(format!("\"{}\" LIKE ?", col_escaped));
-                    or_params.push(format!("%{}%", val));
+                    or_parts.push(format!("\"{}\" LIKE ? ESCAPE '\\'", col_escaped));
+                    or_params.push(contains_pattern(val));
                 }
             }
 
@@ -158,7 +169,7 @@ mod tests {
         let columns = cols(&["name", "age"]);
         let filters = vec![filter("name", "foo")];
         let r = build_where_clause(&columns, &filters, "").unwrap();
-        assert_eq!(r.clause, " WHERE \"name\" LIKE ?");
+        assert_eq!(r.clause, " WHERE \"name\" LIKE ? ESCAPE '\\'");
         assert_eq!(r.params, vec!["%foo%"]);
         assert!(r.regex_filters.is_empty());
     }
@@ -167,7 +178,10 @@ mod tests {
     fn global_filter_or_across_columns() {
         let columns = cols(&["name", "age"]);
         let r = build_where_clause(&columns, &[], "test").unwrap();
-        assert_eq!(r.clause, " WHERE (\"name\" LIKE ? OR \"age\" LIKE ?)");
+        assert_eq!(
+            r.clause,
+            " WHERE (\"name\" LIKE ? ESCAPE '\\' OR \"age\" LIKE ? ESCAPE '\\')"
+        );
         assert_eq!(r.params, vec!["%test%", "%test%"]);
     }
 
@@ -176,7 +190,10 @@ mod tests {
         let columns = cols(&["name"]);
         let filters = vec![filter("name", "foo;bar")];
         let r = build_where_clause(&columns, &filters, "").unwrap();
-        assert_eq!(r.clause, " WHERE (\"name\" LIKE ? OR \"name\" LIKE ?)");
+        assert_eq!(
+            r.clause,
+            " WHERE (\"name\" LIKE ? ESCAPE '\\' OR \"name\" LIKE ? ESCAPE '\\')"
+        );
         assert_eq!(r.params, vec!["%foo%", "%bar%"]);
     }
 
@@ -185,7 +202,7 @@ mod tests {
         let columns = cols(&["name"]);
         let filters = vec![filter("name", "<>bad")];
         let r = build_where_clause(&columns, &filters, "").unwrap();
-        assert_eq!(r.clause, " WHERE \"name\" NOT LIKE ?");
+        assert_eq!(r.clause, " WHERE \"name\" NOT LIKE ? ESCAPE '\\'");
         assert_eq!(r.params, vec!["%bad%"]);
     }
 
@@ -253,7 +270,7 @@ mod tests {
         let columns = cols(&["col\"name"]);
         let filters = vec![filter("col\"name", "test")];
         let r = build_where_clause(&columns, &filters, "").unwrap();
-        assert_eq!(r.clause, " WHERE \"col\"\"name\" LIKE ?");
+        assert_eq!(r.clause, " WHERE \"col\"\"name\" LIKE ? ESCAPE '\\'");
         assert_eq!(r.params, vec!["%test%"]);
     }
 
@@ -271,7 +288,40 @@ mod tests {
         let columns = cols(&["name"]);
         let filters = vec![filter("name", "good;<>bad")];
         let r = build_where_clause(&columns, &filters, "").unwrap();
-        assert_eq!(r.clause, " WHERE (\"name\" LIKE ? AND \"name\" NOT LIKE ?)");
+        assert_eq!(
+            r.clause,
+            " WHERE (\"name\" LIKE ? ESCAPE '\\' AND \"name\" NOT LIKE ? ESCAPE '\\')"
+        );
         assert_eq!(r.params, vec!["%good%", "%bad%"]);
+    }
+
+    #[test]
+    fn like_wildcards_are_escaped_for_literal_matching() {
+        let columns = cols(&["name"]);
+        let filters = vec![filter("name", r"50%_done\ok")];
+        let r = build_where_clause(&columns, &filters, "").unwrap();
+        assert_eq!(r.clause, " WHERE \"name\" LIKE ? ESCAPE '\\'");
+        assert_eq!(r.params, vec![r"%50\%\_done\\ok%"]);
+    }
+
+    #[test]
+    fn global_filter_composes_with_column_filter_in_param_order() {
+        let columns = cols(&["name", "city"]);
+        let filters = vec![filter("name", "foo")];
+        let r = build_where_clause(&columns, &filters, "x").unwrap();
+        assert_eq!(
+            r.clause,
+            " WHERE (\"name\" LIKE ? ESCAPE '\\' OR \"city\" LIKE ? ESCAPE '\\') AND \"name\" LIKE ? ESCAPE '\\'"
+        );
+        assert_eq!(r.params, vec!["%x%", "%x%", "%foo%"]);
+    }
+
+    #[test]
+    fn range_filter_combines_comparisons_with_and() {
+        let columns = cols(&["price"]);
+        let filters = vec![filter("price", ">10;<100")];
+        let r = build_where_clause(&columns, &filters, "").unwrap();
+        assert_eq!(r.clause, " WHERE (\"price\" > ? AND \"price\" < ?)");
+        assert_eq!(r.params, vec!["10", "100"]);
     }
 }

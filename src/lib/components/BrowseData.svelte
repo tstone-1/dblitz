@@ -5,7 +5,7 @@
     appState,
     getTableConfig,
     ensureTableConfig,
-    commitTableConfig,
+    updateTableConfig,
     saveViewConfig,
     type ColumnFilter,
     type ColumnFilterValue,
@@ -25,6 +25,7 @@
   } from "./columnView";
   import { computeAutoWidths } from "./columnWidths";
   import { INCOMPLETE_OPS } from "./filterOperators";
+  import type { SelectionData } from "./selectionData";
 
   const CHUNK_SIZE = 500;
   const FILTER_DEBOUNCE_MS = 500;
@@ -116,9 +117,10 @@
     columns = appState.tableColumns[name] ?? [];
     const cfg = ensureTableConfig(name);
     if (cfg.sort_column && !columns.includes(cfg.sort_column)) {
-      cfg.sort_column = null;
-      cfg.sort_asc = true;
-      commitTableConfig(name, cfg);
+      updateTableConfig(name, (tableCfg) => {
+        tableCfg.sort_column = null;
+        tableCfg.sort_asc = true;
+      });
       saveViewConfig();
     }
     sortColumn = cfg.sort_column;
@@ -214,9 +216,10 @@
     if (sortColumn === col) { sortAsc = !sortAsc; }
     else { sortColumn = col; sortAsc = true; }
     if (selectedTable) {
-      const cfg = ensureTableConfig(selectedTable);
-      cfg.sort_column = sortColumn;
-      cfg.sort_asc = sortAsc;
+      updateTableConfig(selectedTable, (cfg) => {
+        cfg.sort_column = sortColumn;
+        cfg.sort_asc = sortAsc;
+      });
       saveViewConfig();
     }
     if (hasIncompleteFilter()) return;
@@ -225,27 +228,28 @@
 
   function toggleColumnHidden(col: string) {
     if (!selectedTable) return;
-    const cfg = ensureTableConfig(selectedTable);
-    const idx = cfg.hidden_columns.indexOf(col);
-    if (idx >= 0) cfg.hidden_columns.splice(idx, 1);
-    else cfg.hidden_columns.push(col);
-    commitTableConfig(selectedTable, cfg);
+    updateTableConfig(selectedTable, (cfg) => {
+      const idx = cfg.hidden_columns.indexOf(col);
+      if (idx >= 0) cfg.hidden_columns.splice(idx, 1);
+      else cfg.hidden_columns.push(col);
+    });
     saveViewConfig();
   }
 
   function setColumnColor(col: string, color: string) {
     if (!selectedTable) return;
-    const cfg = ensureTableConfig(selectedTable);
-    if (color) cfg.column_colors[col] = color;
-    else delete cfg.column_colors[col];
-    commitTableConfig(selectedTable, cfg);
+    updateTableConfig(selectedTable, (cfg) => {
+      if (color) cfg.column_colors[col] = color;
+      else delete cfg.column_colors[col];
+    });
     saveViewConfig();
   }
 
   function setColumnWidth(col: string, width: number) {
     if (!selectedTable) return;
-    const cfg = ensureTableConfig(selectedTable);
-    cfg.column_widths[col] = width;
+    updateTableConfig(selectedTable, (cfg) => {
+      cfg.column_widths[col] = width;
+    });
     // Widths are a high-churn field compared to colors/hidden, but we only
     // write on drag-end (DataGrid emits once per resize), so the save cost
     // is bounded. No need to debounce further.
@@ -258,7 +262,7 @@
     const ctx = canvas.getContext('2d')!;
     return computeAutoWidths({
       columns: visCols(),
-      rows: virtualRows.rowCache.get(0) ?? [],
+      rows: virtualRows.firstChunkRows(),
       getColumnIndex: (col) => colIndexMap.get(col),
       measurer: ctx,
     });
@@ -268,15 +272,26 @@
   function applyAutoWidths() {
     if (!selectedTable) return;
     const widths = measureAutoWidths();
-    const cfg = ensureTableConfig(selectedTable);
-    cfg.column_widths = widths;
-    commitTableConfig(selectedTable, cfg);
+    updateTableConfig(selectedTable, (cfg) => {
+      cfg.column_widths = widths;
+    });
     saveViewConfig();
   }
 
   /** Reset saved widths and recompute from content. */
   function resetColumnWidths() {
     applyAutoWidths();
+  }
+
+  async function exportSelection(data: SelectionData) {
+    const types = data.headers.map((h) =>
+      selectedTable ? (appState.tableColumnTypes[selectedTable]?.[h] ?? "") : "",
+    );
+    await invoke("export_to_xlsx", {
+      headers: data.headers,
+      rows: data.rows,
+      columnTypes: types,
+    });
   }
 
   function getColumnColor(col: string): string {
@@ -317,8 +332,8 @@
 
   function reorderColumns(fromCol: string, toCol: string) {
     if (!selectedTable) return;
-    const cfg = ensureTableConfig(selectedTable);
-    let order = cfg.column_order.length > 0
+    const cfg = getTableConfig(selectedTable);
+    const order = cfg.column_order.length > 0
       ? cfg.column_order.filter((c) => columns.includes(c))
       : [...columns];
     const fromIdx = order.indexOf(fromCol);
@@ -326,16 +341,17 @@
     if (fromIdx < 0 || toIdx < 0) return;
     order.splice(fromIdx, 1);
     order.splice(toIdx, 0, fromCol);
-    cfg.column_order = order;
-    commitTableConfig(selectedTable, cfg);
+    updateTableConfig(selectedTable, (next) => {
+      next.column_order = order;
+    });
     saveViewConfig();
   }
 
   function resetColumnOrder() {
     if (!selectedTable) return;
-    const cfg = ensureTableConfig(selectedTable);
-    cfg.column_order = [];
-    commitTableConfig(selectedTable, cfg);
+    updateTableConfig(selectedTable, (cfg) => {
+      cfg.column_order = [];
+    });
     saveViewConfig();
   }
 
@@ -499,9 +515,12 @@
 
         <DataGrid
           columns={visCols()}
-          totalRows={totalRows}
-          getRow={virtualRows.getVisibleRow}
-          getRows={virtualRows.getVisibleRows}
+          mode={{
+            kind: "virtual",
+            totalRows,
+            getRow: virtualRows.getVisibleRow,
+            getRows: virtualRows.getVisibleRows,
+          }}
           sortColumn={sortColumn}
           sortAsc={sortAsc}
           onSort={handleSort}
@@ -520,7 +539,9 @@
           initialColumnWidths={selectedTable ? (getTableConfig(selectedTable).column_widths ?? {}) : {}}
           onResizeColumn={setColumnWidth}
           onResetColumnWidths={resetColumnWidths}
-          columnTypes={selectedTable ? (appState.tableColumnTypes[selectedTable] ?? {}) : {}}
+          onExport={exportSelection}
+          onNotice={(message) => (appState.notice = message)}
+          onError={(message) => (appState.error = message)}
           locateRequest={locateRequest}
         />
 
