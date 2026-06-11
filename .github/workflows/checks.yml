@@ -34,8 +34,12 @@ jobs:
         run: npm test
 
   backend:
-    name: Backend (fmt + clippy + test)
-    runs-on: ubuntu-latest
+    name: Backend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -53,6 +57,7 @@ jobs:
       # X11/glib helpers via its build deps. Required for `cargo check`,
       # `cargo clippy`, and `cargo test` to compile the lib crate.
       - name: Install Tauri Linux build deps
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -63,6 +68,7 @@ jobs:
             patchelf
 
       - name: Format check
+        if: runner.os == 'Linux'
         working-directory: src-tauri
         run: cargo fmt --check
 

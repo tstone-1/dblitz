@@ -126,6 +126,7 @@ export const appState = $state({
   activeTab: "structure" as "structure" | "browse" | "sql",
   loading: false,
   error: null as string | null,
+  notice: null as string | null,
   tableColumns: {} as Record<string, string[]>, // table name -> column names for autocomplete
   tableColumnTypes: {} as Record<string, Record<string, string>>, // table -> col -> declared type (for xlsx export)
   fileConfig: { tables: {}, tint: null, label: null } as FileConfig,
@@ -146,6 +147,7 @@ export function initTheme() {
 export async function openDatabase(path: string) {
   appState.loading = true;
   appState.error = null;
+  appState.notice = null;
   try {
     // Fetch everything BEFORE publishing to appState. Each appState
     // assignment is a reactive trigger; if we set `tables` first and then
@@ -261,6 +263,16 @@ export function getTableConfig(tableName: string): ViewConfig {
  */
 export function commitTableConfig(tableName: string, cfg: ViewConfig) {
   appState.fileConfig.tables[tableName] = { ...cfg };
+}
+
+export function updateTableConfig(
+  tableName: string,
+  mutate: (cfg: ViewConfig) => void,
+): ViewConfig {
+  const cfg = ensureTableConfig(tableName);
+  mutate(cfg);
+  commitTableConfig(tableName, cfg);
+  return cfg;
 }
 
 /** Ensures a mutable config entry exists. Call from event handlers only. */

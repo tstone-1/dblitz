@@ -217,6 +217,13 @@
   </div>
 {/if}
 
+{#if appState.notice}
+  <div class="notice-bar">
+    {appState.notice}
+    <button onclick={() => (appState.notice = null)}>dismiss</button>
+  </div>
+{/if}
+
 <style>
   .toolbar {
     display: flex;
@@ -524,6 +531,25 @@
     background: transparent;
     border: 1px solid white;
     color: white;
+    padding: 1px 8px;
+    font-size: 11px;
+  }
+
+  .notice-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 12px;
+    background: color-mix(in srgb, var(--warning) 18%, var(--bg-secondary));
+    color: var(--text-primary);
+    border-bottom: 1px solid var(--warning);
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  .notice-bar button {
+    background: transparent;
+    border: 1px solid var(--text-muted);
+    color: var(--text-primary);
     padding: 1px 8px;
     font-size: 11px;
   }

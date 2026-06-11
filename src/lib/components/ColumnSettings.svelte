@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { orderColumns } from "./columnView";
+
   interface Props {
     columns: string[];
     hiddenColumns: string[];
@@ -25,15 +27,6 @@
 
   let dragCol = $state<string | null>(null);
   let dragOverCol = $state<string | null>(null);
-
-  function orderedColumns(): string[] {
-    if (columnOrder.length > 0) {
-      const inOrder = new Set(columnOrder);
-      const newCols = columns.filter((c) => !inOrder.has(c));
-      return [...columnOrder.filter((c) => columns.includes(c)), ...newCols];
-    }
-    return columns;
-  }
 
   function handleDragStart(col: string, e: DragEvent) {
     dragCol = col;
@@ -69,7 +62,7 @@
     {/if}
   </div>
   <div class="settings-grid" role="list">
-    {#each orderedColumns() as col (col)}
+    {#each orderColumns(columns, columnOrder) as col (col)}
       <div class="setting-row"
         role="listitem"
         class:drag-over={dragOverCol === col && dragCol !== col}

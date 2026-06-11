@@ -7,6 +7,7 @@
     type SqlResult,
   } from "$lib/store.svelte";
   import DataGrid from "./DataGrid.svelte";
+  import type { SelectionData } from "./selectionData";
   import SqlEditor from "./SqlEditor.svelte";
   import { resolveResultColumnColors } from "./sqlTable";
 
@@ -80,6 +81,14 @@
   function formatTime(ts: number): string {
     return new Date(ts).toLocaleTimeString();
   }
+
+  async function exportSelection(data: SelectionData) {
+    await invoke("export_to_xlsx", {
+      headers: data.headers,
+      rows: data.rows,
+      columnTypes: data.headers.map(() => ""),
+    });
+  }
 </script>
 
 {#if !appState.dbPath}
@@ -152,8 +161,11 @@
           {#if result.columns.length > 0}
             <DataGrid
               columns={result.columns}
-              rows={result.rows}
+              mode={{ kind: "static", rows: result.rows }}
               columnColors={resultColumnColors}
+              onExport={exportSelection}
+              onNotice={(message) => (appState.notice = message)}
+              onError={(message) => (appState.error = message)}
             />
           {/if}
         {/if}

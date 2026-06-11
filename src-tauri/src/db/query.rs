@@ -11,6 +11,8 @@ use super::util::{collect_rows, read_row, safe_ident, StrErr};
 /// This turns OFFSET-based queries into O(log n) rowid seeks.
 pub(super) fn build_rowid_index(
     conn: &Connection,
+    state: &DbState,
+    generation: u64,
     safe_table: &str,
     chunk_size: i64,
 ) -> Option<RowidIndex> {
@@ -40,6 +42,9 @@ pub(super) fn build_rowid_index(
     let mut boundaries: Vec<i64> = Vec::with_capacity((total_rows / chunk_size + 1) as usize);
     let mut idx = 0i64;
     while let Ok(Some(row)) = rows_iter.next() {
+        if state.query_generation.load(Ordering::Relaxed) != generation {
+            return None;
+        }
         if idx % chunk_size == 0 {
             if let Ok(rid) = row.get::<_, i64>(0) {
                 boundaries.push(rid);
@@ -128,6 +133,7 @@ fn query_with_regex_filter(
 fn query_with_rowid_index(
     conn: &Connection,
     state: &DbState,
+    generation: u64,
     table: &str,
     safe_table: &str,
     offset: i64,
@@ -144,8 +150,10 @@ fn query_with_rowid_index(
         indexes.remove(table);
     }
     if !indexes.contains_key(table) {
-        if let Some(idx) = build_rowid_index(conn, safe_table, limit) {
+        if let Some(idx) = build_rowid_index(conn, state, generation, safe_table, limit) {
             indexes.insert(table.to_string(), idx);
+        } else if state.query_generation.load(Ordering::Relaxed) != generation {
+            return Some(Err("Query cancelled by a newer request".to_string()));
         }
     }
 
@@ -484,6 +492,7 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
             if let Some(result) = query_with_rowid_index(
                 conn,
                 state,
+                generation,
                 table,
                 &safe_table,
                 offset,
@@ -956,5 +965,50 @@ mod tests {
         let err = count_rows(&state, "users", &[regex_filter("name", "^a")], "").unwrap_err();
 
         assert!(err.contains("regex"), "got: {err}");
+    }
+
+    #[test]
+    fn rowid_index_build_cancels_when_generation_changes() {
+        let state = state_with_memory_db("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);");
+        {
+            let mut guard = state.conn.lock();
+            let conn = guard.as_mut().unwrap();
+            let tx = conn.transaction().unwrap();
+            for idx in 0..100 {
+                tx.execute(
+                    "INSERT INTO items (name) VALUES (?)",
+                    [format!("item-{idx}")],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        state.query_generation.fetch_add(1, Ordering::Relaxed);
+        let guard = state.conn.lock();
+        let conn = guard.as_ref().unwrap();
+
+        let result = build_rowid_index(conn, &state, 0, "items", 10);
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn count_rows_applies_filters() {
+        let state = state_with_memory_db(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, city TEXT);
+             INSERT INTO users (name, city) VALUES
+               ('alice', 'Berlin'),
+               ('bravo', 'Boston'),
+               ('carol', 'Berlin');",
+        );
+        let filters = vec![ColumnFilter {
+            column: "city".to_string(),
+            value: "Berlin".to_string(),
+            is_regex: false,
+        }];
+
+        let count = count_rows(&state, "users", &filters, "a").unwrap();
+
+        assert_eq!(count, 2);
     }
 }

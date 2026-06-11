@@ -130,7 +130,7 @@ describe("createVirtualRows", () => {
     });
 
     expect(rows.getVisibleRow(0)).toBeNull();
-    await expect(rows.fetchChunk(0)).resolves.toBeUndefined();
+    await loadsSettled();
     expect(errors[0]).toContain("load failed");
   });
 });

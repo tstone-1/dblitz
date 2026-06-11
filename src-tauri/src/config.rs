@@ -58,7 +58,10 @@ fn sanitize_file_config(mut config: FileConfig) -> FileConfig {
 }
 
 fn config_dir() -> PathBuf {
-    let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+    let base = dirs::config_dir().unwrap_or_else(|| {
+        warn!("OS config directory unavailable, falling back to current working directory");
+        PathBuf::from(".")
+    });
     base.join("dblitz")
 }
 
@@ -355,9 +358,23 @@ mod tests {
 
     #[test]
     fn tint_presets_match_frontend_toolbar_utils() {
+        let frontend = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/lib/components/toolbarUtils.ts"),
+        )
+        .unwrap();
+        let frontend_values: Vec<String> = frontend
+            .lines()
+            .filter_map(|line| {
+                let value = line.split_once("value: \"")?.1.split_once('"')?.0;
+                Some(value.to_string())
+            })
+            .collect();
         assert_eq!(
             TINT_PRESETS,
-            ["#d94040", "#e0a030", "#4aa84a", "#3080d0", "#8050c0", "#c04090"]
+            frontend_values
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
         );
     }
 }
