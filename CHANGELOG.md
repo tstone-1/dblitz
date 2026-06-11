@@ -5,6 +5,28 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.6.4] - 2026-06-11
+
+### Fixed
+- **Execute SQL now rejects comment-prefixed ATTACH/DETACH statements**. The read-only SQL gate strips leading SQL comments before checking the first executable token, closing a bypass that could attach or create other SQLite files.
+- **Column filters now treat `%`, `_`, and `\` as literal text** by escaping LIKE patterns with an explicit SQLite escape character.
+- **Rowid-index construction now observes query cancellation** so a superseded first browse of a huge table can stop instead of holding the connection until the full scan finishes.
+- **Selection truncation messages now render as notices, not errors**. Copy/export warnings use a separate notice channel instead of the red error bar.
+
+### Changed
+- **DataGrid now uses an explicit static/virtual mode contract** and delegates Excel export/error/notice handling to its owners, keeping app-layer IPC out of the grid component.
+- **Table view-config updates now go through one helper** so sorting, widths, visibility, colors, ordering, and pinned filters all republish config consistently.
+- **CI now compiles and tests the Windows backend code path** with a `windows-latest` backend job.
+
+### Internal
+- Added regression tests for comment-prefixed ATTACH rejection, literal LIKE escaping, filter parameter ordering, range filters, row counting with filters, rowid-index cancellation, pinned-filter reset behavior, and XLSX duplicate-header deduping.
+- Strengthened Rust/TypeScript drift checks by parsing the opposite side's source for tint presets and filter operators.
+- Removed duplicated column ordering logic, raw virtual-row cache exposure, unused virtual-row helper exports, and dead XLSX export branches.
+- Updated BUILD.md release-check commands and component-layout notes.
+
+### Dependencies
+- Bumped npm lockfile entries to latest compatible patch/minor versions (`@sveltejs/kit 2.65.0`, `@types/node 25.9.3`) and pinned Rust manifest patch versions for `rusqlite 0.40.1` and `tauri-plugin-opener 2.5.4`. `npm audit` is clean; `cargo audit` reports only the known allowed Tauri/Linux GTK/unic transitive advisories.
+
 ## [26.6.3] - 2026-06-10
 
 ### Fixed
