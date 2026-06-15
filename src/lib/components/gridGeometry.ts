@@ -46,13 +46,25 @@ export function virtualScrollTopToDataScroll(
   return Math.max(0, scrollTop * scrollRangeRatio(geometry, viewportHeight));
 }
 
+// Position a row within the (possibly compressed) scroll spacer.
+//
+// The spacer height is capped at MAX_SCROLL_SPACER_HEIGHT to stay under the
+// browser's maximum element height, so for very large tables it is shorter
+// than the natural `rowCount * rowHeight`. We must NOT scale the rendered
+// rows' tops down by that ratio — doing so squishes the visible window to a
+// fraction of ROW_HEIGHT (e.g. 26px -> ~11px for a 1.8M-row table). Instead we
+// render the small visible window at its true row height, anchored so that the
+// row aligned with the current data-scroll offset lands at `scrollTop`. When
+// the spacer is uncompressed (scale 1) this reduces to `rowIndex * rowHeight`.
 export function rowIndexToVirtualTop(
   rowIndex: number,
   rowHeight: number,
   geometry: VirtualScrollGeometry,
   viewportHeight: number,
+  scrollTop: number,
 ): number {
-  return (rowIndex * rowHeight) / scrollRangeRatio(geometry, viewportHeight);
+  const dataScroll = virtualScrollTopToDataScroll(scrollTop, geometry, viewportHeight);
+  return scrollTop + rowIndex * rowHeight - dataScroll;
 }
 
 export function visibleRowIndices({
