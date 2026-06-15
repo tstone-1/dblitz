@@ -470,7 +470,7 @@
         <div class="grid-row data-row"
           role="row"
           tabindex="-1"
-          style="position: absolute; top: {rowIndexToVirtualTop(rowIdx, ROW_HEIGHT, scrollGeometry, viewportHeight)}px; height: {ROW_HEIGHT}px; width: 100%;"
+          style="position: absolute; top: {rowIndexToVirtualTop(rowIdx, ROW_HEIGHT, scrollGeometry, viewportHeight, scrollTop)}px; height: {ROW_HEIGHT}px; width: 100%;"
           oncontextmenu={(e) => handleContextMenu(e, rowIdx)}
           onmousedown={(e) => selection.onCellMouseDown(e, rowIdx)}>
           <div class="grid-cell row-num" role="gridcell" tabindex="-1">{rowIdx + 1}</div>

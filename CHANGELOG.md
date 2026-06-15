@@ -5,6 +5,17 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.6.5] - 2026-06-15
+
+### Fixed
+- **Rows no longer render with squished height on very large tables**. Once a table is big enough to trigger virtual-spacer compression (about 770k+ rows), the grid scaled each rendered row's vertical position down by the compression ratio, collapsing rows to a fraction of their height (e.g. ~11px instead of 26px). Rows in the visible window are now positioned at their true height, anchored to the current scroll offset, with no change to uncompressed (smaller) tables.
+
+### Internal
+- Added regression tests covering true row-height spacing inside a compressed spacer, scale=1 backward compatibility under arbitrary scroll offsets, and the last row's bottom edge landing exactly on the spacer height at maximum scroll.
+
+### Dependencies
+- Refreshed dependencies to latest compatible versions: cargo lockfile patch/minor bumps (`wasm-bindgen 0.2.125`, `time 0.3.49`, `brotli 8.0.4`, `js-sys`/`web-sys 0.3.102`, and others) plus npm patch/minor updates. `npm audit` and `cargo audit` are clean (only the known allowed Tauri/Linux GTK transitive advisories).
+
 ## [26.6.4] - 2026-06-11
 
 ### Fixed
