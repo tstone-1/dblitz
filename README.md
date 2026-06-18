@@ -120,6 +120,9 @@ and in the recent-files dropdown, so PROD and QA stay visually distinct.
   Excel or Google Sheets)
 - Export the current selection to `.xlsx` using SQLite type-affinity rules;
   integers larger than 2⁵³ are written as strings to preserve precision
+- "Open in Excel" writes the workbook to your OS temp folder by default; pick a
+  different destination under **Settings → Excel Export Folder** (it falls back
+  to temp if that folder later goes missing)
 
 **Recent files**
 - Up to 10 most-recently-opened databases, each enriched with its tint and label

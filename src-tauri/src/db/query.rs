@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
 use super::filters::{build_where_clause, WhereResult};
-use super::types::{ColumnFilter, DbState, QueryRequest, QueryResult, RowidIndex, SortedOrder};
+use super::types::{
+    ColumnFilter, DbState, FilteredOrder, QueryRequest, QueryResult, RowidIndex, SortedOrder,
+};
 use super::util::{collect_rows, read_row, safe_ident, StrErr};
 
 /// Build a sparse rowid index for a table: sample the rowid at every chunk_size boundary.
@@ -367,6 +369,132 @@ fn query_with_sorted_order(
     )
 }
 
+/// Materialize the ordered rowid list for a filtered (and optionally sorted)
+/// view with a single scan. Returns `Ok(None)` if a newer request bumps the
+/// generation mid-build. Like [`build_sorted_order`], SQLite materializes a
+/// non-indexed `ORDER BY` on the first `next()`, so cancellation only takes
+/// effect during row collection, not during the sort step itself.
+fn build_filtered_order(
+    conn: &Connection,
+    state: &DbState,
+    generation: u64,
+    safe_table: &str,
+    where_clause: &str,
+    order_clause: &str,
+    params: &[String],
+) -> Result<Option<Vec<i64>>, String> {
+    // With no sort key, page in stable rowid order so cached chunks are
+    // deterministic — this matches the natural scan order the un-cached OFFSET
+    // path already produces for a rowid table.
+    let effective_order = if order_clause.is_empty() {
+        " ORDER BY rowid ASC"
+    } else {
+        order_clause
+    };
+    let sql = format!(
+        "SELECT rowid FROM \"{}\"{}{}",
+        safe_table, where_clause, effective_order
+    );
+    let mut stmt = conn.prepare(&sql).str_err()?;
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+        .iter()
+        .map(|p| p as &dyn rusqlite::types::ToSql)
+        .collect();
+    let mut rows_iter = stmt.query(param_refs.as_slice()).str_err()?;
+    let mut rowids: Vec<i64> = Vec::new();
+    while let Some(row) = rows_iter.next().str_err()? {
+        if state.query_generation.load(Ordering::Relaxed) != generation {
+            return Ok(None);
+        }
+        rowids.push(row.get(0).str_err()?);
+    }
+    Ok(Some(rowids))
+}
+
+/// Serve a filtered (and optionally sorted) page from a cached ordered-rowid
+/// list, building it on first use (or when the filter/sort signature changes).
+/// Turns each scroll chunk into a rowid lookup instead of a fresh
+/// `WHERE` + `ORDER BY` + `OFFSET` scan whose cost grows with the offset.
+///
+/// The total match count falls out of the materialized list for free, so the
+/// frontend no longer has to fire a separate `count_rows` scan for filtered
+/// views. Returns `None` when the table has no usable rowid (`WITHOUT ROWID`),
+/// signalling the caller to fall back to the `OFFSET` path. `Some(Err(..))` is
+/// a real failure or a cancellation.
+#[allow(clippy::too_many_arguments)]
+fn query_with_filtered_order(
+    conn: &Connection,
+    state: &DbState,
+    generation: u64,
+    table: &str,
+    safe_table: &str,
+    where_clause: &str,
+    order_clause: &str,
+    params: &[String],
+    offset: i64,
+    limit: i64,
+    columns: Vec<String>,
+) -> Option<Result<QueryResult, String>> {
+    // WITHOUT ROWID tables can't be addressed by rowid -> fall back to the
+    // OFFSET path. Mirrors the guard in build_rowid_index / query_with_sorted_order.
+    if conn
+        .prepare(&format!("SELECT rowid FROM \"{}\" LIMIT 0", safe_table))
+        .is_err()
+    {
+        return None;
+    }
+
+    // NUL separators keep the three components unambiguous regardless of their
+    // contents (a clause/param can't contain a NUL byte).
+    let signature = format!("{where_clause}\u{0}{params:?}\u{0}{order_clause}");
+
+    let mut orders = state.filtered_orders.lock();
+    let fresh = orders.get(table).is_some_and(|o| o.signature == signature);
+    if !fresh {
+        match build_filtered_order(
+            conn,
+            state,
+            generation,
+            safe_table,
+            where_clause,
+            order_clause,
+            params,
+        ) {
+            Ok(Some(rowids)) => {
+                tracing::debug!(table, rows = rowids.len(), "built filtered order");
+                orders.insert(
+                    table.to_string(),
+                    FilteredOrder {
+                        signature: signature.clone(),
+                        rowids,
+                    },
+                );
+            }
+            Ok(None) => return Some(Err("Query cancelled by a newer request".to_string())),
+            Err(e) => return Some(Err(e)),
+        }
+    }
+
+    let order = match orders.get(table) {
+        Some(o) => o,
+        None => return Some(Err("Filtered order missing after build".to_string())),
+    };
+    let total_rows = order.rowids.len() as i64;
+    let start = offset.min(total_rows) as usize;
+    let end = offset.saturating_add(limit).min(total_rows) as usize;
+    let page: Vec<i64> = order.rowids[start..end].to_vec();
+    drop(orders);
+
+    Some(
+        fetch_rows_by_rowids(conn, safe_table, &page).map(|rows| QueryResult {
+            columns,
+            rows,
+            total_rows: Some(total_rows),
+            offset,
+        }),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn query_with_offset(
     conn: &Connection,
@@ -524,6 +652,28 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
         );
     }
 
+    // Filtered (non-regex), sorted or not: serve pages from a cached ordered-
+    // rowid list so each scroll chunk is a rowid lookup, not a fresh
+    // WHERE + ORDER BY + OFFSET scan whose cost grows with the offset. The total
+    // count comes from the materialized list, so this path also reports
+    // `total_rows`, sparing the frontend a separate count_rows scan. A
+    // WITHOUT ROWID table returns None and falls through to the OFFSET path.
+    if let Some(result) = query_with_filtered_order(
+        conn,
+        state,
+        generation,
+        table,
+        &safe_table,
+        &where_clause,
+        &order_clause,
+        &params,
+        offset,
+        limit,
+        columns.clone(),
+    ) {
+        return result;
+    }
+
     query_with_offset(
         conn,
         &safe_table,
@@ -578,6 +728,14 @@ mod tests {
             column: column.to_string(),
             value: value.to_string(),
             is_regex: true,
+        }
+    }
+
+    fn text_filter(column: &str, value: &str) -> ColumnFilter {
+        ColumnFilter {
+            column: column.to_string(),
+            value: value.to_string(),
+            is_regex: false,
         }
     }
 
@@ -830,6 +988,182 @@ mod tests {
         assert_eq!(result.total_rows, Some(3));
         let ks: Vec<_> = result.rows.iter().map(|r| r[0].as_deref()).collect();
         assert_eq!(ks, vec![Some("a"), Some("b"), Some("c")]);
+    }
+
+    #[test]
+    fn filtered_sorted_query_pages_via_cache() {
+        // Mirrors the reported slow scenario: a global filter AND a column
+        // filter AND a sort on another column, then scrolling deep. Every chunk
+        // must come from one materialized ordered-rowid list, not a re-run
+        // WHERE + ORDER BY + OFFSET scan, and the total count must be exact so
+        // the frontend skips its separate count_rows scan.
+        let state = state_with_memory_db(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, tag TEXT, n INTEGER);",
+        );
+        {
+            let mut guard = state.conn.lock();
+            let conn = guard.as_mut().unwrap();
+            let tx = conn.transaction().unwrap();
+            // Insert in reverse so rowid order differs from sort order. Even n ->
+            // "keep", odd -> "drop"; every row is tagged "SOT" so the global
+            // filter matches all rows and only the column filter narrows the set.
+            for n in (0..1_500).rev() {
+                let name = format!("{}-{}", if n % 2 == 0 { "keep" } else { "drop" }, n);
+                tx.execute(
+                    "INSERT INTO items (name, tag, n) VALUES (?, 'SOT', ?)",
+                    params![name, n],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        // Column index: 0=id, 1=name, 2=tag, 3=n.
+        let page = |offset: i64| QueryRequest {
+            table: "items".to_string(),
+            offset,
+            limit: 500,
+            filters: vec![text_filter("name", "keep")],
+            global_filter: "SOT".to_string(),
+            sort_column: Some("n".to_string()),
+            sort_asc: true,
+        };
+
+        // 750 even values match, sorted ascending. Count is exact and present.
+        let first = query_table(&state, &page(0)).unwrap();
+        assert_eq!(first.total_rows, Some(750));
+        assert_eq!(first.rows.len(), 500);
+        assert_eq!(first.rows[0][3].as_deref(), Some("0"));
+        assert_eq!(first.rows[499][3].as_deref(), Some("998"));
+
+        // Deep page served from the same cached order — the part that used to lag.
+        let deep = query_table(&state, &page(500)).unwrap();
+        assert_eq!(deep.total_rows, Some(750));
+        assert_eq!(deep.rows.len(), 250);
+        assert_eq!(deep.rows[0][3].as_deref(), Some("1000"));
+        assert_eq!(deep.rows[249][3].as_deref(), Some("1498"));
+    }
+
+    #[test]
+    fn filtered_order_rebuilds_when_filter_changes() {
+        // Changing the filter signature must rebuild the cache, not serve stale
+        // rows from the previous filter's order.
+        let state = state_with_memory_db(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);
+             INSERT INTO items (name) VALUES ('apple'), ('apricot'), ('banana'), ('cherry');",
+        );
+        let req = |needle: &str| QueryRequest {
+            table: "items".to_string(),
+            offset: 0,
+            limit: 10,
+            filters: vec![text_filter("name", needle)],
+            global_filter: String::new(),
+            sort_column: Some("name".to_string()),
+            sort_asc: true,
+        };
+
+        let ap = query_table(&state, &req("ap")).unwrap();
+        assert_eq!(ap.total_rows, Some(2));
+        let names: Vec<_> = ap.rows.iter().map(|r| r[1].as_deref()).collect();
+        assert_eq!(names, vec![Some("apple"), Some("apricot")]);
+
+        let an = query_table(&state, &req("an")).unwrap();
+        assert_eq!(an.total_rows, Some(1));
+        assert_eq!(an.rows[0][1].as_deref(), Some("banana"));
+    }
+
+    #[test]
+    fn filtered_unsorted_query_pages_in_rowid_order() {
+        // A filter with no sort still goes through the cached path, paging in
+        // stable rowid (insertion) order. Exercises build_filtered_order's
+        // `ORDER BY rowid ASC` branch and confirms the exact total is reported
+        // (so the frontend skips its separate count_rows scan).
+        let state = state_with_memory_db("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);");
+        {
+            let mut guard = state.conn.lock();
+            let conn = guard.as_mut().unwrap();
+            let tx = conn.transaction().unwrap();
+            // Even ids "keep", odd "drop". Insertion order == rowid order.
+            for i in 0..1_500 {
+                let name = format!("{}-{}", if i % 2 == 0 { "keep" } else { "drop" }, i);
+                tx.execute("INSERT INTO items (name) VALUES (?)", params![name])
+                    .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        let page = |offset: i64| QueryRequest {
+            table: "items".to_string(),
+            offset,
+            limit: 500,
+            filters: vec![text_filter("name", "keep")],
+            global_filter: String::new(),
+            sort_column: None,
+            sort_asc: true,
+        };
+
+        // 750 even ids match; first page is ids 0,2,..,998 in rowid order.
+        let first = query_table(&state, &page(0)).unwrap();
+        assert_eq!(first.total_rows, Some(750));
+        assert_eq!(first.rows.len(), 500);
+        assert_eq!(first.rows[0][0].as_deref(), Some("1"));
+        assert_eq!(first.rows[499][0].as_deref(), Some("999"));
+
+        // Deep page from the same cached order: ids 1000,1002,..,1498.
+        let deep = query_table(&state, &page(500)).unwrap();
+        assert_eq!(deep.rows.len(), 250);
+        assert_eq!(deep.rows[0][0].as_deref(), Some("1001"));
+        assert_eq!(deep.rows[249][0].as_deref(), Some("1499"));
+    }
+
+    #[test]
+    fn filtered_query_clamps_offset_past_end() {
+        // Offset past the matched-row count returns an empty page, not an error
+        // or panic, while still reporting the true total. Mirrors
+        // sorted_query_clamps_offset_past_end for the filtered path's own clamp.
+        let state = state_with_memory_db(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);
+             INSERT INTO items (name) VALUES ('keep-a'), ('drop-b'), ('keep-c');",
+        );
+        let req = QueryRequest {
+            table: "items".to_string(),
+            offset: 500,
+            limit: 500,
+            filters: vec![text_filter("name", "keep")],
+            global_filter: String::new(),
+            sort_column: Some("name".to_string()),
+            sort_asc: true,
+        };
+
+        let result = query_table(&state, &req).unwrap();
+
+        assert_eq!(result.total_rows, Some(2));
+        assert!(result.rows.is_empty());
+    }
+
+    #[test]
+    fn filtered_query_falls_back_on_without_rowid_table() {
+        // WITHOUT ROWID tables can't be addressed by the filtered-order cache,
+        // so a filtered query must fall back to WHERE + OFFSET and still return
+        // correctly filtered, sorted rows.
+        let state = state_with_memory_db(
+            "CREATE TABLE t (k TEXT PRIMARY KEY, v INTEGER) WITHOUT ROWID;
+             INSERT INTO t (k, v) VALUES ('keep-c', 3), ('keep-a', 1), ('drop-b', 2);",
+        );
+        let req = QueryRequest {
+            table: "t".to_string(),
+            offset: 0,
+            limit: 10,
+            filters: vec![text_filter("k", "keep")],
+            global_filter: String::new(),
+            sort_column: Some("v".to_string()),
+            sort_asc: true,
+        };
+
+        let result = query_table(&state, &req).unwrap();
+
+        let ks: Vec<_> = result.rows.iter().map(|r| r[0].as_deref()).collect();
+        assert_eq!(ks, vec![Some("keep-a"), Some("keep-c")]);
     }
 
     #[test]

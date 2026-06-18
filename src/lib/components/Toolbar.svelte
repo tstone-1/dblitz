@@ -25,6 +25,43 @@
   let showSettings = $state(false);
   let showRecents = $state(false);
   let recentFiles = $state<RecentFile[]>([]);
+  // `null` means "not loaded yet"; an empty string means "use the temp default".
+  let exportDir = $state<string | null>(null);
+
+  async function toggleSettings() {
+    if (showSettings) {
+      showSettings = false;
+      return;
+    }
+    showSettings = true;
+    try {
+      exportDir = (await invoke<string | null>("get_export_dir")) ?? "";
+    } catch (e) {
+      console.error("Failed to load export folder:", e);
+      exportDir = "";
+    }
+  }
+
+  async function chooseExportDir() {
+    const dir = await open({ directory: true, multiple: false });
+    if (typeof dir !== "string") return;
+    try {
+      await invoke("set_export_dir", { dir });
+      exportDir = dir;
+    } catch (e) {
+      console.error("Failed to save export folder:", e);
+      appState.error = `Could not save export folder: ${e}`;
+    }
+  }
+
+  async function resetExportDir() {
+    try {
+      await invoke("set_export_dir", { dir: null });
+      exportDir = "";
+    } catch (e) {
+      console.error("Failed to reset export folder:", e);
+    }
+  }
 
   async function handleOpen() {
     const path = await open({
@@ -163,7 +200,7 @@
   {/if}
 
   <div class="settings-wrapper">
-    <button class="settings-toggle" onclick={() => (showSettings = !showSettings)} title="Settings">
+    <button class="settings-toggle" onclick={toggleSettings} title="Settings">
       Settings
     </button>
     {#if showSettings}
@@ -173,6 +210,21 @@
           <div class="theme-options">
             <button class="theme-btn" class:active={appState.theme === 'light'} onclick={() => setTheme('light')}>Light</button>
             <button class="theme-btn" class:active={appState.theme === 'dark'} onclick={() => setTheme('dark')}>Dark</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-label">Excel Export Folder</div>
+          <div class="export-dir-path" title={exportDir || "Temp folder (default)"}>
+            {exportDir || "Temp folder (default)"}
+          </div>
+          <div class="export-dir-actions">
+            <button class="export-dir-btn" onclick={chooseExportDir}>Choose…</button>
+            <button
+              class="export-dir-btn"
+              onclick={resetExportDir}
+              disabled={!exportDir}
+            >Reset</button>
           </div>
         </div>
 
@@ -423,7 +475,8 @@
     border: 1px solid var(--border-color);
     border-radius: 6px;
     padding: 8px 12px;
-    min-width: 160px;
+    min-width: 220px;
+    max-width: 340px;
     z-index: 100;
     box-shadow: 0 4px 12px rgba(0,0,0,0.15);
   }
@@ -501,6 +554,38 @@
   .theme-options {
     display: flex;
     gap: 4px;
+  }
+
+  .export-dir-path {
+    font-size: 11px;
+    color: var(--text-secondary);
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 4px 8px;
+    margin-bottom: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: rtl;
+    text-align: left;
+  }
+
+  .export-dir-actions {
+    display: flex;
+    gap: 4px;
+  }
+
+  .export-dir-btn {
+    flex: 1;
+    padding: 4px 8px;
+    font-size: 12px;
+    border-radius: 4px;
+    text-align: center;
+  }
+  .export-dir-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
 
   .theme-btn {

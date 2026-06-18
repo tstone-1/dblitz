@@ -30,11 +30,29 @@ pub(super) struct SortedOrder {
     pub(super) rowids: Vec<i64>,
 }
 
+/// Full ordered rowid list for one *filtered* (and optionally sorted) view of a
+/// table. Without this, every scroll chunk of a filtered view re-ran the whole
+/// `WHERE` + `ORDER BY` + `OFFSET` query — and because `OFFSET` grows as you
+/// scroll, deep pages got progressively slower (the UI lagged while fling-
+/// scrolling a filtered, sorted table). With it, the matching rowids are
+/// materialized once and each chunk becomes a rowid lookup. One entry per
+/// table, replaced when the filter/sort signature changes. Valid for the
+/// connection's lifetime under the same immutable-file promise.
+pub(super) struct FilteredOrder {
+    /// Opaque signature of the `WHERE` clause, its bound params, and the
+    /// `ORDER BY` clause. A cache hit requires an exact signature match, so any
+    /// change to the filters, the global filter, or the sort rebuilds.
+    pub(super) signature: String,
+    /// every matching rowid, in the view's display order
+    pub(super) rowids: Vec<i64>,
+}
+
 pub struct DbState {
     pub conn: Mutex<Option<Connection>>,
     pub current_path: Mutex<Option<String>>,
     pub(super) rowid_indexes: Mutex<HashMap<String, RowidIndex>>,
     pub(super) sorted_orders: Mutex<HashMap<String, SortedOrder>>,
+    pub(super) filtered_orders: Mutex<HashMap<String, FilteredOrder>>,
     pub(super) query_generation: AtomicU64,
 }
 
@@ -45,6 +63,7 @@ impl DbState {
             current_path: Mutex::new(None),
             rowid_indexes: Mutex::new(HashMap::new()),
             sorted_orders: Mutex::new(HashMap::new()),
+            filtered_orders: Mutex::new(HashMap::new()),
             query_generation: AtomicU64::new(0),
         }
     }

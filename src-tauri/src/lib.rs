@@ -119,6 +119,19 @@ fn clear_recent_files() -> Result<(), String> {
     config::clear_recent_files()
 }
 
+/// Returns the configured Excel-export folder, or `None` when exports go to the
+/// OS temp directory (the default).
+#[tauri::command]
+fn get_export_dir() -> Option<String> {
+    config::get_export_dir()
+}
+
+/// Sets the Excel-export folder. Pass `null`/empty to reset to the temp-dir default.
+#[tauri::command]
+fn set_export_dir(dir: Option<String>) -> Result<(), String> {
+    config::set_export_dir(dir)
+}
+
 #[tauri::command]
 fn get_initial_file() -> Option<String> {
     std::env::args().nth(1)
@@ -186,7 +199,8 @@ fn export_to_xlsx(
     column_types: Option<Vec<String>>,
 ) -> Result<String, String> {
     let types = column_types.unwrap_or_default();
-    let path = db::export_to_xlsx(&headers, &rows, &types)?;
+    let dest_dir = config::resolve_export_dir();
+    let path = db::export_to_xlsx(&headers, &rows, &types, &dest_dir)?;
     // Open with default application via opener plugin (safe, cross-platform)
     use tauri_plugin_opener::OpenerExt;
     app.opener().open_path(&path, None::<&str>).str_err()?;
@@ -337,6 +351,8 @@ pub fn run() {
             get_initial_file,
             get_recent_files,
             clear_recent_files,
+            get_export_dir,
+            set_export_dir,
         ])
         .setup(|app| {
             update_window_title(app.handle(), None);

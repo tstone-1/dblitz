@@ -1,4 +1,5 @@
 use super::util::StrErr;
+use std::path::Path;
 
 /// Classify a SQLite declared column type as numeric-affinity or not, using
 /// the SQLite type-affinity rules (https://www.sqlite.org/datatype3.html section 3.1).
@@ -69,6 +70,7 @@ pub fn export_to_xlsx(
     headers: &[String],
     rows: &[Vec<String>],
     column_types: &[String],
+    dest_dir: &Path,
 ) -> Result<String, String> {
     use rust_xlsxwriter::*;
 
@@ -113,12 +115,11 @@ pub fn export_to_xlsx(
     ws.add_table(0, 0, last_row, last_col, &table).str_err()?;
     ws.autofit();
 
-    let temp_dir = std::env::temp_dir();
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let path = temp_dir.join(format!("dblitz_export_{}.xlsx", ts));
+    let path = dest_dir.join(format!("dblitz_export_{}.xlsx", ts));
     let path_str = path.to_string_lossy().to_string();
     wb.save(&path).str_err()?;
 
@@ -171,7 +172,7 @@ mod tests {
 
     #[test]
     fn export_rejects_empty_data() {
-        let err = export_to_xlsx(&[], &[], &[]).unwrap_err();
+        let err = export_to_xlsx(&[], &[], &[], &std::env::temp_dir()).unwrap_err();
         assert_eq!(err, "No data to export");
     }
 
@@ -179,23 +180,26 @@ mod tests {
     fn export_rejects_row_wider_than_headers() {
         let headers = vec!["id".to_string()];
         let rows = vec![vec!["a".to_string(), "b".to_string()]];
-        let err = export_to_xlsx(&headers, &rows, &[]).unwrap_err();
+        let err = export_to_xlsx(&headers, &rows, &[], &std::env::temp_dir()).unwrap_err();
         assert!(err.contains("more cells than headers"), "got: {err}");
     }
 
     #[test]
     fn export_allows_duplicate_headers() {
+        let dir = tempfile::TempDir::new().unwrap();
         let headers = vec!["a".to_string(), "a".to_string()];
         let rows = vec![vec!["1".to_string(), "2".to_string()]];
         let path = export_to_xlsx(
             &headers,
             &rows,
             &["INTEGER".to_string(), "INTEGER".to_string()],
+            dir.path(),
         )
         .unwrap();
 
         assert!(std::path::Path::new(&path).exists());
-        let _ = std::fs::remove_file(path);
+        // The file lands in the requested destination directory, not temp.
+        assert_eq!(std::path::Path::new(&path).parent(), Some(dir.path()));
     }
 
     #[test]
