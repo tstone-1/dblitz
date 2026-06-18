@@ -115,6 +115,10 @@ pub struct AppConfig {
     /// Most-recently-opened databases, most recent first. Capped at RECENT_FILES_MAX.
     #[serde(default)]
     pub recent_files: Vec<String>,
+    /// Directory into which "Open in Excel" exports are written. `None` means
+    /// use the OS temp directory (the historical default).
+    #[serde(default)]
+    pub export_dir: Option<String>,
 }
 
 fn app_config_path_in(dir: &Path) -> PathBuf {
@@ -203,6 +207,49 @@ pub fn get_recent_files() -> Vec<String> {
 /// Wipe the recent-files list.
 pub fn clear_recent_files() -> Result<(), String> {
     clear_recent_files_in(&config_dir())
+}
+
+fn get_export_dir_in(dir: &Path) -> Option<String> {
+    load_app_config_in(dir).export_dir
+}
+
+fn set_export_dir_in(dir: &Path, export_dir: Option<String>) -> Result<(), String> {
+    let mut config = load_app_config_in(dir);
+    // Treat blank/whitespace as "unset" so the UI can clear back to the default
+    // by sending an empty string without a separate command.
+    config.export_dir = export_dir.filter(|s| !s.trim().is_empty());
+    save_app_config_in(dir, &config)
+}
+
+/// Returns the configured Excel-export directory, or `None` when unset (the
+/// caller should then fall back to the OS temp dir — see [`resolve_export_dir`]).
+pub fn get_export_dir() -> Option<String> {
+    get_export_dir_in(&config_dir())
+}
+
+/// Persist the Excel-export directory. Pass `None` (or a blank string) to clear
+/// it back to the temp-dir default.
+pub fn set_export_dir(export_dir: Option<String>) -> Result<(), String> {
+    set_export_dir_in(&config_dir(), export_dir)
+}
+
+/// Resolve the directory exports should be written to. Returns the configured
+/// directory when it is set and currently exists as a directory; otherwise
+/// falls back to the OS temp dir. The fallback keeps "Open in Excel" working if
+/// the chosen folder was deleted, renamed, or lives on an unmounted drive.
+pub fn resolve_export_dir() -> PathBuf {
+    match get_export_dir() {
+        Some(dir) => {
+            let p = PathBuf::from(&dir);
+            if p.is_dir() {
+                p
+            } else {
+                warn!(dir = %dir, "Configured export directory missing, using temp dir");
+                std::env::temp_dir()
+            }
+        }
+        None => std::env::temp_dir(),
+    }
 }
 
 /// Public struct for the enriched recents list (path + window marker).
@@ -326,11 +373,42 @@ mod tests {
         let real_str = real.to_str().unwrap().to_string();
         let bloated = AppConfig {
             recent_files: (0..50).map(|_| real_str.clone()).collect(),
+            ..AppConfig::default()
         };
         save_app_config_in(dir.path(), &bloated).unwrap();
         // Read path must enforce the cap even though storage overflowed.
         let visible = get_recent_files_in(dir.path());
         assert_eq!(visible.len(), RECENT_FILES_MAX);
+    }
+
+    #[test]
+    fn export_dir_round_trips_and_clears() {
+        let dir = TempDir::new().unwrap();
+        // Default is unset.
+        assert_eq!(get_export_dir_in(dir.path()), None);
+        // Set, then read back.
+        set_export_dir_in(dir.path(), Some("C:/Exports".to_string())).unwrap();
+        assert_eq!(
+            get_export_dir_in(dir.path()),
+            Some("C:/Exports".to_string())
+        );
+        // Blank string clears it back to the default.
+        set_export_dir_in(dir.path(), Some("   ".to_string())).unwrap();
+        assert_eq!(get_export_dir_in(dir.path()), None);
+        // Explicit None also clears.
+        set_export_dir_in(dir.path(), Some("C:/Exports".to_string())).unwrap();
+        set_export_dir_in(dir.path(), None).unwrap();
+        assert_eq!(get_export_dir_in(dir.path()), None);
+    }
+
+    #[test]
+    fn export_dir_does_not_disturb_recent_files() {
+        let dir = TempDir::new().unwrap();
+        push_recent_file_in(dir.path(), "/tmp/a.db");
+        set_export_dir_in(dir.path(), Some("/tmp/exports".to_string())).unwrap();
+        let config = load_app_config_in(dir.path());
+        assert_eq!(config.recent_files, vec!["/tmp/a.db".to_string()]);
+        assert_eq!(config.export_dir, Some("/tmp/exports".to_string()));
     }
 
     #[test]

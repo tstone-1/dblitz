@@ -5,6 +5,18 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.6.6] - 2026-06-18
+
+### Added
+- **Configurable "Open in Excel" export folder**. Settings now has an *Excel Export Folder* control where you can pick the directory exported `.xlsx` workbooks are written to. Previously every export landed in the OS temp folder (`%LocalAppData%\Temp` on Windows); that remains the default, and exports fall back to it automatically if the chosen folder is later deleted, renamed, or on an unmounted drive. The choice is stored app-wide in `app.json`.
+
+### Performance
+- **Filtered, sorted views no longer lag while scrolling.** With an active column/global filter plus a sort, every scroll chunk used to re-run the whole `WHERE` + `ORDER BY` + `LIMIT/OFFSET` query — and because `OFFSET` grows as you scroll, deep pages got progressively slower (visible jank when fling-scrolling). The matching rowids are now materialized once in display order and cached per (filter+sort) signature, so each chunk becomes a rowid lookup. In a 500k-row benchmark (filter matching 250k, sorted on an unindexed column), per-page fetch dropped from ~55–98 ms to ~0.1 ms (roughly 500–900× per page) after a one-time ~57 ms build. The exact match count now comes from that cached list, so the frontend also stops firing a separate `count_rows` scan for filtered views. (`WITHOUT ROWID` tables fall back to the previous offset path.)
+- **Read-only connection tuning** for faster reads on large databases. Since the file is opened as a frozen immutable snapshot, the connection now enables memory-mapped I/O (`PRAGMA mmap_size`, up to 1 GiB, capped at file size) to skip `read()` syscalls and the pager's double-buffer copy, and keeps sort/temp-b-tree scratch in RAM (`PRAGMA temp_store=MEMORY`) so a non-indexed `ORDER BY` over a filtered view never spills to a temp file. No new sidecar files are created.
+
+### Dependencies
+- Refreshed dependencies to latest compatible versions: Tauri stack `2.11.2 → 2.11.3` (plus `tauri-build`/`-codegen`/`-macros`/`-runtime`/`-utils` `2.6.2 → 2.6.3`), `tray-icon 0.23.1 → 0.24.1`, `bytes`, `syn`, `muda`, `getrandom`, `web_atoms`, and npm patch bumps (`@sveltejs/kit 2.65.2`, `@tauri-apps/api 2.11.1`, `@codemirror/search 6.7.1`, `vitest 4.1.9`). `npm audit` clean; `cargo audit` clean aside from the known allowed gtk-rs Linux transitive advisories.
+
 ## [26.6.5] - 2026-06-15
 
 ### Fixed

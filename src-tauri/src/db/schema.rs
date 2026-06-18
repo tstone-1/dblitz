@@ -18,7 +18,21 @@ pub fn open_database(state: &DbState, path: &str) -> Result<Vec<TableInfo>, Stri
         error!(path, error = %e, "Failed to open database");
         e.to_string()
     })?;
-    conn.execute_batch("PRAGMA cache_size=-64000;").str_err()?;
+    // Read-only/immutable tuning, all safe because the file is a frozen
+    // snapshot (no writer, no WAL):
+    //   - cache_size=-64000  : 64 MiB page cache (negative = KiB, not pages).
+    //   - mmap_size          : map up to 1 GiB so page reads skip read()
+    //                          syscalls and the pager's double-buffer copy.
+    //                          SQLite silently caps this at the file size.
+    //   - temp_store=MEMORY  : keep sorter/temp-b-tree scratch in RAM so a
+    //                          non-indexed ORDER BY (e.g. sorting a filtered
+    //                          view) never spills to a temp file on disk.
+    conn.execute_batch(
+        "PRAGMA cache_size=-64000;\
+         PRAGMA mmap_size=1073741824;\
+         PRAGMA temp_store=MEMORY;",
+    )
+    .str_err()?;
 
     let tables = get_tables_inner(&conn)?;
 
@@ -26,6 +40,7 @@ pub fn open_database(state: &DbState, path: &str) -> Result<Vec<TableInfo>, Stri
     *state.current_path.lock() = Some(path.to_string());
     state.rowid_indexes.lock().clear();
     state.sorted_orders.lock().clear();
+    state.filtered_orders.lock().clear();
 
     Ok(tables)
 }
