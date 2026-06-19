@@ -36,6 +36,13 @@ export function createCellSelection() {
     if (e.button !== 0) return;
     const colIdx = colIdxFromEvent(e);
     if (colIdx < 0) return;
+    // Cells are `user-select: none`, so clicking one does NOT collapse a
+    // pre-existing document text selection (e.g. a stray Ctrl+A on the toolbar
+    // path span selects the tab bar). Left intact, that selection makes the
+    // Ctrl+C gate defer to native copy and copy the toolbar text instead of the
+    // cell. Clicking a cell is an explicit "I want the grid selection" signal,
+    // so drop any leftover text selection now.
+    if (typeof window !== "undefined") window.getSelection()?.removeAllRanges();
     selecting = true;
     if (e.shiftKey && selAnchor) {
       selEnd = { row: rowIdx, col: colIdx };
