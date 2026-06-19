@@ -54,6 +54,21 @@ html, body {
   background-color: var(--bg-primary);
 }
 
+/* This is a desktop viewer, not a web page: chrome text (toolbar, tabs,
+ * menu labels, cell contents) should not be selectable like a browser.
+ * Re-enable selection only where the user actually types/edits. The grid
+ * has its own cell selection + Copy; the SQL editor (CodeMirror) uses a
+ * contenteditable region, which the rule below covers. */
+body {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+input, textarea, [contenteditable="true"] {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;

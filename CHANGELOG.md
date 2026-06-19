@@ -5,6 +5,15 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.6.9] - 2026-06-19
+
+### Changed
+- **Suppressed browser-style chrome that added no value in a desktop viewer.** Right-clicking anywhere outside an editable field (e.g. the file-path text top-left) used to pop the webview's native context menu — Back, Reload, Save As, Print — none of which make sense here. The native menu is now blocked everywhere except text inputs, the label field, and the SQL editor, where Cut/Copy/Paste/Select All are still useful. The app's own context menus (grid cells, column headers, filter pins) are unaffected.
+- **Disabled web-page text selection across the app chrome.** Toolbar text, tab labels, and context-menu item labels were selectable like a web page (e.g. you could highlight "Open in Excel" in the cell menu). Text selection is now limited to where you actually type — filter inputs, the window label, and the SQL editor. Grid cells keep their own cell selection plus Copy / Copy with headers, so nothing about copying data changes. This rounds out the native-feel cleanup begun in 26.6.7–26.6.8.
+
+### Dependencies
+- Refreshed dependencies to latest compatible versions: `nanoid 3.3.12 → 3.3.13`. `npm audit` clean; `cargo audit` clean aside from the known allowed gtk-rs Linux transitive advisories. (`@types/node 26.0.0` is held back — it tracks the Node runtime, which is on v24 here.)
+
 ## [26.6.8] - 2026-06-19
 
 ### Fixed
