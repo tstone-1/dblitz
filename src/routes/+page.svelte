@@ -31,8 +31,21 @@
     }
     document.addEventListener("keydown", onKeyDown);
 
+    // Suppress the native browser context menu (back/refresh/save as/print/...)
+    // which adds no value in a desktop viewer. Editable fields keep it so users
+    // still get cut/copy/paste/select-all; the app's own custom menus (grid
+    // cells, headers, filter pins) call preventDefault themselves and so still
+    // open normally before this listener runs.
+    function onContextMenu(e: MouseEvent) {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest("input, textarea, [contenteditable='true']")) return;
+      e.preventDefault();
+    }
+    document.addEventListener("contextmenu", onContextMenu);
+
     return () => {
       document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("contextmenu", onContextMenu);
     };
   });
 </script>
