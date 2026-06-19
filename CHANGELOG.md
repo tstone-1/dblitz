@@ -5,6 +5,11 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.6.8] - 2026-06-19
+
+### Fixed
+- **Ctrl+C copies the selected cell again after a stray text selection on the toolbar.** Clicking the file-path text top-left and pressing Ctrl+A triggers the webview's document-wide "select all", which text-selects the toolbar (the tab labels, Unload, Settings). Because grid cells are `user-select: none`, clicking a cell afterwards did not collapse that selection, so the Ctrl+C handler saw a live text selection and deferred to native copy — copying the toolbar text instead of the cell value. Mousing down on a cell now clears any leftover document text selection, so the grid copy wins. This is a second leg of the Ctrl+C copy issue first addressed in 26.6.7.
+
 ## [26.6.7] - 2026-06-19
 
 ### Fixed
