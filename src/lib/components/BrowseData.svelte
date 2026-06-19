@@ -379,7 +379,7 @@
   // intercept in SQL editor / structure tabs. preventDefault stops the webview
   // from showing its own find UI.
   function onWindowKeydown(e: KeyboardEvent) {
-    if (!(e.ctrlKey || e.metaKey) || e.key !== "f") return;
+    if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== "f") return;
     if (appState.activeTab !== "browse") return;
     if (!selectedTable || columns.length === 0) return;
     e.preventDefault();

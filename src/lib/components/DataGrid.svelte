@@ -328,7 +328,7 @@
   const reorder = createDragReorder(() => columns, () => onReorderColumn);
 
   function handleGridKeydown(e: KeyboardEvent) {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
       // Let inputs/textareas handle Ctrl+A natively (select all text)
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
@@ -348,7 +348,9 @@
   // exists" and "not typing in an input" to avoid clobbering native copy
   // behavior inside filter inputs, SQL editor, etc.
   function handleWindowKeydown(e: KeyboardEvent) {
-    if (!(e.ctrlKey || e.metaKey) || e.key !== 'c') return;
+    // Case-insensitive: with Caps Lock on (or Shift held), the webview reports
+    // e.key as 'C', which a bare `!== 'c'` would wrongly reject.
+    if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'c') return;
     const active = document.activeElement as HTMLElement | null;
     const textSel = window.getSelection();
     if (!shouldHandleWindowCopy({

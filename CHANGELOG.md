@@ -5,6 +5,14 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.6.7] - 2026-06-19
+
+### Fixed
+- **Ctrl+C now copies the selected cell(s) regardless of Caps Lock or Shift.** The grid's copy shortcut compared the pressed key against a lowercase `'c'`, but with Caps Lock on (or Shift held) the webview reports the key as `'C'`, so the keystroke was rejected and nothing was copied — while right-click → Copy kept working because it bypasses the keyboard handler. The Ctrl+C, Ctrl+A (select all cells), and Ctrl+F (find column) shortcuts now match their keys case-insensitively.
+
+### Dependencies
+- Refreshed dependencies to latest compatible versions: `@sveltejs/kit 2.65.2 → 2.66.0`, `@types/node 25.9.3 → 25.9.4`, and the `camino 1.2.2 → 1.2.3` cargo lockfile patch. `npm audit` clean; `cargo audit` clean aside from the known allowed gtk-rs Linux transitive advisories. (`@types/node 26.0.0` is held back — it tracks the Node runtime, which is on v24 here.)
+
 ## [26.6.6] - 2026-06-18
 
 ### Added
