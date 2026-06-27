@@ -130,3 +130,52 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload ${{ github.ref_name }} src-tauri/target/release/dblitz.exe --clobber
+
+  update-tap:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bump Homebrew cask in tstone-1/homebrew-dblitz
+        env:
+          # Fine-grained PAT with Contents:read/write on tstone-1/homebrew-dblitz.
+          # The default GITHUB_TOKEN cannot push to a different repository.
+          GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          SRC_REPO="${{ github.repository }}"
+          TAP_REPO="tstone-1/homebrew-dblitz"
+
+          # Pull the two macOS DMGs the build job just uploaded to this release.
+          gh release download "v${VERSION}" --repo "$SRC_REPO" \
+            --pattern "dblitz_${VERSION}_aarch64.dmg" \
+            --pattern "dblitz_${VERSION}_x64.dmg" \
+            -D dmg
+
+          ARM_SHA=$(sha256sum "dmg/dblitz_${VERSION}_aarch64.dmg" | cut -d' ' -f1)
+          INTEL_SHA=$(sha256sum "dmg/dblitz_${VERSION}_x64.dmg" | cut -d' ' -f1)
+
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${TAP_REPO}.git" tap
+          cd tap
+
+          # In-place edit preserves the rest of the cask (desc, app, zap stanza).
+          sed -i \
+            -e "s|^  version \"[^\"]*\"|  version \"${VERSION}\"|" \
+            -e "s|arm:   \"[0-9a-f]\{64\}\"|arm:   \"${ARM_SHA}\"|" \
+            -e "s|intel: \"[0-9a-f]\{64\}\"|intel: \"${INTEL_SHA}\"|" \
+            Casks/dblitz.rb
+
+          # Fail loudly if the substitutions didn't land (cask format drifted).
+          grep -q "version \"${VERSION}\"" Casks/dblitz.rb
+          grep -q "\"${ARM_SHA}\""         Casks/dblitz.rb
+          grep -q "\"${INTEL_SHA}\""       Casks/dblitz.rb
+
+          if git diff --quiet; then
+            echo "Cask already at ${VERSION}; nothing to do."
+            exit 0
+          fi
+
+          git config user.name "tstone-1"
+          git config user.email "48162401+tstone-1@users.noreply.github.com"
+          git commit -am "Bump dblitz cask to v${VERSION}"
+          git push origin HEAD:main
