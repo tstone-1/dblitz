@@ -5,6 +5,14 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.6.10] - 2026-06-29
+
+### Added
+- **Ctrl+Click multi-cell selection (disjoint selection).** You can now build a non-contiguous selection by holding Ctrl (or Cmd) and clicking — or Ctrl+dragging — additional cells and blocks, the way Excel and DB Browser for SQLite do. Ctrl+Click on a standalone single cell toggles it back off. Click+drag and Shift+Click still select a contiguous rectangle. The selection outline now traces the perimeter of the whole union, so scattered blocks and overlaps render cleanly. The status-bar stats (rows/cols, Sum/Avg/Min/Max) count only the selected cells, and Copy / Copy with headers / Open in Excel serialize the selection's bounding box with unselected cells left blank and fully-empty rows dropped.
+
+### Dependencies
+- Refreshed dependencies to latest versions. npm: `@types/node 25.9.4 → 26.0.1` (now tracks the current Node type definitions). cargo: `anyhow 1.0.102 → 1.0.103`, `camino 1.2.3 → 1.2.4`, `cc 1.2.64 → 1.2.65`, `hybrid-array 0.4.12 → 0.4.13`, `js-sys`/`web-sys 0.3.102 → 0.3.103`, `log 0.4.32 → 0.4.33`, `open 5.3.5 → 5.3.6`, `quote 1.0.45 → 1.0.46`, `time 0.3.49 → 0.3.51`, `time-macros 0.2.29 → 0.2.30`, `uuid 1.23.3 → 1.23.4`, the `wasm-bindgen` stack `0.2.125 → 0.2.126`, and `zlib-rs 0.6.3 → 0.6.4` (`pathdiff` dropped from the tree). `npm audit` clean; `cargo audit` clean aside from the known allowed gtk-rs Linux transitive advisories.
+
 ## [26.6.9] - 2026-06-19
 
 ### Changed

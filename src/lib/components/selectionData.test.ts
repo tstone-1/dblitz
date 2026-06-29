@@ -43,6 +43,32 @@ describe("buildSelectionData", () => {
     });
   });
 
+  it("blanks unselected cells and drops empty rows for a disjoint selection", async () => {
+    // Union bounding box r0..r1=0..2, c0..c1=0..2. Selected cells: (0,0), (0,2),
+    // (2,1). Row 1 has no selected cell and is dropped; unselected cells blank.
+    const grid = [
+      ["a0", "b0", "c0"],
+      ["a1", "b1", "c1"],
+      ["a2", "b2", "c2"],
+    ];
+    const selected = new Set(["0,0", "0,2", "2,1"]);
+    const data = await buildSelectionData({
+      selection: { r0: 0, r1: 2, c0: 0, c1: 2 },
+      columns: ["A", "B", "C"],
+      getRow: (index) => grid[index] ?? null,
+      isSelected: (r, c) => selected.has(`${r},${c}`),
+    });
+
+    expect(data).toEqual({
+      headers: ["A", "B", "C"],
+      rows: [
+        ["a0", "", "c0"],
+        ["", "b2", ""],
+      ],
+      truncated: false,
+    });
+  });
+
   it("fails instead of synthesizing blanks when no row materializer is provided", async () => {
     await expect(
       buildSelectionData({

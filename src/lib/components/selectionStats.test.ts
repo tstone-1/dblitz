@@ -102,6 +102,41 @@ describe("buildSelectionStats", () => {
     });
   });
 
+  it("counts only selected cells and distinct rows/cols for a disjoint selection", () => {
+    // Bounding box 0..2 x 0..2; selected cells (0,0)=1, (0,2)=10, (2,1)=4.
+    const grid = [
+      ["1", "99", "10"],
+      ["99", "99", "99"],
+      ["99", "4", "99"],
+    ];
+    const selected = new Set(["0,0", "0,2", "2,1"]);
+    expect(
+      buildSelectionStats({
+        selection: { r0: 0, r1: 2, c0: 0, c1: 2 },
+        getRow: (index) => grid[index] ?? null,
+        isSelected: (r, c) => selected.has(`${r},${c}`),
+      }),
+    ).toEqual({
+      rows: 2, // distinct selected rows: 0 and 2
+      cols: 3, // distinct selected cols: 0, 1, 2
+      sum: 15,
+      avg: 5,
+      min: 1,
+      max: 10,
+      numericPending: false,
+    });
+  });
+
+  it("returns null for a single-cell disjoint selection", () => {
+    expect(
+      buildSelectionStats({
+        selection: { r0: 0, r1: 0, c0: 0, c1: 0 },
+        getRow: () => ["1"],
+        isSelected: (r, c) => r === 0 && c === 0,
+      }),
+    ).toBeNull();
+  });
+
   it("caps scanned rows while reporting full selection dimensions", () => {
     const rows = [["1"], ["2"], ["not-scanned"]];
 
