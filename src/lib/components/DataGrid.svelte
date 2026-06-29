@@ -188,7 +188,7 @@
   const selection = createCellSelection();
   const sel = $derived(selection.sel);
 
-  const selStats = $derived(buildSelectionStats({ selection: sel, getRow: getRowData }));
+  const selStats = $derived(buildSelectionStats({ selection: sel, getRow: getRowData, isSelected: selection.isSelected }));
 
   function fmtNum(n: number): string {
     return Number.isInteger(n) ? n.toLocaleString() : n.toLocaleString(undefined, { maximumFractionDigits: 6 });
@@ -216,6 +216,7 @@
         getRow: getRowData,
         getRows: mode.kind === "virtual" ? mode.getRows : undefined,
         maxRows: MAX_COPY_ROWS,
+        isSelected: selection.isSelected,
       });
       if (!data) return;
       const lines: string[] = [];
@@ -223,7 +224,7 @@
       for (const row of data.rows) lines.push(row.join('\t'));
       await navigator.clipboard.writeText(lines.join('\n'));
       if (data.truncated) {
-        onNotice?.(`Selection copied with the first ${data.rows.length.toLocaleString()} rows only.`);
+        onNotice?.(`Selection copied with the first ${data.rows.length.toLocaleString()} selected row(s) only.`);
       }
       ctxMenu = null;
     } catch (e) {
@@ -243,6 +244,7 @@
         getRow: getRowData,
         getRows: mode.kind === "virtual" ? mode.getRows : undefined,
         maxRows: MAX_COPY_ROWS,
+        isSelected: selection.isSelected,
       });
       if (!data) return;
       await onExport(data);
@@ -477,16 +479,16 @@
           onmousedown={(e) => selection.onCellMouseDown(e, rowIdx)}>
           <div class="grid-cell row-num" role="gridcell" tabindex="-1">{rowIdx + 1}</div>
           {#each columns as col, vi}
-            {@const inSel = sel != null && rowIdx >= sel.r0 && rowIdx <= sel.r1 && vi >= sel.c0 && vi <= sel.c1}
+            {@const inSel = selection.isSelected(rowIdx, vi)}
             <div class="grid-cell data-cell"
               role="gridcell"
               tabindex="-1"
               data-col={vi}
               class:selected={inSel}
-              class:sel-top={inSel && rowIdx === sel?.r0}
-              class:sel-bottom={inSel && rowIdx === sel?.r1}
-              class:sel-left={inSel && vi === sel?.c0}
-              class:sel-right={inSel && vi === sel?.c1}
+              class:sel-top={inSel && !selection.isSelected(rowIdx - 1, vi)}
+              class:sel-bottom={inSel && !selection.isSelected(rowIdx + 1, vi)}
+              class:sel-left={inSel && !selection.isSelected(rowIdx, vi - 1)}
+              class:sel-right={inSel && !selection.isSelected(rowIdx, vi + 1)}
               style={getColor(col) ? `background: ${getColor(col)};` : ''}
               onmouseenter={() => selection.onCellMouseEnter(rowIdx, vi)}>
               {#if !row}{:else if row[vi] === null}<span class="null-value">NULL</span>{:else}{row[vi]}{/if}

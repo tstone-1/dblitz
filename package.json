@@ -1,6 +1,6 @@
 {
   "name": "dblitz",
-  "version": "26.6.9",
+  "version": "26.6.10",
   "description": "Read-only SQLite browser",
   "type": "module",
   "scripts": {
@@ -29,7 +29,7 @@
     "@sveltejs/kit": "^2.66.0",
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "@tauri-apps/cli": "^2.10.1",
-    "@types/node": "^25.9.4",
+    "@types/node": "^26.0.1",
     "svelte": "^5.55.2",
     "svelte-check": "^4.4.6",
     "tslib": "^2.8.0",
