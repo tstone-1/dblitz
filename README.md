@@ -39,7 +39,7 @@ cancels in-flight queries instead of queuing stale work.
 The rowid seek path is intended for deep paging in large, unfiltered tables.
 This release-mode synthetic benchmark creates 1,000,000 rows and reads the row
 values for each fetched page on macOS 26.5 Apple Silicon arm64, rustc 1.95.0,
-and rusqlite 0.39 / libsqlite3-sys 0.37 bundled SQLite:
+and rusqlite 0.40.1 / libsqlite3-sys 0.38 bundled SQLite:
 
 ```bash
 cd src-tauri

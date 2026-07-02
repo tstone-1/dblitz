@@ -8,11 +8,7 @@
  * appState.fileConfig.tables[t].pinned_* fields via store.svelte.ts).
  */
 
-import {
-  getTableConfig,
-  updateTableConfig,
-  saveViewConfig,
-} from "$lib/store.svelte";
+import { getTableConfig, updateTableConfig } from "$lib/store.svelte";
 import type { ColumnFilterValue } from "$lib/store.svelte";
 
 type PinState = "none" | "pinned" | "modified";
@@ -78,7 +74,6 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
     updateTableConfig(selectedTable, (cfg) => {
       cfg.pinned_filters[col] = { value: f.value, is_regex: f.is_regex };
     });
-    saveViewConfig();
   }
 
   function unpinColumnFilter(col: string) {
@@ -88,7 +83,6 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
     updateTableConfig(selectedTable, (cfg) => {
       delete cfg.pinned_filters[col];
     });
-    saveViewConfig();
   }
 
   function revertColumnFilter(col: string) {
@@ -126,7 +120,6 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
     updateTableConfig(selectedTable, (cfg) => {
       cfg.pinned_global_filter = gf;
     });
-    saveViewConfig();
   }
 
   function unpinGlobalFilter() {
@@ -136,7 +129,6 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
     updateTableConfig(selectedTable, (cfg) => {
       cfg.pinned_global_filter = null;
     });
-    saveViewConfig();
   }
 
   function revertGlobalFilter() {
@@ -187,7 +179,6 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
       cfg.pinned_filters = {};
       cfg.pinned_global_filter = null;
     });
-    saveViewConfig();
     deps.triggerReload();
   }
 

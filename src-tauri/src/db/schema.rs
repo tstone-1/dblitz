@@ -1,7 +1,9 @@
+use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::{Connection, OpenFlags};
 use std::sync::atomic::Ordering;
 use tracing::{error, info, warn};
 
+use super::clear_caches;
 use super::types::{ColumnInfo, DbState, SchemaEntry, TableInfo};
 use super::util::{path_to_sqlite_uri, safe_ident, StrErr};
 
@@ -18,6 +20,25 @@ pub fn open_database(state: &DbState, path: &str) -> Result<Vec<TableInfo>, Stri
         error!(path, error = %e, "Failed to open database");
         e.to_string()
     })?;
+    // Engine-level backstop for the ATTACH/DETACH gate in sql.rs. That gate
+    // is a lexical check on the input string (fast, gives a friendly error
+    // message) and has already been bypassed twice by prefix tricks a
+    // parser wouldn't fall for (a leading comment, then a leading `;`).
+    // The authorizer runs on the *parsed* statement inside SQLite itself, so
+    // no lexical prefix can dodge it — it is the durable fix, and the
+    // string gate stays only for the friendlier UI error message.
+    // Also deny Transaction/Savepoint: harmless on this READ_ONLY+immutable
+    // connection (no locking, file never changes), but dblitz never needs an
+    // explicit BEGIN/SAVEPOINT and leaving one open with no COMMIT/ROLLBACK
+    // path is untidy state on a shared connection (nitpick N1).
+    conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
+        AuthAction::Attach { .. }
+        | AuthAction::Detach { .. }
+        | AuthAction::Transaction { .. }
+        | AuthAction::Savepoint { .. } => Authorization::Deny,
+        _ => Authorization::Allow,
+    }))
+    .str_err()?;
     // Read-only/immutable tuning, all safe because the file is a frozen
     // snapshot (no writer, no WAL):
     //   - cache_size=-64000  : 64 MiB page cache (negative = KiB, not pages).
@@ -38,9 +59,7 @@ pub fn open_database(state: &DbState, path: &str) -> Result<Vec<TableInfo>, Stri
 
     *state.conn.lock() = Some(conn);
     *state.current_path.lock() = Some(path.to_string());
-    state.rowid_indexes.lock().clear();
-    state.sorted_orders.lock().clear();
-    state.filtered_orders.lock().clear();
+    clear_caches(state);
 
     Ok(tables)
 }

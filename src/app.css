@@ -186,3 +186,18 @@ tr:hover td {
   background: var(--border-color);
   margin: 4px 0;
 }
+
+/* Shared pin-toggle button — used by DataGrid (column/header filter pin) and
+ * BrowseData (global filter pin). Padding/opacity/height vary per call site;
+ * those are kept as local overrides in each component's <style>. */
+.pin-btn {
+  display: flex; align-items: center; justify-content: center;
+  border: none; background: transparent;
+  cursor: pointer;
+  color: var(--text-muted);
+  transition: color 120ms, opacity 120ms;
+}
+.pin-btn[data-pin-state="none"]:hover { opacity: 1; color: var(--text-primary); }
+.pin-btn[data-pin-state="pinned"] { color: var(--accent); opacity: 1; }
+.pin-btn[data-pin-state="modified"] { color: var(--warning); opacity: 1; }
+.pin-btn:hover { color: var(--accent); }

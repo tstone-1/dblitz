@@ -5,8 +5,8 @@ use config::FileConfig;
 #[cfg(debug_assertions)]
 use db::BenchmarkResult;
 use db::{
-    ColumnFilter, ColumnInfo, DbState, QueryRequest, QueryResult, SchemaEntry, SqlResult, StrErr,
-    TableInfo,
+    ColumnFilter, ColumnInfo, DbState, ErrCtx, QueryRequest, QueryResult, SchemaEntry, SqlResult,
+    StrErr, TableInfo,
 };
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
@@ -173,7 +173,7 @@ fn query_table(
         sort_column,
         sort_asc,
     };
-    db::query_table(&state, &req)
+    db::query_table(&state, &req).err_ctx(&format!("querying table \"{}\"", req.table))
 }
 
 #[tauri::command]
@@ -247,7 +247,7 @@ fn load_view_config(state: State<'_, Arc<DbState>>) -> FileConfig {
 fn save_view_config(state: State<'_, Arc<DbState>>, config: FileConfig) -> Result<(), String> {
     let path = state.current_path.lock();
     match path.as_ref() {
-        Some(p) => config::save_config(p, &config),
+        Some(p) => config::save_config(p, &config).err_ctx(&format!("saving view config for {p}")),
         None => Err("No database open".to_string()),
     }
 }

@@ -42,7 +42,14 @@ fn classify_cell(numeric: bool, val: &str) -> CellValue {
             CellValue::Text
         }
     } else if let Ok(n) = val.parse::<f64>() {
-        CellValue::Number(n)
+        // `inf`/`-inf`/`nan` parse successfully but aren't valid XLSX numbers
+        // (Excel has no representation for them) - fall back to text rather
+        // than writing a value the file format can't hold.
+        if n.is_finite() {
+            CellValue::Number(n)
+        } else {
+            CellValue::Text
+        }
     } else {
         CellValue::Text
     }
@@ -157,6 +164,13 @@ mod tests {
     fn numeric_columns_keep_non_numeric_text_as_text() {
         assert_eq!(classify_cell(true, ""), CellValue::Text);
         assert_eq!(classify_cell(true, "N/A"), CellValue::Text);
+    }
+
+    #[test]
+    fn non_finite_floats_stay_text() {
+        assert_eq!(classify_cell(true, "inf"), CellValue::Text);
+        assert_eq!(classify_cell(true, "-inf"), CellValue::Text);
+        assert_eq!(classify_cell(true, "nan"), CellValue::Text);
     }
 
     #[test]

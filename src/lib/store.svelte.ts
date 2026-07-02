@@ -238,7 +238,7 @@ export async function saveViewConfig() {
   }
 }
 
-const defaultViewConfig: ViewConfig = {
+const defaultViewConfig: ViewConfig = Object.freeze({
   hidden_columns: [],
   column_colors: {},
   sort_column: null,
@@ -247,7 +247,7 @@ const defaultViewConfig: ViewConfig = {
   pinned_filters: {},
   pinned_global_filter: null,
   column_widths: {},
-};
+});
 
 /** Read-only access — safe to call from templates/derived. */
 export function getTableConfig(tableName: string): ViewConfig {
@@ -261,10 +261,16 @@ export function getTableConfig(tableName: string): ViewConfig {
  * effects) sees the change — especially when a caller mutated multiple nested
  * fields before publishing.
  */
-export function commitTableConfig(tableName: string, cfg: ViewConfig) {
+function commitTableConfig(tableName: string, cfg: ViewConfig) {
   appState.fileConfig.tables[tableName] = { ...cfg };
 }
 
+/**
+ * Mutate a table's config and persist it in one step. Every caller wants both
+ * the in-memory publish (`commitTableConfig`) and the on-disk save
+ * (`saveViewConfig`) — no caller has ever skipped the save — so this folds
+ * them together instead of pairing two calls at every site.
+ */
 export function updateTableConfig(
   tableName: string,
   mutate: (cfg: ViewConfig) => void,
@@ -272,6 +278,7 @@ export function updateTableConfig(
   const cfg = ensureTableConfig(tableName);
   mutate(cfg);
   commitTableConfig(tableName, cfg);
+  void saveViewConfig();
   return cfg;
 }
 
