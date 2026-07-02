@@ -12,6 +12,7 @@
     visibleRowIndices as getVisibleRowIndices,
   } from "./gridGeometry";
   import { shouldHandleWindowCopy } from "./copyGate";
+  import { pinGlyphPath } from "./pinGlyph";
 
   const ROW_HEIGHT = 26;
   const HEADER_HEIGHT = 26;
@@ -410,7 +411,7 @@
             onmousedown={(e) => onReorderColumn ? reorder.onMouseDown(e, col) : undefined}
             style={getColor(col) ? `background: ${getColor(col)};` : ''}>
             {col}{#if pinStateOf(col) !== "none"}<span class="header-pin-glyph" class:modified={pinStateOf(col) === "modified"} title={pinStateOf(col) === "modified" ? "Pinned filter (modified)" : "Pinned filter"}>
-              <svg viewBox="0 0 16 16" width="9" height="9" aria-hidden="true"><path d="M9.5 1.5 L14.5 6.5 L11.5 7.5 L10 12 L7 9 L3 13 L2 14 L3 10 L6 7 L3 4 L7.5 2.5 Z" fill="currentColor" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+              <svg viewBox="0 0 16 16" width="9" height="9" aria-hidden="true"><path d={pinGlyphPath} fill="currentColor" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
             </span>{/if}{#if sortColumn === col}<span class="sort-indicator">{sortAsc ? ' \u25B2' : ' \u25BC'}</span>{/if}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -455,7 +456,7 @@
                   aria-label="Pin column filter"
                 >
                   <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">
-                    <path d="M9.5 1.5 L14.5 6.5 L11.5 7.5 L10 12 L7 9 L3 13 L2 14 L3 10 L6 7 L3 4 L7.5 2.5 Z"
+                    <path d={pinGlyphPath}
                       fill={ps === "none" ? "none" : "currentColor"}
                       stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
                   </svg>
@@ -714,21 +715,15 @@
     box-shadow: inset 2px 0 0 var(--warning);
   }
 
+  /* base .pin-btn (layout/color/hover-to-accent) promoted to app.css;
+     padding/height/opacity here are this call site's local overrides. */
   .pin-btn {
-    display: flex; align-items: center; justify-content: center;
-    border: none; background: transparent;
-    padding: 0 3px; cursor: pointer;
-    color: var(--text-muted);
+    padding: 0 3px;
     height: 22px;
     flex-shrink: 0;
-    transition: opacity 120ms, color 120ms;
   }
   .pin-btn[data-pin-state="none"] { opacity: 0.35; }
   .filter-cell:hover .pin-btn[data-pin-state="none"] { opacity: 0.7; }
-  .pin-btn[data-pin-state="none"]:hover { opacity: 1; color: var(--text-primary); }
-  .pin-btn[data-pin-state="pinned"] { color: var(--accent); opacity: 1; }
-  .pin-btn[data-pin-state="modified"] { color: var(--warning); opacity: 1; }
-  .pin-btn:hover { color: var(--accent); }
 
   .header-pin-glyph {
     display: inline-flex;

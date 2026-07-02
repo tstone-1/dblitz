@@ -15,7 +15,7 @@
   - `npm run build`
   - `cd src-tauri && cargo fmt --check`
   - `cd src-tauri && cargo test`
-  - `cd src-tauri && cargo clippy`
+  - `cd src-tauri && cargo clippy --all-targets --all-features -- -D warnings` (matches CI/`npm run quality` — a bare `cargo clippy` can pass locally and still fail CI)
 - Use `npx tauri build` for local release builds. macOS DMG packaging may need to run outside a sandbox because Tauri invokes system image mounting tools.
 
 ## Architecture

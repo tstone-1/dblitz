@@ -5,6 +5,22 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.7.0] - 2026-07-02
+
+### Security
+- **Hardened the read-only guarantee against `ATTACH`/`DETACH` at the SQLite engine level.** dblitz refuses `ATTACH`/`DETACH` so a query can never reach beyond the file you opened. That refusal used to be a text check on the SQL you typed, which could be slipped past with a leading comment or semicolon (e.g. `;ATTACH ...`). It is now enforced by a SQLite authorizer that runs on the *parsed* statement inside the engine, so no such prefix trick can bypass it; the friendly error message is kept for the common cases. Stray `BEGIN`/`SAVEPOINT` statements are refused for the same reason — the connection is read-only, so they only left untidy transaction state behind.
+
+### Fixed
+- **Excel export writes non-finite numbers as text.** A numeric-typed column holding the text `inf`, `-inf`, or `nan` was exported as an invalid numeric cell; it is now written as text, so the exported workbook always opens cleanly.
+- **Unloading a database frees all cached row ordering.** After Unload, the cache backing filtered-and-sorted scrolling stayed resident until the next database opened; it is now released immediately, alongside the other paging caches.
+
+### Changed
+- **Release publishing waits for every platform build to succeed.** The GitHub release is now created as a draft and only published once the Windows, macOS, and Linux builds finish, so a failed build can no longer leave a live release with missing downloads.
+- Query and view-config errors now carry more context (the table or file involved) when surfaced.
+
+### Dependencies
+- npm: `@sveltejs/kit 2.68.0 → 2.69.0`, `@types/node 26.0.1 → 26.1.0`, `vite 8.1.0 → 8.1.3`. cargo: `tauri 2.11.3 → 2.11.5`, `tauri-runtime-wry 2.11.3 → 2.11.4`, `time 0.3.51 → 0.3.53`, `time-macros 0.2.30 → 0.2.31`, `zlib-rs 0.6.4 → 0.6.5`, `embed-resource 3.0.9 → 3.0.11`, `libredox 0.1.17 → 0.1.18`. Enabled the `rusqlite` `hooks` feature to back the ATTACH/DETACH authorizer above. `npm audit` clean; `cargo audit` clean aside from the known allowed gtk-rs Linux transitive advisories and a not-reachable `quick-xml` advisory pulled in transitively by Tauri's build tooling (dblitz never parses XML/plist).
+
 ## [26.6.10] - 2026-06-29
 
 ### Added

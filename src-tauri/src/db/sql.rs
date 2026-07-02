@@ -8,8 +8,11 @@ use super::util::read_row;
 // covers any realistic interactive result; beyond that, page with LIMIT/OFFSET.
 const SQL_RESULT_LIMIT: usize = 50_000;
 
-/// Skip leading whitespace and SQL comments so statement-kind guards see the
-/// first executable token, not a prefix comment.
+/// Skip leading whitespace, SQL comments, and empty-statement `;` separators
+/// so statement-kind guards see the first executable token, not a prefix
+/// comment or a leading semicolon. SQLite's own parser silently skips a
+/// leading `;` (treating it as an empty statement) rather than erroring, so
+/// without this the guard could be dodged by `;ATTACH ...`.
 fn strip_leading_ws_and_comments(mut sql: &str) -> &str {
     loop {
         let trimmed = sql.trim_start();
@@ -17,6 +20,8 @@ fn strip_leading_ws_and_comments(mut sql: &str) -> &str {
             sql = rest.split_once('\n').map_or("", |(_, tail)| tail);
         } else if let Some(rest) = trimmed.strip_prefix("/*") {
             sql = rest.split_once("*/").map_or("", |(_, tail)| tail);
+        } else if let Some(rest) = trimmed.strip_prefix(';') {
+            sql = rest;
         } else {
             return trimmed;
         }
@@ -26,7 +31,8 @@ fn strip_leading_ws_and_comments(mut sql: &str) -> &str {
 /// True if `sql` starts with the keyword ATTACH or DETACH, case-insensitive,
 /// followed by a non-identifier character. Catches the common forms
 /// `ATTACH '...' AS x`, `ATTACH DATABASE '...' AS x`, `DETACH x`,
-/// `DETACH DATABASE x` regardless of casing and leading SQL comments.
+/// `DETACH DATABASE x` regardless of casing, leading SQL comments, and a
+/// leading `;`.
 fn is_attach_or_detach(sql: &str) -> bool {
     let lower = strip_leading_ws_and_comments(sql).to_ascii_lowercase();
     let after = |kw: &str| -> bool {
@@ -274,6 +280,90 @@ mod tests {
     }
 
     #[test]
+    fn execute_sql_rejects_attach_behind_leading_semicolon() {
+        // SQLite's own parser silently skips a leading `;` (empty statement)
+        // rather than erroring, so `;ATTACH ...` used to slip past
+        // `is_attach_or_detach` (which only checked for comments/whitespace)
+        // and reach `stmt.readonly()`, which reports ATTACH as read-only.
+        let (state, path) = setup_temp_db_with_table();
+        assert_rejected(&state, ";ATTACH ':memory:' AS s");
+        assert_rejected(&state, "/* c */;ATTACH ':memory:' AS s");
+
+        // Must not create the target file, or leave the schema attached.
+        let attach_path = path.with_file_name("dblitz_semicolon_attach_should_not_exist.sqlite");
+        let _ = std::fs::remove_file(&attach_path);
+        let sql = format!(
+            ";ATTACH '{}' AS other",
+            attach_path.to_string_lossy().replace('\\', "\\\\")
+        );
+        let result = execute_sql(&state, &sql);
+        assert!(
+            result.error.is_some(),
+            "leading-semicolon ATTACH must be rejected"
+        );
+        assert!(
+            result
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("ATTACH and DETACH are not allowed")),
+            "expected ATTACH/DETACH guard message, got: {:?}",
+            result.error
+        );
+        assert!(
+            !attach_path.exists(),
+            "rejected ATTACH must not create {}",
+            attach_path.display()
+        );
+
+        // And "other" must not be a reachable schema afterward.
+        let read_result = execute_sql(&state, "SELECT * FROM other.nonexistent");
+        assert!(
+            read_result.error.is_some(),
+            "schema 'other' must not exist after a rejected ATTACH"
+        );
+
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn authorizer_denies_attach_at_the_engine_level_bypassing_the_string_gate() {
+        // The string gate in `is_attach_or_detach` has already been bypassed
+        // twice by prefix tricks (a leading comment, then a leading `;`) -
+        // it operates on the raw text before `prepare`. The authorizer
+        // registered in `open_database` runs inside SQLite on the *parsed*
+        // statement, so it can't be dodged by any lexical prefix. Prove that
+        // by going around `execute_sql`'s string gate entirely and calling
+        // `Connection::prepare` directly on the opened (authorizer-bearing)
+        // connection.
+        let (state, path) = setup_temp_db_with_table();
+        {
+            let guard = state.conn.lock();
+            let conn = guard.as_ref().unwrap();
+            let err = conn
+                .prepare("ATTACH ':memory:' AS s")
+                .expect_err("authorizer must deny ATTACH even reached directly");
+            let msg = err.to_string();
+            assert!(
+                msg.to_ascii_lowercase().contains("not authorized"),
+                "expected an authorization error, got: {msg}"
+            );
+
+            let err = conn
+                .prepare("DETACH s")
+                .expect_err("authorizer must deny DETACH even reached directly");
+            assert!(
+                err.to_string()
+                    .to_ascii_lowercase()
+                    .contains("not authorized"),
+                "expected an authorization error, got: {err}"
+            );
+        }
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn execute_sql_rejects_write_pragma() {
         // `journal_mode=wal` requires writing to the database header. The
         // connection is opened with SQLITE_OPEN_READ_ONLY + immutable=1, so
@@ -305,6 +395,22 @@ mod tests {
         // handling shows up.
         let (state, path) = setup_temp_db_with_table();
         assert_rejected(&state, "BEGIN IMMEDIATE");
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn execute_sql_rejects_plain_begin_and_savepoint_via_authorizer() {
+        // Plain BEGIN/BEGIN DEFERRED and SAVEPOINT are reported read-only by
+        // `stmt.readonly()` (N1) and used to pass `execute_sql` unchallenged,
+        // leaving transaction state on the shared connection with no
+        // COMMIT/ROLLBACK path. The authorizer registered in `open_database`
+        // now denies `AuthAction::Transaction`/`Savepoint` outright, so these
+        // are rejected before they can execute.
+        let (state, path) = setup_temp_db_with_table();
+        assert_rejected(&state, "BEGIN");
+        assert_rejected(&state, "BEGIN DEFERRED");
+        assert_rejected(&state, "SAVEPOINT sp1");
         close_database(&state);
         let _ = std::fs::remove_file(&path);
     }

@@ -53,10 +53,14 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v5
-      - name: Create release
+      - name: Create draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create ${{ github.ref_name }} --title "dblitz ${{ github.ref_name }}" --notes "See [CHANGELOG.md](https://github.com/tstone-1/dblitz/blob/main/CHANGELOG.md) for details."
+        # Draft, not published: a platform build failure in the matrix below
+        # must not leave a live release with missing artifacts (happened per
+        # CHANGELOG 26.5.4). The `publish` job flips this to non-draft only
+        # after every build leg succeeds.
+        run: gh release create ${{ github.ref_name }} --draft --title "dblitz ${{ github.ref_name }}" --notes "See [CHANGELOG.md](https://github.com/tstone-1/dblitz/blob/main/CHANGELOG.md) for details."
 
   build:
     needs: create-release
@@ -131,8 +135,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload ${{ github.ref_name }} src-tauri/target/release/dblitz.exe --clobber
 
-  update-tap:
+  publish:
     needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Every build matrix leg succeeded (needs: build), so the release now
+        # has artifacts for every platform - flip it from draft to published.
+        run: gh release edit ${{ github.ref_name }} --draft=false --repo ${{ github.repository }}
+
+  update-tap:
+    needs: publish
     runs-on: ubuntu-latest
     steps:
       - name: Bump Homebrew cask in tstone-1/homebrew-dblitz

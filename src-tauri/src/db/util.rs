@@ -14,6 +14,21 @@ impl<T, E: std::fmt::Display> StrErr<T> for Result<T, E> {
     }
 }
 
+/// Prefixes a human-readable operation description onto an already-stringified
+/// error, so a command-boundary failure reaching `appState.error` in the UI
+/// says what dblitz was doing (e.g. which table) instead of a bare
+/// SQLite/IO message. `tracing` already carries this context structurally
+/// via its fields; this carries the same context to the user-facing channel.
+pub(crate) trait ErrCtx<T> {
+    fn err_ctx(self, context: &str) -> Result<T, String>;
+}
+
+impl<T> ErrCtx<T> for Result<T, String> {
+    fn err_ctx(self, context: &str) -> Result<T, String> {
+        self.map_err(|e| format!("{context}: {e}"))
+    }
+}
+
 /// Convert an OS file path into a SQLite URI with `?immutable=1`. Percent-
 /// encodes the few characters that have special meaning in URIs and
 /// normalizes Windows backslashes to forward slashes.
@@ -76,6 +91,16 @@ pub(super) fn collect_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn err_ctx_prefixes_context_onto_error() {
+        let result: Result<(), String> = Err("no such table: ghost".to_string());
+        let err = result.err_ctx("querying table \"ghost\"").unwrap_err();
+        assert_eq!(err, "querying table \"ghost\": no such table: ghost");
+
+        let ok: Result<i32, String> = Ok(42);
+        assert_eq!(ok.err_ctx("irrelevant"), Ok(42));
+    }
 
     #[test]
     fn safe_ident_escapes_quotes() {

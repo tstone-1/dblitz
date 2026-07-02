@@ -6,7 +6,6 @@
     getTableConfig,
     ensureTableConfig,
     updateTableConfig,
-    saveViewConfig,
     type ColumnFilter,
     type ColumnFilterValue,
     type QueryResult,
@@ -26,6 +25,7 @@
   import { computeAutoWidths } from "./columnWidths";
   import { INCOMPLETE_OPS } from "./filterOperators";
   import type { SelectionData } from "./selectionData";
+  import { pinGlyphPath } from "./pinGlyph";
 
   const CHUNK_SIZE = 500;
   const FILTER_DEBOUNCE_MS = 500;
@@ -121,7 +121,6 @@
         tableCfg.sort_column = null;
         tableCfg.sort_asc = true;
       });
-      saveViewConfig();
     }
     sortColumn = cfg.sort_column;
     sortAsc = cfg.sort_asc;
@@ -220,7 +219,6 @@
         cfg.sort_column = sortColumn;
         cfg.sort_asc = sortAsc;
       });
-      saveViewConfig();
     }
     if (hasIncompleteFilter()) return;
     reloadData();
@@ -233,7 +231,6 @@
       if (idx >= 0) cfg.hidden_columns.splice(idx, 1);
       else cfg.hidden_columns.push(col);
     });
-    saveViewConfig();
   }
 
   function setColumnColor(col: string, color: string) {
@@ -242,18 +239,16 @@
       if (color) cfg.column_colors[col] = color;
       else delete cfg.column_colors[col];
     });
-    saveViewConfig();
   }
 
   function setColumnWidth(col: string, width: number) {
     if (!selectedTable) return;
+    // Widths are a high-churn field compared to colors/hidden, but we only
+    // write on drag-end (DataGrid emits once per resize), so the save cost
+    // (folded into updateTableConfig) is bounded. No need to debounce further.
     updateTableConfig(selectedTable, (cfg) => {
       cfg.column_widths[col] = width;
     });
-    // Widths are a high-churn field compared to colors/hidden, but we only
-    // write on drag-end (DataGrid emits once per resize), so the save cost
-    // is bounded. No need to debounce further.
-    saveViewConfig();
   }
 
   /** Compute reasonable column widths by measuring content with canvas. */
@@ -275,7 +270,6 @@
     updateTableConfig(selectedTable, (cfg) => {
       cfg.column_widths = widths;
     });
-    saveViewConfig();
   }
 
   /** Reset saved widths and recompute from content. */
@@ -344,7 +338,6 @@
     updateTableConfig(selectedTable, (next) => {
       next.column_order = order;
     });
-    saveViewConfig();
   }
 
   function resetColumnOrder() {
@@ -352,7 +345,6 @@
     updateTableConfig(selectedTable, (cfg) => {
       cfg.column_order = [];
     });
-    saveViewConfig();
   }
 
   // Build column colors map for visible columns
@@ -440,7 +432,7 @@
             >
               <!-- pin glyph -->
               <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
-                <path d="M9.5 1.5 L14.5 6.5 L11.5 7.5 L10 12 L7 9 L3 13 L2 14 L3 10 L6 7 L3 4 L7.5 2.5 Z"
+                <path d={pinGlyphPath}
                   fill={pinned.globalFilterPinState === "none" ? "none" : "currentColor"}
                   stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
               </svg>
@@ -660,18 +652,12 @@
   }
   .global-filter:focus { outline: none; }
 
+  /* base .pin-btn (layout/color/hover-to-accent) promoted to app.css;
+     padding/opacity here are this call site's local overrides. */
   .pin-btn {
-    display: flex; align-items: center; justify-content: center;
-    border: none; background: transparent;
-    padding: 0 6px; cursor: pointer;
-    color: var(--text-muted);
-    transition: color 120ms, opacity 120ms;
+    padding: 0 6px;
   }
   .pin-btn[data-pin-state="none"] { opacity: 0.45; }
-  .pin-btn[data-pin-state="none"]:hover { opacity: 1; color: var(--text-primary); }
-  .pin-btn[data-pin-state="pinned"] { color: var(--accent); opacity: 1; }
-  .pin-btn[data-pin-state="modified"] { color: var(--warning); opacity: 1; }
-  .pin-btn:hover { color: var(--accent); }
 
   .global-pin-btn {
     border-left: 1px solid var(--border-color);
