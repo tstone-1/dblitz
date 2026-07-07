@@ -148,10 +148,22 @@ Each release ships:
   (`aarch64`)
 - **Linux** — `.deb`, `.rpm`, and `.AppImage` (all x86_64)
 
-dblitz is unsigned. macOS users may need to clear the quarantine attribute or
-right-click → Open the first time; the
-[Homebrew tap](https://github.com/tstone-1/homebrew-dblitz) handles this
-automatically.
+dblitz is unsigned (ad-hoc signed, not Apple-notarized). Installing via the
+[Homebrew tap](https://github.com/tstone-1/homebrew-dblitz) clears the
+quarantine flag automatically, so prefer that on macOS:
+
+```sh
+brew install --cask tstone-1/dblitz/dblitz
+```
+
+If you instead download the `.dmg` directly, macOS Gatekeeper marks the
+quarantined, un-notarized app as **"dblitz is damaged and can't be opened"**.
+The app is not actually damaged — clear the quarantine flag once and it launches
+normally:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/dblitz.app
+```
 
 ## Usage
 
