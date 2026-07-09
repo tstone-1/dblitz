@@ -5,6 +5,11 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.7.2] - 2026-07-09
+
+### Dependencies
+- **Refreshed dependencies to latest compatible versions and cleared the `cargo audit` errors.** cargo: `quick-xml 0.39.4 → 0.41.0` (resolves RUSTSEC-2026-0194 and RUSTSEC-2026-0195 — a transitive dependency via `plist`, unreachable in dblitz since it never parses XML, but the audit is now error-free), plus `plist 1.9.0 → 1.10.0`, the `zbus` stack `5.16 → 5.17`, the `zvariant` stack `5.12 → 5.13`, and patch bumps to `bytes`, `cc`, `crossbeam-channel`/`-utils`, `dbus`, `hashlink`, `memchr`, `rustc-hash`, `rustversion`, `tendril` (`utf-8` dropped from the tree). npm: `@sveltejs/kit 2.61.1 → 2.69.2`, `svelte 5.55.9 → 5.56.4`, `svelte-check 4.4.8 → 4.7.2`, `vite 8.0.14 → 8.1.4`, `vitest 4.1.7 → 4.1.10`, `@tauri-apps/api 2.11.0 → 2.11.1`, `@tauri-apps/cli 2.11.2 → 2.11.4`, `@types/node 25.9.1 → 26.1.1`, `@sveltejs/vite-plugin-svelte 7.1.2 → 7.2.0`, and the `@codemirror/*` packages. `npm audit` clean; `cargo audit` clean aside from the known allowed gtk-rs Linux transitive advisories. TypeScript is held at `6.x` — `7.0` (the native compiler rewrite) is not yet supported by the Svelte language-tools/`svelte-check` toolchain.
+
 ## [26.7.1] - 2026-07-09
 
 ### Added
