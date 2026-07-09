@@ -5,6 +5,11 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.7.1] - 2026-07-09
+
+### Added
+- **macOS Dock "Recent" / "Open Recent" now populates.** Opening a database registers it with macOS via `NSDocumentController`, so it appears in the Dock icon's right-click menu and the app's **Open Recent** menu — the AppKit counterpart to the Windows jump list, which had no macOS equivalent before. The list builds going forward, so only databases opened with this build (or later) appear. The in-app recents dropdown (toolbar chevron) is unchanged.
+
 ## [26.7.0] - 2026-07-02
 
 ### Security
