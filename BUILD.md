@@ -108,25 +108,62 @@ git tag vYY.M.MICRO
 git push origin main --tags
 ```
 
+Pushing the `vYY.M.MICRO` tag triggers `.github/workflows/release.yml`, which
+runs the quality gate, creates a draft release, builds and uploads every
+platform artifact (Windows, macOS `aarch64` + `x64` DMGs, Linux), flips the
+release to published, then auto-bumps the Homebrew cask in
+`tstone-1/homebrew-dblitz`. You do **not** build the cross-platform artifacts
+locally — CI does. `npx tauri build` is only for a local desktop artifact.
+
 **Release hygiene checks:**
 - [ ] Local tag matches the version files exactly: `git describe --tags --exact-match`
 - [ ] GitHub has the pushed tag: `git ls-remote --tags origin vYY.M.MICRO`
-- [ ] Published GitHub release is created for the same tag: `gh release view vYY.M.MICRO`
+- [ ] Release workflow succeeded end-to-end: `gh run watch <run-id> --exit-status`
+- [ ] Published (not draft) GitHub release exists for the tag: `gh release view vYY.M.MICRO --json isDraft`
 
-### 4. Deploy to Shared Tools
+> **Gotcha — transient `publish`-job cancellation.** The `publish` job (a
+> one-line `gh release edit --draft=false`) is occasionally **cancelled** by a
+> GitHub Actions infra flake even when all four build legs succeed; `update-tap`
+> then shows `skipped` and the release is left as a draft with all assets
+> present. This is not a code failure. Re-run just the tail jobs — the builds are
+> not rebuilt: `gh run rerun <run-id> --failed`, then re-watch. (Seen on both
+> `26.7.1` publish attempts, 2026-07-09.)
 
-Copy the portable exe to a shared tools folder (stable filename, no version suffix):
+### 4. Deploy locally / to shared tools
+
+**Windows** — copy the portable exe to a shared tools folder (stable filename, no version suffix):
 
 ```bash
 cp src-tauri/target/release/dblitz.exe /path/to/shared/tools/dblitz.exe
 ```
 
+**macOS** — there is no shared-exe step; deploy the just-released build to this
+machine through the Homebrew cask (which also strips the Gatekeeper quarantine
+via its `postflight`, avoiding the "damaged" error). Run `brew update` first so
+brew's tap clone picks up the `update-tap` commit CI just pushed:
+
+```bash
+osascript -e 'quit app "dblitz"'      # if running, so the app bundle can be replaced
+brew update                            # refresh the tap clone to the new cask version
+brew upgrade --cask dblitz             # or: brew install --cask dblitz (first time)
+```
+
+First use of the tap on a machine needs `brew trust --cask tstone-1/dblitz/dblitz`.
+To overwrite a pre-existing non-brew install, use `brew install --cask --force dblitz`.
+
 ### 5. Post-release Verification
 
-- [ ] Run exe from build output to verify it works
-- [ ] Open a .sqlite file via double-click (file association test)
-- [ ] Check that jump list populates after opening files
 - [ ] Confirm GitHub shows the new release as latest: `gh release list --limit 5`
+- [ ] Confirm the tap cask bumped to the new version (both `sha256` lines updated)
+- **Windows:**
+  - [ ] Run exe from build output to verify it works
+  - [ ] Open a .sqlite file via double-click (file association test)
+  - [ ] Check that the jump list populates after opening files
+- **macOS:**
+  - [ ] Installed version matches: `defaults read /Applications/dblitz.app/Contents/Info.plist CFBundleShortVersionString`
+  - [ ] No quarantine flag: `xattr -p com.apple.quarantine /Applications/dblitz.app` (expect "No such xattr")
+  - [ ] App launches without the "damaged" error: `open -a dblitz`
+  - [ ] After opening a database, it appears in the Dock icon's right-click **Recent** menu and **File → Open Recent** (`NSDocumentController`, added 26.7.1)
 
 ## Quick Reference
 
