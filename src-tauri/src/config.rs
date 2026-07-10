@@ -9,13 +9,13 @@ use tracing::{info, warn};
 /// Maximum number of recently-opened databases tracked in app config.
 const RECENT_FILES_MAX: usize = 10;
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 pub struct PinnedFilter {
     pub value: String,
     pub is_regex: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 pub struct ViewConfig {
     pub hidden_columns: Vec<String>,
     pub column_colors: HashMap<String, String>,
@@ -31,7 +31,7 @@ pub struct ViewConfig {
     pub column_widths: HashMap<String, u32>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 pub struct FileConfig {
     /// Per-table view configs, keyed by table name
     pub tables: HashMap<String, ViewConfig>,
@@ -48,12 +48,57 @@ pub const TINT_PRESETS: &[&str] = &[
     "#d94040", "#e0a030", "#4aa84a", "#3080d0", "#8050c0", "#c04090",
 ];
 
+/// Column-tint colors offered by the frontend's header-context-menu color
+/// picker (`colorPresetsForTheme` in `src/lib/components/columnView.ts`).
+/// That function returns a different palette per theme (plus a `""` "no
+/// color" entry that the frontend deletes the map key for instead of
+/// storing — see `setColumnColor` in BrowseData.svelte), so this allowlist
+/// is the union of both the light- and dark-theme palettes: a config saved
+/// while the app was in one theme must still validate after the user
+/// switches to the other.
+pub const COLUMN_COLOR_PRESETS: &[&str] = &[
+    // Light theme
+    "#fde8e8", "#e8fde8", "#e8e8fd", "#fdfde8", "#fde8fd", "#e8fdfd", "#f5eded", "#edf5ed",
+    // Dark theme
+    "#3b1c1c", "#1c3b1c", "#1c1c3b", "#3b3b1c", "#3b1c3b", "#1c3b3b", "#2d1f1f", "#1f2d1f",
+];
+
+/// Defensive backstop on the window-marker label length. The frontend input
+/// already caps entry at `maxlength="12"` (see Toolbar.svelte), but a
+/// hand-edited `config.json` bypasses that, and the label is rendered inline
+/// in the toolbar where an unbounded string would visually break the layout.
+/// Deliberately more generous than the UI's 12 chars -- this is a safety net
+/// against corrupt/adversarial input, not a UX constraint.
+const LABEL_MAX_LEN: usize = 64;
+
 fn sanitize_tint(tint: Option<String>) -> Option<String> {
     tint.filter(|value| TINT_PRESETS.contains(&value.as_str()))
 }
 
+/// Drops any per-column tint that isn't one of the frontend's known preset
+/// values, mirroring `sanitize_tint` above. Applied on both load and save
+/// (via `sanitize_file_config`) so a hand-edited or otherwise adversarial
+/// `column_colors` map never reaches the frontend, which uses these values
+/// directly in inline `style` attributes.
+fn sanitize_column_colors(colors: HashMap<String, String>) -> HashMap<String, String> {
+    colors
+        .into_iter()
+        .filter(|(_, color)| COLUMN_COLOR_PRESETS.contains(&color.as_str()))
+        .collect()
+}
+
+/// Truncates the window-marker label to [`LABEL_MAX_LEN`] chars (by char, not
+/// byte, so this can't split a multi-byte UTF-8 sequence).
+fn sanitize_label(label: Option<String>) -> Option<String> {
+    label.map(|s| s.chars().take(LABEL_MAX_LEN).collect())
+}
+
 fn sanitize_file_config(mut config: FileConfig) -> FileConfig {
     config.tint = sanitize_tint(config.tint);
+    config.label = sanitize_label(config.label);
+    for view in config.tables.values_mut() {
+        view.column_colors = sanitize_column_colors(std::mem::take(&mut view.column_colors));
+    }
     config
 }
 
@@ -65,15 +110,64 @@ fn config_dir() -> PathBuf {
     base.join("dblitz")
 }
 
-fn config_path_for_db(db_path: &str) -> PathBuf {
+/// Writes `contents` to `path` atomically: write to a sibling temp file in the
+/// same directory, then `fs::rename` it over the target. A rename within one
+/// directory is a single filesystem-metadata operation, so a crash or power
+/// loss mid-write can never leave `path` holding a torn/partial JSON file --
+/// readers see either the old complete file or the new complete file, never
+/// something in between. `fs::rename` replaces an existing destination on
+/// both Windows (`MoveFileExW` + `MOVEFILE_REPLACE_EXISTING`) and Unix, so
+/// this works whether or not `path` already exists.
+///
+/// The temp filename embeds the PID and a nanosecond timestamp so concurrent
+/// writers (e.g. two dblitz windows saving at the same moment) don't clobber
+/// each other's in-flight temp file. The final rename itself is still a
+/// plain last-writer-wins race across processes -- that's the existing,
+/// accepted, documented best-effort behavior for the unlocked
+/// read-modify-write cycle; this helper only removes the "torn file" failure
+/// mode, not the race.
+fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| format!("config path {} has no parent directory", path.display()))?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_name = format!(
+        "{}.{}.{}.tmp",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("config"),
+        std::process::id(),
+        nanos
+    );
+    let tmp_path = dir.join(tmp_name);
+    fs::write(&tmp_path, contents).str_err()?;
+    fs::rename(&tmp_path, path).map_err(|e| {
+        // Best-effort cleanup of the orphaned temp file; ignore a secondary
+        // failure here so the original rename error is what gets reported.
+        let _ = fs::remove_file(&tmp_path);
+        format!(
+            "failed to atomically replace {} via rename: {e}",
+            path.display()
+        )
+    })
+}
+
+fn config_path_for_db_in(dir: &Path, db_path: &str) -> PathBuf {
     let mut hasher = Sha256::new();
     hasher.update(db_path.as_bytes());
     let hash = hex::encode(hasher.finalize());
-    config_dir().join(format!("{}.json", &hash[..16]))
+    dir.join(format!("{}.json", &hash[..16]))
 }
 
-pub fn load_config(db_path: &str) -> FileConfig {
-    let path = config_path_for_db(db_path);
+/// `_in`-suffixed counterpart to [`load_config`], taking the config base
+/// directory explicitly so tests can point it at an isolated
+/// `tempfile::TempDir` instead of the real OS config dir. See the doc block
+/// above the app-config `_in` variants for why this pattern exists.
+fn load_config_in(dir: &Path, db_path: &str) -> FileConfig {
+    let path = config_path_for_db_in(dir, db_path);
     if path.exists() {
         match fs::read_to_string(&path) {
             Ok(s) => match serde_json::from_str(&s) {
@@ -88,14 +182,22 @@ pub fn load_config(db_path: &str) -> FileConfig {
     FileConfig::default()
 }
 
-pub fn save_config(db_path: &str, config: &FileConfig) -> Result<(), String> {
-    let dir = config_dir();
-    fs::create_dir_all(&dir).str_err()?;
-    let path = config_path_for_db(db_path);
+pub fn load_config(db_path: &str) -> FileConfig {
+    load_config_in(&config_dir(), db_path)
+}
+
+/// `_in`-suffixed counterpart to [`save_config`]; see [`load_config_in`].
+fn save_config_in(dir: &Path, db_path: &str, config: &FileConfig) -> Result<(), String> {
+    fs::create_dir_all(dir).str_err()?;
+    let path = config_path_for_db_in(dir, db_path);
     let json = serde_json::to_string_pretty(&sanitize_file_config(config.clone())).str_err()?;
-    fs::write(&path, json).str_err()?;
+    atomic_write(&path, &json)?;
     info!(path = %path.display(), "Saved view config");
     Ok(())
+}
+
+pub fn save_config(db_path: &str, config: &FileConfig) -> Result<(), String> {
+    save_config_in(&config_dir(), db_path, config)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -145,8 +247,7 @@ fn save_app_config_in(dir: &Path, config: &AppConfig) -> Result<(), String> {
     fs::create_dir_all(dir).str_err()?;
     let path = app_config_path_in(dir);
     let json = serde_json::to_string_pretty(config).str_err()?;
-    fs::write(&path, json).str_err()?;
-    Ok(())
+    atomic_write(&path, &json)
 }
 
 /// Normalize a path for case-insensitive dedup on Windows. On Unix, paths are
@@ -454,5 +555,146 @@ mod tests {
                 .map(String::as_str)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn column_color_presets_match_frontend_column_view() {
+        // Deliberately does NOT edit columnView.ts -- just parses it as data,
+        // the same lockstep pattern as `tint_presets_match_frontend_toolbar_utils`
+        // above. Order doesn't matter here (unlike TINT_PRESETS, which drives an
+        // ordered dropdown), so compare as sorted/deduped sets.
+        let frontend = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/lib/components/columnView.ts"),
+        )
+        .unwrap();
+        let hex_re = regex::Regex::new(r"#[0-9a-fA-F]{6}").unwrap();
+        let mut frontend_values: Vec<String> = hex_re
+            .find_iter(&frontend)
+            .map(|m| m.as_str().to_string())
+            .collect();
+        frontend_values.sort();
+        frontend_values.dedup();
+
+        let mut expected: Vec<String> =
+            COLUMN_COLOR_PRESETS.iter().map(|s| s.to_string()).collect();
+        expected.sort();
+        expected.dedup();
+
+        assert_eq!(
+            expected, frontend_values,
+            "COLUMN_COLOR_PRESETS in config.rs must match colorPresetsForTheme in columnView.ts"
+        );
+    }
+
+    #[test]
+    fn sanitize_file_config_drops_unknown_column_colors() {
+        let mut view = ViewConfig::default();
+        view.column_colors
+            .insert("good".to_string(), "#fde8e8".to_string());
+        view.column_colors
+            .insert("bad".to_string(), "javascript:alert(1)".to_string());
+        let mut config = FileConfig::default();
+        config.tables.insert("t".to_string(), view);
+
+        let sanitized = sanitize_file_config(config);
+        let colors = &sanitized.tables["t"].column_colors;
+        assert_eq!(colors.len(), 1);
+        assert_eq!(colors.get("good"), Some(&"#fde8e8".to_string()));
+    }
+
+    #[test]
+    fn sanitize_file_config_caps_label_length() {
+        let long_label = "x".repeat(200);
+        let config = FileConfig {
+            label: Some(long_label),
+            ..FileConfig::default()
+        };
+
+        let sanitized = sanitize_file_config(config);
+        assert_eq!(sanitized.label.unwrap().chars().count(), LABEL_MAX_LEN);
+    }
+
+    #[test]
+    fn sanitize_file_config_keeps_short_label() {
+        let config = FileConfig {
+            label: Some("PROD".to_string()),
+            ..FileConfig::default()
+        };
+
+        assert_eq!(sanitize_file_config(config).label.as_deref(), Some("PROD"));
+    }
+
+    #[test]
+    fn view_config_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let db_path = "C:/data/prod.db";
+
+        let mut view = ViewConfig::default();
+        view.column_widths.insert("id".to_string(), 120);
+        view.hidden_columns.push("internal_notes".to_string());
+        view.column_colors
+            .insert("id".to_string(), "#fde8e8".to_string());
+        view.pinned_filters.insert(
+            "id".to_string(),
+            PinnedFilter {
+                value: "42".to_string(),
+                is_regex: false,
+            },
+        );
+        let mut config = FileConfig {
+            tint: Some("#3080d0".to_string()),
+            label: Some("PROD".to_string()),
+            ..FileConfig::default()
+        };
+        config.tables.insert("orders".to_string(), view);
+
+        save_config_in(dir.path(), db_path, &config).unwrap();
+        let loaded = load_config_in(dir.path(), db_path);
+
+        assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn corrupt_view_config_yields_defaults() {
+        let dir = TempDir::new().unwrap();
+        let db_path = "C:/data/corrupt.db";
+        fs::create_dir_all(dir.path()).unwrap();
+        let path = config_path_for_db_in(dir.path(), db_path);
+        fs::write(&path, "{bad json").unwrap();
+
+        // Must not panic, and must fall back to defaults rather than
+        // propagating the parse error.
+        let loaded = load_config_in(dir.path(), db_path);
+        assert_eq!(loaded, FileConfig::default());
+    }
+
+    #[test]
+    fn config_path_for_db_uses_16_char_sha256_hex_filename() {
+        // Pins the hashing scheme: sha256("test.db") truncated to its first
+        // 16 hex chars, `.json` extension. Expected hash independently
+        // verified via .NET's SHA256 outside this test.
+        let dir = TempDir::new().unwrap();
+        let path = config_path_for_db_in(dir.path(), "test.db");
+        assert_eq!(path, dir.path().join("aec6124094934e4c.json"));
+    }
+
+    #[test]
+    fn save_config_in_leaves_no_temp_files_behind() {
+        let dir = TempDir::new().unwrap();
+        let db_path = "C:/data/atomic.db";
+        // Save twice to exercise both the create and the atomic-replace path.
+        save_config_in(dir.path(), db_path, &FileConfig::default()).unwrap();
+        save_config_in(dir.path(), db_path, &FileConfig::default()).unwrap();
+
+        let entries: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "expected exactly one surviving config file, found: {entries:?}"
+        );
+        assert!(entries[0].ends_with(".json"));
     }
 }

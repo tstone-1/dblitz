@@ -43,6 +43,11 @@ export interface QueryResult {
 export interface SqlResult {
   columns: string[];
   rows: (string | null)[][];
+  // Per-column declared type (e.g. "INTEGER", "TEXT"), aligned 1:1 with
+  // `columns`. Empty string for a column with no declared type (a computed
+  // expression). Used to pass the correct numeric/text formatting through to
+  // an XLSX export of the SQL result.
+  column_types: string[];
   error: string | null;
   // Non-fatal: set when the result exceeded the 50,000-row cap and only the
   // first N rows were returned. Travels alongside `rows`, not in `error`.
@@ -156,14 +161,6 @@ export async function openDatabase(path: string) {
     // arrives. So load it all here, then publish in one synchronous batch.
     const tables = await invoke<TableInfo[]>("open_database", { path });
     const config = await invoke<FileConfig>("load_view_config");
-    // Migrate any pre-pinned-filters entries from older config files.
-    for (const t of Object.values(config.tables)) {
-      if (!t.pinned_filters) t.pinned_filters = {};
-      if (t.pinned_global_filter === undefined) t.pinned_global_filter = null;
-      if (!t.column_widths) t.column_widths = {};
-    }
-    if (config.tint === undefined) config.tint = null;
-    if (config.label === undefined) config.label = null;
     // Fetch column names for all tables (for SQL autocomplete + as a
     // schema source for filter validation before the first query result).
     const colMap: Record<string, string[]> = {};
@@ -230,11 +227,25 @@ export async function refreshTables() {
   }
 }
 
+// W15: view-config saves happen silently in the background (every filter
+// pin, column resize, sort change, ... calls saveViewConfig() as a fire-and-
+// forget `void` from updateTableConfig). A failure there used to only hit
+// the console, so a broken/read-only config path left the user editing view
+// settings that were never actually persisted, with zero on-screen signal.
+// Surface the FIRST failure of the session via the notice bar so the user
+// notices at all, but don't nag on every subsequent keystroke-driven
+// autosave once they've seen it - that's what this module-level flag is for.
+let saveFailureNotified = false;
+
 export async function saveViewConfig() {
   try {
     await invoke("save_view_config", { config: appState.fileConfig });
   } catch (e) {
     console.error("Failed to save view config:", e);
+    if (!saveFailureNotified) {
+      saveFailureNotified = true;
+      appState.notice = `View settings could not be saved: ${String(e)}`;
+    }
   }
 }
 

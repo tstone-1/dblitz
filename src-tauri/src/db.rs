@@ -23,6 +23,14 @@ pub fn cancel_queries(state: &DbState) {
     state
         .query_generation
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Break a query out of a blocking sqlite3_step deep inside a single row
+    // fetch (e.g. a grinding recursive CTE in execute_sql) rather than
+    // relying solely on the generation bump above, which is only observed
+    // between completed row fetches and can't interrupt one that never
+    // finishes a row.
+    if let Some(handle) = state.interrupt_handle.lock().as_ref() {
+        handle.interrupt();
+    }
 }
 
 /// Clears all per-table caches (rowid index, sorted order, filtered order).
@@ -42,6 +50,7 @@ pub fn close_database(state: &DbState) {
     cancel_queries(state);
     *state.conn.lock() = None;
     *state.current_path.lock() = None;
+    *state.interrupt_handle.lock() = None;
     clear_caches(state);
 }
 

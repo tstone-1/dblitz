@@ -14,7 +14,7 @@
   import ColumnSettings from "./ColumnSettings.svelte";
   import ColumnFinder from "./ColumnFinder.svelte";
   import { createPinnedFilters } from "./pinnedFilters.svelte";
-  import { createAutoSelectFirstTable } from "./autoSelectFirstTable.svelte";
+  import { createAutoSelectFirstTable, didDbPathChange } from "./autoSelectFirstTable.svelte";
   import { createVirtualRows } from "./virtualRows.svelte";
   import {
     buildActiveFilters,
@@ -49,11 +49,45 @@
 
   // Auto-select the lone table when opening a single-table DB. The helper
   // owns the "did we already auto-select for this db path?" bookkeeping.
-  const checkAutoSelect = createAutoSelectFirstTable((name) => {
-    sidebarCollapsed = true;
-    selectTable(name);
+  // `onReset` is belt-and-braces for the close-to-null path: the merged
+  // effect below already resets on every dbPath change (including to
+  // null), but wiring this too means the reset also fires if this helper's
+  // own internal bookkeeping (autoSelectedDb) is ever reused standalone.
+  const checkAutoSelect = createAutoSelectFirstTable(
+    (name) => {
+      sidebarCollapsed = true;
+      selectTable(name);
+    },
+    () => resetForNewDatabase(),
+  );
+
+  // B1: BrowseData used to keep selectedTable/columns/totalRows/the row
+  // cache alive across a Toolbar-driven openDatabase() call (Open DB /
+  // recents), so switching to a different database left the grid showing
+  // (and querying) the PREVIOUS database's table. Reset every per-database
+  // local state whenever appState.dbPath actually changes.
+  //
+  // `prevDbPath` is a plain `let`, not `$state` -- it's only ever read and
+  // written from inside this effect, so wrapping it reactively would just
+  // be redundant bookkeeping (and risks the effect depending on its own
+  // write). `didDbPathChange` is the pure, independently-tested decision:
+  // it fires for null -> A, A -> B, and A -> null, but not for A -> A.
+  //
+  // The reset and the single-table auto-select deliberately live in ONE
+  // effect (not two separate ones) so their ordering is guaranteed rather
+  // than left to Svelte's effect-scheduling order: resetForNewDatabase()
+  // always runs BEFORE checkAutoSelect() for the same dbPath change, so a
+  // single-table DB's auto-selected table is never clobbered by the reset
+  // that opening it triggered.
+  let prevDbPath: string | null = null;
+  $effect(() => {
+    const path = appState.dbPath;
+    if (didDbPathChange(prevDbPath, path)) {
+      prevDbPath = path;
+      resetForNewDatabase();
+    }
+    checkAutoSelect();
   });
-  $effect(() => { checkAutoSelect(); });
 
   function allColsOrdered(): string[] {
     if (!selectedTable) return columns;
@@ -104,6 +138,29 @@
     setTotalRows: (nextTotalRows) => { totalRows = nextTotalRows; },
     setError: (message) => { appState.error = message; },
   });
+
+  /**
+   * Clears every piece of per-database local state BrowseData caches about
+   * whichever database was previously open: the selected table, its
+   * columns/row-count, all filter/sort state, the pending filter debounce,
+   * and the virtualRows row cache. Called whenever appState.dbPath changes
+   * (see the merged reset+auto-select effect above) so a database switch
+   * can never leave the grid showing -- or querying -- the wrong database's
+   * table (B1).
+   */
+  function resetForNewDatabase() {
+    selectedTable = null;
+    columns = [];
+    totalRows = 0;
+    countPending = false;
+    columnFilters = {};
+    globalFilter = "";
+    sortColumn = null;
+    sortAsc = true;
+    lastFilterState = "";
+    if (filterDebounce) { clearTimeout(filterDebounce); filterDebounce = null; }
+    virtualRows.reset();
+  }
 
   async function selectTable(name: string) {
     // Cancel any pending debounced reload from the outgoing table so it can't

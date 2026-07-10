@@ -20,6 +20,38 @@ export function createVirtualRows(deps: VirtualRowsDeps) {
   let pendingChunks = new Map<number, Promise<void>>();
   let epoch = 0;
 
+  // Bounds how many chunks stay resident in rowCache so scrolling through a
+  // huge (multi-million-row) table doesn't grow memory without limit. 200
+  // chunks x the app's default 500-row CHUNK_SIZE = 100k rows resident --
+  // generous scrollback before a chunk has to be refetched.
+  const MAX_CACHED_CHUNKS = 200;
+
+  // Plain (non-reactive) LRU recency tracker -- deliberately NOT $state.
+  // getRow() runs synchronously inside the grid's render pass (every visible
+  // row calls it on every re-render), so reassigning a $state Map there just
+  // to bump recency would write to reactive state mid-read, re-triggering
+  // the very render that produced the write and risking a runaway reactive
+  // loop. A plain Map does the bookkeeping instead: it relies on Map's
+  // insertion-order guarantee -- delete+re-set moves a key to the end, so
+  // the first key in iteration order is always the least-recently-used
+  // chunk. Because currently-rendered chunks get touched on every render
+  // pass, they're always at the recent end and are never the eviction
+  // target as long as the cap comfortably exceeds the visible window.
+  const chunkRecency = new Map<number, true>();
+
+  function touchRecency(chunkIdx: number) {
+    chunkRecency.delete(chunkIdx);
+    chunkRecency.set(chunkIdx, true);
+  }
+
+  function evictIfOverCap(cache: Map<number, Row[]>) {
+    if (cache.size <= MAX_CACHED_CHUNKS) return;
+    for (const chunkIdx of chunkRecency.keys()) {
+      if (cache.size <= MAX_CACHED_CHUNKS) break;
+      if (cache.delete(chunkIdx)) chunkRecency.delete(chunkIdx);
+    }
+  }
+
   function isCurrent(myEpoch: number): boolean {
     return myEpoch === epoch;
   }
@@ -42,6 +74,8 @@ export function createVirtualRows(deps: VirtualRowsDeps) {
 
     const newCache = new Map(rowCache);
     newCache.set(chunkIdx, result.rows);
+    touchRecency(chunkIdx);
+    evictIfOverCap(newCache);
     rowCache = newCache;
   }
 
@@ -73,6 +107,7 @@ export function createVirtualRows(deps: VirtualRowsDeps) {
       void fetchChunk(chunkIdx);
       return null;
     }
+    touchRecency(chunkIdx);
     return chunk[index - chunkIdx * deps.chunkSize] ?? null;
   }
 
@@ -101,6 +136,7 @@ export function createVirtualRows(deps: VirtualRowsDeps) {
     for (let idx = start; idx <= end; idx++) {
       const chunkIdx = Math.floor(idx / deps.chunkSize);
       const chunk = rowCache.get(chunkIdx);
+      if (chunk) touchRecency(chunkIdx);
       const fullRow = chunk?.[idx - chunkIdx * deps.chunkSize];
       if (!fullRow) {
         throw new Error("Selection contains rows that could not be loaded.");
@@ -130,6 +166,23 @@ export function createVirtualRows(deps: VirtualRowsDeps) {
     return rowCache.get(0) ?? [];
   }
 
+  /**
+   * Hard reset for a database switch (no table selected / a different
+   * database was just opened). Unlike `beginReload()`, this does not await
+   * `cancelQueries()` -- there's no reload commencing for the caller to wait
+   * on, only stale state to drop -- and it doesn't hand back an epoch. Still
+   * bumps `epoch` so any fetch still in flight from the old database is
+   * ignored (via `isCurrent`) when it eventually resolves, instead of
+   * repopulating the cache with the wrong database's rows.
+   */
+  function reset(): void {
+    epoch++;
+    rowCache = new Map();
+    pendingChunks.clear();
+    chunkRecency.clear();
+    void deps.cancelQueries();
+  }
+
   return {
     getVisibleRow,
     getVisibleRows,
@@ -137,5 +190,6 @@ export function createVirtualRows(deps: VirtualRowsDeps) {
     beginReload,
     applyFirstChunk,
     isCurrent,
+    reset,
   };
 }

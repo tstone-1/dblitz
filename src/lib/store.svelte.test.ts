@@ -1,5 +1,10 @@
-import { beforeEach, describe, expect, it } from "vitest";
-import { loadSqlHistory, loadTheme } from "./store.svelte";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
+import { appState, loadSqlHistory, loadTheme, saveViewConfig } from "./store.svelte";
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn().mockResolvedValue(undefined),
+}));
 
 describe("store localStorage loaders", () => {
   const storage = new Map<string, string>();
@@ -49,5 +54,34 @@ describe("store localStorage loaders", () => {
 
     window.localStorage.setItem("dblitz-theme", "dark");
     expect(loadTheme()).toBe("dark");
+  });
+});
+
+// W15: saveViewConfig() used to swallow failures into console.error only,
+// leaving a broken/read-only config path with zero on-screen signal.
+describe("saveViewConfig failure notice", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    appState.notice = null;
+  });
+
+  it("surfaces the first failure via appState.notice but does not re-notify on a second failure", async () => {
+    vi.mocked(invoke).mockRejectedValue(new Error("disk full"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await saveViewConfig();
+    expect(appState.notice).toBe("View settings could not be saved: Error: disk full");
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+
+    // Simulate the user dismissing the notice, then a second save failure.
+    appState.notice = null;
+    await saveViewConfig();
+
+    // console.error still fires every time (nothing is swallowed silently),
+    // but the notice bar is a once-per-session nag, not a per-keystroke one.
+    expect(errorSpy).toHaveBeenCalledTimes(2);
+    expect(appState.notice).toBeNull();
+
+    errorSpy.mockRestore();
   });
 });

@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+
 use super::types::{DbState, SqlResult};
 use super::util::read_row;
 
@@ -52,6 +54,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
             return SqlResult {
                 columns: vec![],
                 rows: vec![],
+                column_types: vec![],
                 error: Some("No database open".to_string()),
                 truncated: false,
             }
@@ -69,6 +72,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
         return SqlResult {
             columns: vec![],
             rows: vec![],
+            column_types: vec![],
             error: Some(
                 "dblitz is a read-only viewer - ATTACH and DETACH are not allowed.".to_string(),
             ),
@@ -82,6 +86,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
             return SqlResult {
                 columns: vec![],
                 rows: vec![],
+                column_types: vec![],
                 error: Some(e.to_string()),
                 truncated: false,
             };
@@ -92,6 +97,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
         return SqlResult {
             columns: vec![],
             rows: vec![],
+            column_types: vec![],
             error: Some(
                 "dblitz is a read-only viewer - write statements (INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, etc.) are not supported.".to_string(),
             ),
@@ -99,8 +105,22 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
         };
     }
 
+    let col_count = stmt.column_count();
     let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
-    let col_count = columns.len();
+    // Per-column declared type (e.g. "INTEGER", "TEXT"), used by the XLSX
+    // export to decide numeric vs. text formatting. `None` for a column with
+    // no declared type (a computed expression like `SELECT 1+1`) - the
+    // export side already treats a missing/empty decltype as
+    // numeric-affinity, so an empty string here is the right default.
+    let column_types: Vec<String> = stmt
+        .columns()
+        .iter()
+        .map(|c| c.decl_type().unwrap_or("").to_string())
+        .collect();
+    // Snapshot the generation before running so a mid-iteration cancellation
+    // (a newer request bumping it) can be detected without waiting on the
+    // interrupt handle alone - see the loop below.
+    let generation = state.query_generation.load(Ordering::Relaxed);
     let query_result = stmt.query([]);
     match query_result {
         Ok(mut rows_iter) => {
@@ -109,6 +129,22 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
             loop {
                 match rows_iter.next() {
                     Ok(Some(row)) => {
+                        // A newer request (or an explicit cancel) bumped the
+                        // generation while we were mid-fetch. `cancel_queries`
+                        // also calls `InterruptHandle::interrupt()`, which
+                        // breaks a query stuck deep inside a single blocking
+                        // `sqlite3_step` (e.g. a grinding recursive CTE) - this
+                        // check catches the rest: a query that keeps
+                        // completing rows quickly but should still stop.
+                        if state.query_generation.load(Ordering::Relaxed) != generation {
+                            return SqlResult {
+                                columns,
+                                rows,
+                                column_types,
+                                error: Some("Query cancelled by a newer request".to_string()),
+                                truncated: false,
+                            };
+                        }
                         // Only flag truncation once we've collected the cap
                         // AND confirmed at least one more row exists. Checking
                         // before the fetch would falsely truncate a result
@@ -124,6 +160,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
                         return SqlResult {
                             columns,
                             rows,
+                            column_types,
                             error: Some(e.to_string()),
                             truncated: false,
                         };
@@ -133,6 +170,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
             SqlResult {
                 columns,
                 rows,
+                column_types,
                 error: None,
                 truncated,
             }
@@ -140,6 +178,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
         Err(e) => SqlResult {
             columns: vec![],
             rows: vec![],
+            column_types: vec![],
             error: Some(e.to_string()),
             truncated: false,
         },
@@ -204,6 +243,25 @@ mod tests {
         assert_eq!(result.columns, vec!["name"]);
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0].as_deref(), Some("alice"));
+
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn execute_sql_captures_per_column_decltypes() {
+        let (state, path) = setup_temp_db_with_table();
+
+        let result = execute_sql(&state, "SELECT id, name, 1 + 1 AS computed FROM users");
+
+        assert!(result.error.is_none(), "got: {:?}", result.error);
+        assert_eq!(result.columns, vec!["id", "name", "computed"]);
+        assert_eq!(result.column_types.len(), 3);
+        assert_eq!(result.column_types[0], "INTEGER");
+        assert_eq!(result.column_types[1], "TEXT");
+        // A computed expression has no declared type - empty string, not an
+        // error, and the export side treats that as numeric-affinity.
+        assert_eq!(result.column_types[2], "");
 
         close_database(&state);
         let _ = std::fs::remove_file(&path);
@@ -565,5 +623,49 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancel_interrupts_long_running_sql() {
+        // A grinding recursive CTE has no natural end and no per-row cheap
+        // point to check the generation counter from outside — the only way
+        // to stop it is `InterruptHandle::interrupt()`, which forces the next
+        // (or current) `sqlite3_step` call to return SQLITE_INTERRUPT.
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let (state, path) = setup_temp_db_with_table();
+        let state = Arc::new(state);
+        let worker_state = Arc::clone(&state);
+
+        let handle = std::thread::spawn(move || {
+            execute_sql(
+                &worker_state,
+                "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) \
+                 SELECT count(*) FROM c",
+            )
+        });
+
+        // Give the query a moment to actually start grinding before cancelling.
+        std::thread::sleep(Duration::from_millis(200));
+        let cancel_started = Instant::now();
+        crate::db::cancel_queries(&state);
+
+        let result = handle.join().expect("execute_sql thread should not panic");
+        let elapsed = cancel_started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "cancel should interrupt the query within a bounded time, took {:?}",
+            elapsed
+        );
+        assert!(
+            result.error.is_some(),
+            "an interrupted query should return an error, got: {:?}",
+            result
+        );
+
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -36,7 +36,11 @@ fn classify_cell(numeric: bool, val: &str) -> CellValue {
         return CellValue::Text;
     }
     if let Ok(n) = val.parse::<i64>() {
-        if n.abs() <= F64_EXACT_INT {
+        // `i64::MIN.abs()` overflows - there is no positive i64 representation
+        // of 2^63, so `.abs()` panics in debug builds and wraps back to
+        // i64::MIN in release. `unsigned_abs()` returns a u64 and sidesteps
+        // the overflow entirely.
+        if n.unsigned_abs() <= F64_EXACT_INT as u64 {
             CellValue::Number(n as f64)
         } else {
             CellValue::Text
@@ -56,18 +60,27 @@ fn classify_cell(numeric: bool, val: &str) -> CellValue {
 }
 
 fn dedupe_headers(headers: &[String]) -> Vec<String> {
-    use std::collections::HashMap;
+    use std::collections::HashSet;
 
-    let mut counts: HashMap<&str, usize> = HashMap::new();
+    let mut used: HashSet<String> = HashSet::with_capacity(headers.len());
     headers
         .iter()
         .map(|header| {
-            let count = counts.entry(header.as_str()).or_insert(0);
-            *count += 1;
-            if *count == 1 {
-                header.clone()
-            } else {
-                format!("{header}_{count}")
+            if used.insert(header.clone()) {
+                return header.clone();
+            }
+            // Keep bumping the suffix until it lands on a name nothing else
+            // has claimed - a straight `_{count}` collided when a later
+            // duplicate's generated name matched a header that was already
+            // present verbatim (e.g. `["a", "a", "a_2"]` naively produced
+            // `["a", "a_2", "a_2"]`, a fresh collision).
+            let mut n = 2;
+            loop {
+                let candidate = format!("{header}_{n}");
+                if used.insert(candidate.clone()) {
+                    return candidate;
+                }
+                n += 1;
             }
         })
         .collect()
@@ -185,6 +198,14 @@ mod tests {
     }
 
     #[test]
+    fn i64_min_does_not_overflow_and_stays_text() {
+        // i64::MIN.abs() has no positive i64 representation and would panic
+        // (debug) or wrap (release) via the old `.abs()` check. It's also far
+        // beyond F64_EXACT_INT, so the correct classification is Text.
+        assert_eq!(classify_cell(true, "-9223372036854775808"), CellValue::Text);
+    }
+
+    #[test]
     fn export_rejects_empty_data() {
         let err = export_to_xlsx(&[], &[], &[], &std::env::temp_dir()).unwrap_err();
         assert_eq!(err, "No data to export");
@@ -226,5 +247,24 @@ mod tests {
         ];
 
         assert_eq!(dedupe_headers(&headers), vec!["a", "a_2", "b", "a_3"]);
+    }
+
+    #[test]
+    fn dedupe_headers_bumps_past_pre_existing_suffixed_name() {
+        // "a_2" is a real header on its own here, not a generated one - the
+        // naive `_{count}` scheme collided with it and produced
+        // ["a", "a_2", "a_2"], a fresh duplicate. The fix must keep bumping
+        // until it finds a name nothing else has claimed.
+        let headers = vec!["a".to_string(), "a".to_string(), "a_2".to_string()];
+
+        let deduped = dedupe_headers(&headers);
+
+        assert_eq!(deduped, vec!["a", "a_2", "a_2_2"]);
+        let unique: std::collections::HashSet<_> = deduped.iter().collect();
+        assert_eq!(
+            unique.len(),
+            deduped.len(),
+            "deduped headers must all be unique"
+        );
     }
 }

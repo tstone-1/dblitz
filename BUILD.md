@@ -73,8 +73,9 @@ cd src-tauri && cargo fmt --check
 - [ ] No npm vulnerabilities: `npm audit`
 
 **Code quality:**
-- [ ] Frontend type-check passes: `npm run check`
-- [ ] Rust linter passes: `cd src-tauri && cargo clippy --all-targets --all-features -- -D warnings`
+- [ ] Full quality gate passes (frontend type-check, unit tests, build, Rust
+  fmt check, tests, clippy — the same checks CI runs after tagging): `npm run
+  quality`
 - [ ] All changes tested and working: `npm run tauri dev`
 
 **Version & documentation:**

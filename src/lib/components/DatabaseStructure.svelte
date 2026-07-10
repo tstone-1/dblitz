@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { appState, type ColumnInfo, type SchemaEntry } from "$lib/store.svelte";
-  import { createAutoSelectFirstTable } from "./autoSelectFirstTable.svelte";
+  import { createAutoSelectFirstTable, didDbPathChange } from "./autoSelectFirstTable.svelte";
 
   let selectedTable = $state<string | null>(null);
   let columns = $state<ColumnInfo[]>([]);
@@ -19,12 +19,30 @@
   // table just to see its columns.
   const checkAutoSelect = createAutoSelectFirstTable(
     (name) => selectTable(name),
-    () => {
-      selectedTable = null;
-      columns = [];
-    },
+    () => resetForNewDatabase(),
   );
-  $effect(() => { checkAutoSelect(); });
+
+  // Same stale-state class as BrowseData's B1: selectedTable/columns used to
+  // survive a direct A -> B database switch (the onReset above only fires on
+  // the close-to-null transition), leaving the previous database's table
+  // "selected" with its stale column list. Reset runs BEFORE checkAutoSelect
+  // in one effect so a single-table DB's auto-selection is never clobbered.
+  // `prevDbPath` is a plain `let` — only this effect reads/writes it.
+  let prevDbPath: string | null = null;
+  $effect(() => {
+    const path = appState.dbPath;
+    if (didDbPathChange(prevDbPath, path)) {
+      prevDbPath = path;
+      resetForNewDatabase();
+    }
+    checkAutoSelect();
+  });
+
+  function resetForNewDatabase() {
+    selectedTable = null;
+    columns = [];
+    schema = [];
+  }
 
   async function loadSchema() {
     try {
