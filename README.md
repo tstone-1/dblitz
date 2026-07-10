@@ -25,6 +25,13 @@ appear next to the database. The SQL editor additionally rejects any statement
 SQLite considers non-read-only (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `CREATE`,
 `ALTER`, …) with a clear message.
 
+The `immutable` flag is a promise you make to SQLite, not a lock it enforces: it
+tells SQLite the file won't change while open, so SQLite skips locking and never
+checks for a `-wal` file. If another process writes to the database while
+dblitz has it open, dblitz won't see committed-but-uncheckpointed WAL rows, may
+show stale data, and can hit a read error mid-session. Close the writing
+application before opening its database in dblitz, or point dblitz at a copy.
+
 ### Built for large tables
 
 The data grid is virtualized; rows are loaded in 500-row chunks. For the common
@@ -73,7 +80,6 @@ For every database you open, dblitz persists:
 - sort column + direction
 - column widths, order, hidden columns, per-column colors
 - per-column pinned filters and the global filter
-- last selected table
 
 These live in one JSON file per database under the OS config directory. The
 filename is a SHA-256 prefix of the database's absolute path, so the directory
@@ -188,8 +194,7 @@ Inside:
 - `app.json` — the recent-files list (capped at 10)
 - `<sha256-prefix>.json` — one file per database, holding the per-database view
   config (sort, widths, order, hidden columns, colors, pinned filters, tint,
-  label, last selected table). The filename is a 16-character prefix of
-  `SHA-256(absolute_path)`.
+  label). The filename is a 16-character prefix of `SHA-256(absolute_path)`.
 
 SQL query history is stored in the WebView's `localStorage` under the key
 `dblitz-sql-history`.

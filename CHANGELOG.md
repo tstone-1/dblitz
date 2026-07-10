@@ -5,6 +5,31 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.7.3] - 2026-07-10
+
+Fixes from a full-codebase deep review (1 blocker, 15 warnings, 7 nitpicks; the one structural refactor flagged — consolidating the query.rs ordering caches — is deliberately deferred to its own change).
+
+### Fixed
+- **Switching databases no longer leaves the previous database's rows on screen.** Opening a different file from the toolbar or the recents menu updated the title, sidebar, and Structure tab but left the Browse grid showing — and querying — the previously open database's table; if both databases had a same-named table, freshly loaded rows could silently mix with stale ones in a single grid. All per-database view state (selected table, columns, filters, sort, row cache) now resets whenever the open file changes, in both Browse Data and Structure. The single-table auto-select still fires after the reset.
+- **Cancelling now interrupts a long-running SQL statement instead of freezing the app.** An Execute SQL query that ground away inside the engine without producing rows (e.g. a runaway recursive query) held the app's single database connection hostage — every tab showed "Loading..." forever and only killing the app helped. Cancellation now uses SQLite's engine-level interrupt, and the Execute SQL result loop honors cancellation between rows like Browse always did.
+- **Tables with a user-defined column named `rowid` page correctly.** SQLite lets a real column shadow the built-in `rowid`; the fast scrolling paths then keyed pages off that user data, which could return duplicated, missing, or misordered rows with no error. dblitz now picks an unshadowed alias (`rowid`/`_rowid_`/`oid`) and falls back to plain OFFSET paging when all three are shadowed.
+- **Text cells containing invalid UTF-8 no longer show up as NULL.** SQLite doesn't enforce UTF-8 in TEXT columns; such cells were silently rendered and exported as if they were NULL. They are now decoded lossily (invalid bytes become the U+FFFD replacement character), so the data stays visible.
+- **The selection status bar is honest about its 100,000-row scan cap.** Selecting more rows than the cap used to report "100,000 rows" for any larger selection and compute Sum/Avg/Min/Max over only the scanned window with no hint. It now reports the true row count and marks the aggregates unavailable with a "first 100,000 rows scanned" note instead of showing silently partial numbers.
+- **Excel export edge cases.** The most negative 64-bit integer no longer breaks the number-vs-text precision decision; duplicate result column names can no longer collide with an existing `_2`-suffixed name (which made the export fail).
+- **SQL-tab Excel exports keep numeric columns numeric.** Exports from Execute SQL results typed every cell as text; declared column types are now carried through, matching Browse exports.
+- **Partial SQL results are shown when a query fails mid-run.** The backend already returned the rows fetched before the error; the frontend now displays them under the error banner instead of discarding them.
+
+### Changed
+- **Settings files are written atomically** (write-temp-then-rename), so a crash mid-save can no longer corrupt the recents list, export folder, or per-database view settings.
+- **View-settings save failures are surfaced.** If per-database settings can't be written (e.g. unwritable config folder), a notice appears once per session instead of the failure being silently logged to the console.
+- **Row and ordering caches are bounded.** The backend keeps sorted/filtered ordering caches only for the table currently being browsed; the frontend grid caps its cached chunks with LRU eviction. Long sessions across several huge tables no longer accumulate unbounded memory.
+- **Persisted column colors and labels are validated** on load and save against the preset palette (and a length cap), the same way the window tint already was.
+- CI now compiles and tests the backend on macOS as well, so macOS-only code can no longer break for the first time during a tagged release build.
+
+### Documentation
+- README: removed the stale "last selected table" claim (the persisted field was removed in 26.6.3) and documented the immutable-snapshot precondition — a database file must not be modified by another program while dblitz has it open (WAL databases in active use can show stale data).
+- BUILD.md: the pre-release checklist now runs the full `npm run quality` gate (tests and formatting included) instead of only typecheck and clippy.
+
 ## [26.7.2] - 2026-07-09
 
 ### Dependencies

@@ -52,3 +52,24 @@ export function createAutoSelectFirstTable(
     }
   };
 }
+
+/**
+ * Pure decision helper for the "did the open database actually change?"
+ * question that gates a per-database state reset (see B1: BrowseData used to
+ * keep `selectedTable`/`columns`/`totalRows`/the row cache alive across a
+ * Toolbar-driven `openDatabase()` call, so switching files left the grid
+ * showing the previous database's rows). Extracted as a standalone pure
+ * function - rather than baked into an effect - so the "open A -> open B
+ * fires a reset, reopening the same path does not" contract is unit
+ * testable without a component harness.
+ *
+ * A caller tracks `prevPath` itself (a plain, non-reactive `let`, mirroring
+ * `autoSelectedDb` above) and calls this on every reactive check; a `true`
+ * result means "reset now, and remember `nextPath` as the new baseline".
+ */
+export function didDbPathChange(
+  prevPath: string | null,
+  nextPath: string | null,
+): boolean {
+  return prevPath !== nextPath;
+}

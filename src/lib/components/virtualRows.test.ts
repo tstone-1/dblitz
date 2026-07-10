@@ -133,6 +133,133 @@ describe("createVirtualRows", () => {
     await loadsSettled();
     expect(errors[0]).toContain("load failed");
   });
+
+  // chunkSize: 1 makes chunk index == row index, so the cap/eviction math
+  // below is easy to reason about: chunk N is row N.
+  function makeChunkCountingRows() {
+    let loadCount = 0;
+    const rows = createVirtualRows({
+      chunkSize: 1,
+      getSelectedTable: () => "items",
+      loadChunk: async (offset) => {
+        loadCount++;
+        return { columns: ["id"], rows: [[String(offset)]], total_rows: null, offset };
+      },
+      cancelQueries: async () => {},
+      getVisibleColumns: () => ["id"],
+      getColumnIndex: () => 0,
+      hasColumns: () => true,
+      setColumns: () => {},
+      setTotalRows: () => {},
+      setError: () => {},
+    });
+    return { rows, loadCountRef: () => loadCount };
+  }
+
+  const MAX_CACHED_CHUNKS = 200; // must match the constant in virtualRows.svelte.ts
+
+  it("evicts the least-recently-used chunk once the cache exceeds its cap", async () => {
+    const { rows } = makeChunkCountingRows();
+
+    // Fill exactly up to the cap: chunks 0..199, no eviction yet. Chunk 0 is
+    // loaded first and never touched again after that, so it's the
+    // least-recently-used entry once something pushes the cache over cap.
+    // (Deliberately not peeking at chunk 0 here -- reading it would itself
+    // bump its recency and defeat the point of this test.)
+    for (let i = 0; i < MAX_CACHED_CHUNKS; i++) {
+      await rows.getVisibleRows(i, i);
+    }
+
+    // One more chunk pushes the cache over the cap.
+    await rows.getVisibleRows(MAX_CACHED_CHUNKS, MAX_CACHED_CHUNKS);
+
+    expect(rows.getVisibleRow(0)).toBeNull(); // evicted -- cache miss
+    expect(rows.getVisibleRow(1)).toEqual(["1"]); // survives -- still cached
+  });
+
+  it("never evicts a chunk that keeps being accessed (simulating it staying on screen)", async () => {
+    const { rows } = makeChunkCountingRows();
+
+    for (let i = 0; i < MAX_CACHED_CHUNKS; i++) {
+      await rows.getVisibleRows(i, i);
+    }
+    // Touch chunk 0 like the grid would on every render pass while it's
+    // still part of the visible window.
+    rows.getVisibleRow(0);
+
+    for (let i = MAX_CACHED_CHUNKS; i < MAX_CACHED_CHUNKS + 10; i++) {
+      await rows.getVisibleRows(i, i);
+      rows.getVisibleRow(0); // "still visible" on every subsequent render
+    }
+
+    expect(rows.getVisibleRow(0)).toEqual(["0"]); // kept warm -- never evicted
+    expect(rows.getVisibleRow(1)).toBeNull(); // long stale -- evicted instead
+  });
+
+  it("re-fetches an evicted chunk and serves it as a cache hit afterward", async () => {
+    const { rows, loadCountRef } = makeChunkCountingRows();
+
+    for (let i = 0; i <= MAX_CACHED_CHUNKS; i++) {
+      await rows.getVisibleRows(i, i);
+    }
+    // Captured BEFORE the eviction check below: getVisibleRow() on a cache
+    // miss kicks a background fetchChunk() as a side effect, so checking
+    // loadCountRef() after that call would already include it.
+    const loadsBeforeRefetch = loadCountRef();
+
+    expect(rows.getVisibleRow(0)).toBeNull(); // evicted -- cache miss, kicks a background re-fetch
+    await rows.getVisibleRows(0, 0); // dedupes with that in-flight fetch and awaits it
+    expect(loadCountRef()).toBe(loadsBeforeRefetch + 1);
+    expect(rows.getVisibleRow(0)).toEqual(["0"]); // cache hit now
+  });
+
+  it("reset() clears the cache, drops pending loads, and invalidates in-flight chunks", async () => {
+    // First loadChunk call resolves immediately (to populate a real cached
+    // chunk); every later call returns the shared, not-yet-resolved
+    // `pending` deferred (to simulate a fetch still in flight at reset time).
+    const pending = deferred<QueryResult>();
+    let calls = 0;
+    let cancelCalls = 0;
+    let totalRows = 0;
+    const rows = createVirtualRows({
+      chunkSize: 2,
+      getSelectedTable: () => "items",
+      loadChunk: async (offset) => {
+        calls++;
+        if (calls === 1) {
+          return { columns: ["id"], rows: [["cached"]], total_rows: 1, offset };
+        }
+        return pending.promise;
+      },
+      cancelQueries: async () => { cancelCalls++; },
+      getVisibleColumns: () => ["id"],
+      getColumnIndex: () => 0,
+      hasColumns: () => true,
+      setColumns: () => {},
+      setTotalRows: (n) => { totalRows = n; },
+      setError: () => {},
+    });
+
+    // Populate chunk 0 (resolves immediately -- the first loadChunk call).
+    await rows.getVisibleRows(0, 0);
+    expect(rows.getVisibleRow(0)).toEqual(["cached"]);
+
+    // Kick off a second, still-in-flight fetch for a different chunk.
+    const staleLoad = rows.getVisibleRow(2);
+    expect(staleLoad).toBeNull();
+
+    rows.reset();
+    expect(cancelCalls).toBe(1);
+
+    // The in-flight load from before reset() must not repopulate the cache:
+    // reset() bumped the epoch, so this resolution is stale by the time it
+    // lands. `totalRows` must stay at the value the legitimate first load
+    // set (1), NOT the stale second load's total_rows (99).
+    pending.resolve({ columns: ["id"], rows: [["stale"]], total_rows: 99, offset: 2 });
+    await loadsSettled();
+    expect(totalRows).toBe(1);
+    expect(rows.getVisibleRow(0)).toBeNull(); // cache was cleared by reset()
+  });
 });
 
 async function loadsSettled() {

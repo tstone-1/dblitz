@@ -1,6 +1,18 @@
 /// Escape a SQL identifier (table/column name) for safe use in double-quoted contexts.
+/// Prefer [`quote_ident`] at call sites that interpolate the result directly into
+/// SQL — it wraps the quotes for you, removing the "did I remember to quote
+/// this" footgun. Kept `pub(super)` for `quote_ident` itself and for tests.
 pub(super) fn safe_ident(name: &str) -> String {
     name.replace('"', "\"\"")
+}
+
+/// Fully quote a SQL identifier (table/column name) for direct interpolation
+/// into a SQL string: escapes embedded double quotes and wraps the result in
+/// double quotes. Unlike [`safe_ident`] alone, the caller can't forget the
+/// wrapping quotes — that used to be a real footgun (every call site had to
+/// remember `"\"{}\""` by hand).
+pub(super) fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", safe_ident(name))
 }
 
 /// Converts any error with Display into Result<T, String>.
@@ -58,17 +70,26 @@ pub(super) fn path_to_sqlite_uri(path: &str) -> String {
 pub(super) fn read_row(row: &rusqlite::Row, col_count: usize) -> Vec<Option<String>> {
     let mut values: Vec<Option<String>> = Vec::with_capacity(col_count);
     for i in 0..col_count {
-        let val: Option<String> = row
-            .get::<_, rusqlite::types::Value>(i)
-            .ok()
-            .map(|v| match v {
-                rusqlite::types::Value::Null => None,
-                rusqlite::types::Value::Integer(i) => Some(i.to_string()),
-                rusqlite::types::Value::Real(f) => Some(f.to_string()),
-                rusqlite::types::Value::Text(s) => Some(s),
-                rusqlite::types::Value::Blob(b) => Some(format!("[BLOB {} bytes]", b.len())),
-            })
-            .unwrap_or(None);
+        let val: Option<String> = match row.get::<_, rusqlite::types::Value>(i) {
+            Ok(rusqlite::types::Value::Null) => None,
+            Ok(rusqlite::types::Value::Integer(n)) => Some(n.to_string()),
+            Ok(rusqlite::types::Value::Real(f)) => Some(f.to_string()),
+            Ok(rusqlite::types::Value::Text(s)) => Some(s),
+            Ok(rusqlite::types::Value::Blob(b)) => Some(format!("[BLOB {} bytes]", b.len())),
+            // `Row::get::<_, Value>` errors outright on a TEXT cell that isn't
+            // valid UTF-8 (it can't materialize the cell as a Rust String) -
+            // silently mapping that error to `.ok()` -> None turned a real
+            // cell into a phantom NULL. Fall back to the raw storage and
+            // lossily decode text instead of losing the cell; other per-cell
+            // errors (there shouldn't be any at a valid index) still fall
+            // through to None below.
+            Err(_) => match row.get_ref(i) {
+                Ok(rusqlite::types::ValueRef::Text(bytes)) => {
+                    Some(String::from_utf8_lossy(bytes).into_owned())
+                }
+                _ => None,
+            },
+        };
         values.push(val);
     }
     values
@@ -110,6 +131,12 @@ mod tests {
     }
 
     #[test]
+    fn quote_ident_wraps_and_escapes() {
+        assert_eq!(quote_ident("normal"), "\"normal\"");
+        assert_eq!(quote_ident("has\"quote"), "\"has\"\"quote\"");
+    }
+
+    #[test]
     fn path_to_sqlite_uri_encodes_special_chars() {
         assert_eq!(
             path_to_sqlite_uri("/home/user/db.sqlite"),
@@ -139,5 +166,33 @@ mod tests {
             path_to_sqlite_uri(r"\\server\share\db.sqlite"),
             "file:////server/share/db.sqlite?immutable=1"
         );
+    }
+
+    #[test]
+    fn read_row_recovers_invalid_utf8_text_as_lossy_string() {
+        // CAST(x'FF' AS TEXT) stores a TEXT-storage-class cell holding a raw
+        // byte that isn't valid UTF-8 on its own (a lone continuation byte) -
+        // SQLite doesn't validate UTF-8 for TEXT storage, only rusqlite's
+        // `Value` conversion does, and that's exactly the case this guards.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t (col TEXT);
+             INSERT INTO t (col) VALUES (CAST(x'FF' AS TEXT));",
+        )
+        .unwrap();
+
+        let mut stmt = conn.prepare("SELECT col FROM t").unwrap();
+        let col_count = stmt.column_count();
+        let mut rows = stmt.query([]).unwrap();
+        let row = rows.next().unwrap().unwrap();
+        let values = read_row(row, col_count);
+
+        assert_eq!(values.len(), 1);
+        assert!(
+            values[0].is_some(),
+            "invalid-UTF-8 TEXT cell must not silently become NULL"
+        );
+        // U+FFFD is the lossy-decode replacement character for the invalid byte.
+        assert_eq!(values[0].as_deref(), Some("\u{FFFD}"));
     }
 }

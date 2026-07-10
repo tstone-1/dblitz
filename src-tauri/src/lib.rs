@@ -28,8 +28,10 @@ fn path_hash(path: &str) -> u64 {
 /// debug builds. Uses the filename (not the full path) for a cleaner title bar
 /// — the full path is shown in the toolbar instead.
 ///
-/// Also sets a Win32 window property (`dblitz_db_path`) containing a hash of
-/// the full path, used by [`try_activate_existing`] for duplicate detection.
+/// Cosmetic only - split out from [`set_window_db_marker`] (the Win32 property
+/// [`try_activate_existing`] depends on for duplicate detection) so a
+/// title-only refresh can never accidentally drop that marker. Callers that
+/// change which file is open must call both.
 fn update_window_title(app: &AppHandle, path: Option<&str>) {
     let version = app.package_info().version.to_string();
     let suffix = if cfg!(debug_assertions) { " DEV" } else { "" };
@@ -45,7 +47,18 @@ fn update_window_title(app: &AppHandle, path: Option<&str>) {
     };
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_title(&title);
-        #[cfg(windows)]
+    }
+}
+
+/// Set the Win32 window property (`dblitz_db_path`) containing a hash of the
+/// full path, used by [`try_activate_existing`] for duplicate detection.
+/// Kept separate from [`update_window_title`]: the title is purely cosmetic,
+/// but this marker is load-bearing state another process reads to find this
+/// window, so callers that change which file is open must always set both
+/// together rather than risk a title-only path leaving it stale.
+#[cfg(windows)]
+fn set_window_db_marker(app: &AppHandle, path: Option<&str>) {
+    if let Some(window) = app.get_webview_window("main") {
         if let Ok(hwnd) = window.hwnd() {
             use windows::core::w;
             use windows::Win32::Foundation::{HANDLE, HWND};
@@ -116,6 +129,8 @@ fn add_to_recent_docs(app: &AppHandle, path: &str) {
 fn close_database(app: AppHandle, state: State<'_, Arc<DbState>>) {
     db::close_database(&state);
     update_window_title(&app, None);
+    #[cfg(windows)]
+    set_window_db_marker(&app, None);
 }
 
 #[tauri::command]
@@ -137,6 +152,8 @@ fn open_database(
         add_to_recent_docs(&app, &path);
         config::push_recent_file(&path);
         update_window_title(&app, Some(&path));
+        #[cfg(windows)]
+        set_window_db_marker(&app, Some(&path));
     }
     result
 }

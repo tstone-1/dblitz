@@ -1,7 +1,7 @@
 use regex::Regex;
 
 use super::types::ColumnFilter;
-use super::util::safe_ident;
+use super::util::quote_ident;
 
 #[derive(Debug)]
 pub(super) struct WhereResult {
@@ -33,7 +33,7 @@ pub(super) fn build_where_clause(
     if !global_filter.is_empty() {
         let or_conditions: Vec<String> = columns
             .iter()
-            .map(|c| format!("\"{}\" LIKE ? ESCAPE '\\'", safe_ident(c)))
+            .map(|c| format!("{} LIKE ? ESCAPE '\\'", quote_ident(c)))
             .collect();
         where_parts.push(format!("({})", or_conditions.join(" OR ")));
         let pattern = contains_pattern(global_filter);
@@ -54,7 +54,7 @@ pub(super) fn build_where_clause(
                 }
             }
         } else {
-            let col_escaped = safe_ident(&f.column);
+            let col_escaped = quote_ident(&f.column);
 
             // Split on semicolon for multi-criteria: exclusions=AND, inclusions=OR
             let criteria: Vec<&str> = f
@@ -81,30 +81,30 @@ pub(super) fn build_where_clause(
                 if let Some(rest) = val.strip_prefix("<>") {
                     if rest.is_empty() {
                         and_parts.push(format!(
-                            "\"{}\" IS NOT NULL AND \"{}\" != ''",
+                            "{} IS NOT NULL AND {} != ''",
                             col_escaped, col_escaped
                         ));
                     } else {
-                        and_parts.push(format!("\"{}\" NOT LIKE ? ESCAPE '\\'", col_escaped));
+                        and_parts.push(format!("{} NOT LIKE ? ESCAPE '\\'", col_escaped));
                         and_params.push(contains_pattern(rest));
                     }
                 } else if let Some(rest) = val.strip_prefix(">=") {
-                    and_parts.push(format!("\"{}\" >= ?", col_escaped));
+                    and_parts.push(format!("{} >= ?", col_escaped));
                     and_params.push(rest.to_string());
                 } else if let Some(rest) = val.strip_prefix("<=") {
-                    and_parts.push(format!("\"{}\" <= ?", col_escaped));
+                    and_parts.push(format!("{} <= ?", col_escaped));
                     and_params.push(rest.to_string());
                 } else if let Some(rest) = val.strip_prefix('>') {
-                    and_parts.push(format!("\"{}\" > ?", col_escaped));
+                    and_parts.push(format!("{} > ?", col_escaped));
                     and_params.push(rest.to_string());
                 } else if let Some(rest) = val.strip_prefix('<') {
-                    and_parts.push(format!("\"{}\" < ?", col_escaped));
+                    and_parts.push(format!("{} < ?", col_escaped));
                     and_params.push(rest.to_string());
                 } else if let Some(rest) = val.strip_prefix('=') {
-                    or_parts.push(format!("\"{}\" = ?", col_escaped));
+                    or_parts.push(format!("{} = ?", col_escaped));
                     or_params.push(rest.to_string());
                 } else {
-                    or_parts.push(format!("\"{}\" LIKE ? ESCAPE '\\'", col_escaped));
+                    or_parts.push(format!("{} LIKE ? ESCAPE '\\'", col_escaped));
                     or_params.push(contains_pattern(val));
                 }
             }

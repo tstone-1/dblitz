@@ -1,9 +1,9 @@
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 
-use super::query::build_rowid_index;
+use super::query::{build_rowid_index, rowid_alias};
 use super::types::DbState;
-use super::util::{read_row, safe_ident, StrErr};
+use super::util::{quote_ident, read_row, StrErr};
 
 #[cfg(debug_assertions)]
 #[derive(Debug, Serialize, Clone)]
@@ -23,11 +23,11 @@ pub fn benchmark_query(
     use std::time::Instant;
     let guard = state.conn.lock();
     let conn = guard.as_ref().ok_or("No database open")?;
-    let safe_table = safe_ident(table);
+    let quoted_table = quote_ident(table);
 
     let total: i64 = conn
         .query_row(
-            &format!("SELECT COUNT(*) FROM \"{}\"", safe_table),
+            &format!("SELECT COUNT(*) FROM {}", quoted_table),
             [],
             |row| row.get(0),
         )
@@ -38,7 +38,7 @@ pub fn benchmark_query(
     let mut results = Vec::new();
 
     for &off in &offsets {
-        let sql = format!("SELECT * FROM \"{}\" LIMIT ? OFFSET ?", safe_table);
+        let sql = format!("SELECT * FROM {} LIMIT ? OFFSET ?", quoted_table);
         let t0 = Instant::now();
         let mut stmt = conn.prepare(&sql).str_err()?;
         let col_count = stmt.column_count();
@@ -59,12 +59,22 @@ pub fn benchmark_query(
         });
     }
 
+    // Benchmarking the rowid-index fast path only makes sense when the table
+    // has a usable (unshadowed) rowid alias; skip it otherwise, same as the
+    // real query path falling back to LIMIT/OFFSET in that case.
+    let alias = match rowid_alias(conn, &quoted_table) {
+        Some(a) => a,
+        None => return Ok(results),
+    };
+
     {
         let mut indexes = state.rowid_indexes.lock();
         if !indexes.contains_key(table) {
             let t0 = Instant::now();
             let generation = state.query_generation.load(Ordering::Relaxed);
-            if let Some(idx) = build_rowid_index(conn, state, generation, &safe_table, limit) {
+            if let Some(idx) =
+                build_rowid_index(conn, state, generation, &quoted_table, alias, limit)
+            {
                 let build_ms = t0.elapsed().as_secs_f64() * 1000.0;
                 results.push(BenchmarkResult {
                     label: "index build".to_string(),
@@ -91,8 +101,9 @@ pub fn benchmark_query(
                 let end_rid = idx.boundaries[chunk + 1];
                 (
                     format!(
-                        "SELECT * FROM \"{}\" WHERE rowid >= ? AND rowid < ? ORDER BY rowid ASC",
-                        safe_table
+                        "SELECT * FROM {table} WHERE {alias} >= ? AND {alias} < ? ORDER BY {alias} ASC",
+                        table = quoted_table,
+                        alias = alias
                     ),
                     start_rid,
                     end_rid,
@@ -100,8 +111,9 @@ pub fn benchmark_query(
             } else {
                 (
                     format!(
-                        "SELECT * FROM \"{}\" WHERE rowid >= ? ORDER BY rowid ASC LIMIT ?",
-                        safe_table
+                        "SELECT * FROM {table} WHERE {alias} >= ? ORDER BY {alias} ASC LIMIT ?",
+                        table = quoted_table,
+                        alias = alias
                     ),
                     start_rid,
                     limit,

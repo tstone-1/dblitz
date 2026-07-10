@@ -8,6 +8,11 @@ export interface SelectionStats {
   min: number | null;
   max: number | null;
   numericPending: boolean;
+  /** True when the selection extends past `maxRows` and the aggregate scan
+   *  (and, for a genuinely sparse/disjoint selection, the row/col count too)
+   *  only covers the first `maxRows` rows. See the cap-handling comment in
+   *  `buildSelectionStats` below. */
+  capped: boolean;
 }
 
 interface BuildSelectionStatsOptions {
@@ -20,7 +25,7 @@ interface BuildSelectionStatsOptions {
   isSelected?: (row: number, col: number) => boolean;
 }
 
-const DEFAULT_MAX_STATS_ROWS = 100_000;
+export const DEFAULT_MAX_STATS_ROWS = 100_000;
 
 export function buildSelectionStats({
   selection,
@@ -37,6 +42,7 @@ export function buildSelectionStats({
   let selectedCells = 0;
 
   const capRow = Math.min(selection.r1, selection.r0 + maxRows - 1);
+  const capped = capRow < selection.r1;
   let allNumeric = true;
   let sum = 0;
   let min = Infinity;
@@ -97,18 +103,43 @@ export function buildSelectionStats({
     if (numericStopped && !isSelected) break;
   }
 
-  const nRows = isSelected ? selectedRows.size : selection.r1 - selection.r0 + 1;
-  const nCols = isSelected ? selectedCols.size : selection.c1 - selection.c0 + 1;
+  // DataGrid always passes `isSelected` (even for a plain click-drag
+  // rectangle or Ctrl+A - see cellSelection.svelte.ts's `setSelection`,
+  // which builds a single dense rect and exposes it through the same
+  // `isSelected` membership function as a genuine Ctrl+Click disjoint
+  // selection). When capped, we can't scan past `capRow` to know the true
+  // membership of the tail rows - but if every cell scanned so far is
+  // selected, the scanned window is a full sub-rectangle, which is exactly
+  // what a plain rectangle / Ctrl+A produces (a real disjoint selection
+  // built from Ctrl+Click only ever stacks a handful of cells and shows
+  // gaps immediately, long before `maxRows` rows in). Treat a dense scanned
+  // window as proof the same rectangle continues for the whole bounding box
+  // and report the exact geometry; otherwise fall back to what was actually
+  // proven selected within the scan.
+  const scannedRowCount = capRow - selection.r0 + 1;
+  const boxCols = selection.c1 - selection.c0 + 1;
+  const scannedIsDense = !isSelected || selectedCells === scannedRowCount * boxCols;
+  const reportExactGeometry = !isSelected || (capped && scannedIsDense);
+
+  const nRows = reportExactGeometry ? selection.r1 - selection.r0 + 1 : selectedRows.size;
+  const nCols = reportExactGeometry ? boxCols : selectedCols.size;
   const cellTotal = isSelected ? selectedCells : nRows * nCols;
   if (cellTotal <= 1) return null;
+
+  // A capped scan only ever aggregates the first `maxRows` rows, so the
+  // numeric aggregates are never trustworthy as a total once capped -
+  // suppress them (null) rather than silently reporting a partial sum/avg/
+  // min/max as if it covered the whole selection.
+  const aggregatesAvailable = !capped && allNumeric && count > 0;
 
   return {
     rows: nRows,
     cols: nCols,
-    sum: allNumeric && count > 0 ? sum : null,
-    avg: allNumeric && count > 0 ? sum / count : null,
-    min: allNumeric && count > 0 ? min : null,
-    max: allNumeric && count > 0 ? max : null,
+    sum: aggregatesAvailable ? sum : null,
+    avg: aggregatesAvailable ? sum / count : null,
+    min: aggregatesAvailable ? min : null,
+    max: aggregatesAvailable ? max : null,
     numericPending,
+    capped,
   };
 }

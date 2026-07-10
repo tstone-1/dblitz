@@ -5,11 +5,18 @@ use tracing::{error, info, warn};
 
 use super::clear_caches;
 use super::types::{ColumnInfo, DbState, SchemaEntry, TableInfo};
-use super::util::{path_to_sqlite_uri, safe_ident, StrErr};
+use super::util::{path_to_sqlite_uri, quote_ident, StrErr};
 
 pub fn open_database(state: &DbState, path: &str) -> Result<Vec<TableInfo>, String> {
     info!(path, "Opening database (read-only, immutable)");
     state.query_generation.fetch_add(1, Ordering::Relaxed);
+    // Interrupt any query still running against the previous connection so
+    // this open doesn't block waiting for `state.conn`'s lock behind it, and
+    // so a grinding query on the old file doesn't keep running pointlessly
+    // once the user has moved on to a new one.
+    if let Some(handle) = state.interrupt_handle.lock().as_ref() {
+        handle.interrupt();
+    }
     // dblitz is a viewer, not an editor. Two layers of read-only:
     //   1. SQLITE_OPEN_READ_ONLY at the connection layer.
     //   2. ?immutable=1 in the URI tells SQLite to treat the file as a
@@ -55,9 +62,11 @@ pub fn open_database(state: &DbState, path: &str) -> Result<Vec<TableInfo>, Stri
     )
     .str_err()?;
 
+    let interrupt_handle = conn.get_interrupt_handle();
     let tables = get_tables_inner(&conn)?;
 
     *state.conn.lock() = Some(conn);
+    *state.interrupt_handle.lock() = Some(interrupt_handle);
     *state.current_path.lock() = Some(path.to_string());
     clear_caches(state);
 
@@ -79,7 +88,7 @@ fn get_tables_inner(conn: &Connection) -> Result<Vec<TableInfo>, String> {
     for name in table_names {
         let count: i64 = conn
             .query_row(
-                &format!("SELECT COUNT(*) FROM \"{}\"", safe_ident(&name)),
+                &format!("SELECT COUNT(*) FROM {}", quote_ident(&name)),
                 [],
                 |row| row.get(0),
             )
@@ -106,7 +115,7 @@ pub fn get_columns(state: &DbState, table: &str) -> Result<Vec<ColumnInfo>, Stri
     let conn = guard.as_ref().ok_or("No database open")?;
 
     let mut stmt = conn
-        .prepare(&format!("PRAGMA table_info(\"{}\")", safe_ident(table)))
+        .prepare(&format!("PRAGMA table_info({})", quote_ident(table)))
         .str_err()?;
 
     let columns: Vec<ColumnInfo> = stmt

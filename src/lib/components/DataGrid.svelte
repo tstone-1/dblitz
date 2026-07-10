@@ -3,7 +3,7 @@
   import { createCellSelection } from "./cellSelection.svelte";
   import { createDragReorder } from "./dragReorder.svelte";
   import { buildSelectionData, type SelectionData } from "./selectionData";
-  import { buildSelectionStats } from "./selectionStats";
+  import { buildSelectionStats, DEFAULT_MAX_STATS_ROWS } from "./selectionStats";
   import {
     buildGridTemplate,
     rowIndexToVirtualTop,
@@ -503,8 +503,10 @@
 
 {#if selStats}
   <div class="sel-status-bar">
-    <span>{selStats.rows} row(s), {selStats.cols} column(s)</span>
-    {#if selStats.sum !== null}
+    <span>{selStats.rows.toLocaleString()} row(s), {selStats.cols} column(s)</span>
+    {#if selStats.capped}
+      <span class="sel-stat">(first {DEFAULT_MAX_STATS_ROWS.toLocaleString()} rows scanned - sum/avg/min/max unavailable)</span>
+    {:else if selStats.sum !== null}
       <span class="sel-stat">Sum: {fmtNum(selStats.sum)}</span>
       <span class="sel-stat">Avg: {fmtNum(selStats.avg!)}</span>
       <span class="sel-stat">Min: {fmtNum(selStats.min!)}</span>

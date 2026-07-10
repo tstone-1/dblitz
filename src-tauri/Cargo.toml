@@ -1,6 +1,6 @@
 [package]
 name = "dblitz"
-version = "26.7.2"
+version = "26.7.3"
 description = "Read-only SQLite browser"
 authors = ["tstone-1"]
 edition = "2021"
@@ -17,7 +17,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.40.1", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.40.1", features = ["bundled", "hooks", "column_decltype"] }
 regex = "1"
 sha2 = "0.11"
 hex = "0.4"

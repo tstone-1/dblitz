@@ -54,6 +54,13 @@ pub struct DbState {
     pub(super) sorted_orders: Mutex<HashMap<String, SortedOrder>>,
     pub(super) filtered_orders: Mutex<HashMap<String, FilteredOrder>>,
     pub(super) query_generation: AtomicU64,
+    /// Handle to interrupt whatever statement is currently executing on
+    /// `conn`. Independent of `conn`'s own mutex, so calling `.interrupt()`
+    /// on it never has to wait for a long-running query to release the lock -
+    /// that's the whole point (it's how a stuck query gets unstuck at all).
+    /// `None` when no database is open; replaced on every `open_database`
+    /// and cleared on `close_database`.
+    pub(super) interrupt_handle: Mutex<Option<rusqlite::InterruptHandle>>,
 }
 
 impl DbState {
@@ -65,6 +72,7 @@ impl DbState {
             sorted_orders: Mutex::new(HashMap::new()),
             filtered_orders: Mutex::new(HashMap::new()),
             query_generation: AtomicU64::new(0),
+            interrupt_handle: Mutex::new(None),
         }
     }
 }
@@ -123,6 +131,13 @@ pub struct QueryResult {
 pub struct SqlResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Option<String>>>,
+    /// Per-column declared type (e.g. `"INTEGER"`, `"TEXT"`), aligned 1:1
+    /// with `columns`. Empty string for a column with no declared type (a
+    /// computed expression like `SELECT 1+1`) - the XLSX export already
+    /// treats a missing/empty decltype as numeric-affinity, so that's the
+    /// correct "unknown, guess numeric" default. Used by the XLSX export so
+    /// numbers don't get downgraded to text.
+    pub column_types: Vec<String>,
     pub error: Option<String>,
     /// True when the result set exceeded `SQL_RESULT_LIMIT` and only the
     /// first N rows are returned. This is a non-fatal warning that travels

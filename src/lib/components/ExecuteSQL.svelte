@@ -60,6 +60,7 @@
       result = {
         columns: [],
         rows: [],
+        column_types: [],
         error: String(e),
         truncated: false,
       };
@@ -83,10 +84,24 @@
   }
 
   async function exportSelection(data: SelectionData) {
+    // A selection's headers are a contiguous slice of `result.columns` (see
+    // buildSelectionData), so walk `result.columns` forward matching each
+    // header by name to find its declared type - the forward-only search
+    // keeps duplicate-named result columns (e.g. a self-join) aligned to the
+    // right occurrence instead of always the first.
+    const columns = result?.columns ?? [];
+    const types = result?.column_types ?? [];
+    let searchFrom = 0;
+    const columnTypes = data.headers.map((header) => {
+      const idx = columns.indexOf(header, searchFrom);
+      if (idx === -1) return "";
+      searchFrom = idx + 1;
+      return types[idx] ?? "";
+    });
     await invoke("export_to_xlsx", {
       headers: data.headers,
       rows: data.rows,
-      columnTypes: data.headers.map(() => ""),
+      columnTypes,
     });
   }
 </script>
@@ -144,7 +159,8 @@
       {#if result}
         {#if result.error}
           <div class="result-error">{result.error}</div>
-        {:else}
+        {/if}
+        {#if !result.error}
           <div class="result-info">
             {#if result.rows.length > 0}
               {result.rows.length} row{result.rows.length !== 1 ? 's' : ''} returned
@@ -158,16 +174,23 @@
               cap) — narrow your query or page with OFFSET to see more.
             </div>
           {/if}
-          {#if result.columns.length > 0}
-            <DataGrid
-              columns={result.columns}
-              mode={{ kind: "static", rows: result.rows }}
-              columnColors={resultColumnColors}
-              onExport={exportSelection}
-              onNotice={(message) => (appState.notice = message)}
-              onError={(message) => (appState.error = message)}
-            />
-          {/if}
+        {:else if result.rows.length > 0}
+          <!-- A mid-iteration SQL error still leaves already-fetched rows -
+               show them below the error banner instead of hiding them. -->
+          <div class="result-warning">
+            Showing the {result.rows.length.toLocaleString()} row{result.rows.length !== 1 ? 's' : ''}
+            fetched before the error above — results are partial.
+          </div>
+        {/if}
+        {#if result.columns.length > 0 && (!result.error || result.rows.length > 0)}
+          <DataGrid
+            columns={result.columns}
+            mode={{ kind: "static", rows: result.rows }}
+            columnColors={resultColumnColors}
+            onExport={exportSelection}
+            onNotice={(message) => (appState.notice = message)}
+            onError={(message) => (appState.error = message)}
+          />
         {/if}
       {/if}
     </div>
