@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 
 use super::filters::{build_where_clause, WhereResult};
 use super::types::{
-    ColumnFilter, DbState, FilteredOrder, QueryRequest, QueryResult, RowidIndex, SortedOrder,
+    ColumnFilter, DbState, OrderKey, OrderedRows, QueryRequest, QueryResult, RowidIndex,
 };
 use super::util::{collect_rows, quote_ident, read_row, StrErr};
 
@@ -241,29 +241,23 @@ fn query_with_rowid_index(
     Some(result)
 }
 
-/// Materialize the full rowid order for one sort key with a single
-/// `ORDER BY`. Returns `Ok(None)` if a newer request bumps the generation
-/// mid-build. Note: SQLite materializes a non-indexed sort on the first
-/// `next()`, so this only bails *during row collection* once superseded — it
-/// cannot interrupt the sort step itself.
-fn build_sorted_order(
+/// Materialize a complete rowid order with one query. Returns `Ok(None)` if a
+/// newer request bumps the generation mid-build. SQLite materializes a
+/// non-indexed sort on the first `next()`, so cancellation only takes effect
+/// during row collection, not during that initial sort step.
+fn build_ordered_rows(
     conn: &Connection,
     state: &DbState,
     generation: u64,
-    quoted_table: &str,
-    alias: &str,
-    sort_column: &str,
-    sort_asc: bool,
+    sql: &str,
+    params: &[String],
 ) -> Result<Option<Vec<i64>>, String> {
-    let sql = format!(
-        "SELECT {alias} FROM {table} ORDER BY {col} {dir}",
-        alias = alias,
-        table = quoted_table,
-        col = quote_ident(sort_column),
-        dir = if sort_asc { "ASC" } else { "DESC" }
-    );
-    let mut stmt = conn.prepare(&sql).str_err()?;
-    let mut rows_iter = stmt.query([]).str_err()?;
+    let mut stmt = conn.prepare(sql).str_err()?;
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+        .iter()
+        .map(|param| param as &dyn rusqlite::types::ToSql)
+        .collect();
+    let mut rows_iter = stmt.query(param_refs.as_slice()).str_err()?;
     let mut rowids: Vec<i64> = Vec::new();
     while let Some(row) = rows_iter.next().str_err()? {
         if state.query_generation.load(Ordering::Relaxed) != generation {
@@ -333,214 +327,83 @@ fn fetch_rows_by_rowids(
     Ok(out)
 }
 
-/// Serve a sorted, unfiltered page from the cached rowid order, building the
-/// order on first use (or when the sort key changes). Turns each chunk into a
-/// rowid lookup instead of a fresh full-table `ORDER BY`.
-///
-/// The caller must already have confirmed `alias` addresses this table's real
-/// (unshadowed) rowid - see [`rowid_alias`]. `Some(Err(..))` is a real
-/// failure or a cancellation.
-#[allow(clippy::too_many_arguments)]
-fn query_with_sorted_order(
-    conn: &Connection,
-    state: &DbState,
+struct OrderedQueryContext<'a> {
+    conn: &'a Connection,
+    state: &'a DbState,
     generation: u64,
-    table: &str,
-    quoted_table: &str,
-    alias: &str,
-    sort_column: &str,
-    sort_asc: bool,
+    table: &'a str,
+    quoted_table: &'a str,
+    alias: &'a str,
     offset: i64,
     limit: i64,
     columns: Vec<String>,
-) -> Option<Result<QueryResult, String>> {
-    let mut orders = state.sorted_orders.lock();
-    let fresh = orders
-        .get(table)
-        .is_some_and(|o| o.sort_column == sort_column && o.sort_asc == sort_asc);
-    if !fresh {
-        match build_sorted_order(
-            conn,
-            state,
-            generation,
-            quoted_table,
-            alias,
-            sort_column,
-            sort_asc,
-        ) {
-            Ok(Some(rowids)) => {
-                tracing::debug!(
-                    table,
-                    rows = rowids.len(),
-                    sort_column,
-                    sort_asc,
-                    "built sorted order"
-                );
-                // Order caches are per-table, but the UI only ever browses one
-                // table at a time — evict every other table's cached order so
-                // switching tables over a long session can't grow this map
-                // without bound.
-                orders.retain(|k, _| k == table);
-                orders.insert(
-                    table.to_string(),
-                    SortedOrder {
-                        sort_column: sort_column.to_string(),
-                        sort_asc,
-                        rowids,
-                    },
-                );
-            }
-            Ok(None) => return Some(Err("Query cancelled by a newer request".to_string())),
-            Err(e) => return Some(Err(e)),
-        }
-    }
-
-    let order = match orders.get(table) {
-        Some(o) => o,
-        None => return Some(Err("Sorted order missing after build".to_string())),
-    };
-    let total_rows = order.rowids.len() as i64;
-    let start = offset.min(total_rows) as usize;
-    let end = offset.saturating_add(limit).min(total_rows) as usize;
-    let page: Vec<i64> = order.rowids[start..end].to_vec();
-    drop(orders);
-
-    Some(
-        fetch_rows_by_rowids(conn, quoted_table, alias, &page).map(|rows| QueryResult {
-            columns,
-            rows,
-            total_rows: Some(total_rows),
-            offset,
-        }),
-    )
 }
 
-/// Materialize the ordered rowid list for a filtered (and optionally sorted)
-/// view with a single scan. Returns `Ok(None)` if a newer request bumps the
-/// generation mid-build. Like [`build_sorted_order`], SQLite materializes a
-/// non-indexed `ORDER BY` on the first `next()`, so cancellation only takes
-/// effect during row collection, not during the sort step itself.
-#[allow(clippy::too_many_arguments)]
-fn build_filtered_order(
-    conn: &Connection,
-    state: &DbState,
-    generation: u64,
-    quoted_table: &str,
-    alias: &str,
+/// Serve any filtered and/or sorted rowid-backed view through one cache path.
+/// The caller must already have confirmed that `alias` addresses the table's
+/// real, unshadowed rowid. Rowid-less tables use the OFFSET fallback instead.
+fn query_with_ordered_rows(
+    context: OrderedQueryContext<'_>,
     where_clause: &str,
     order_clause: &str,
     params: &[String],
-) -> Result<Option<Vec<i64>>, String> {
-    // With no sort key, page in stable rowid order so cached chunks are
-    // deterministic — this matches the natural scan order the un-cached OFFSET
-    // path already produces for a rowid table.
-    let default_order = format!(" ORDER BY {} ASC", alias);
+) -> Result<QueryResult, String> {
+    // A filtered view without an explicit sort still needs deterministic rowid
+    // order. Sorted-only views already provide their ORDER BY clause.
     let effective_order = if order_clause.is_empty() {
-        default_order.as_str()
+        format!(" ORDER BY {} ASC", context.alias)
     } else {
-        order_clause
+        order_clause.to_string()
+    };
+    let key = OrderKey {
+        where_clause: where_clause.to_string(),
+        params: params.to_vec(),
+        order_clause: effective_order,
     };
     let sql = format!(
         "SELECT {alias} FROM {table}{where}{order}",
-        alias = alias,
-        table = quoted_table,
-        where = where_clause,
-        order = effective_order
+        alias = context.alias,
+        table = context.quoted_table,
+        where = key.where_clause,
+        order = key.order_clause,
     );
-    let mut stmt = conn.prepare(&sql).str_err()?;
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
-        .iter()
-        .map(|p| p as &dyn rusqlite::types::ToSql)
-        .collect();
-    let mut rows_iter = stmt.query(param_refs.as_slice()).str_err()?;
-    let mut rowids: Vec<i64> = Vec::new();
-    while let Some(row) = rows_iter.next().str_err()? {
-        if state.query_generation.load(Ordering::Relaxed) != generation {
-            return Ok(None);
-        }
-        rowids.push(row.get(0).str_err()?);
-    }
-    Ok(Some(rowids))
-}
 
-/// Serve a filtered (and optionally sorted) page from a cached ordered-rowid
-/// list, building it on first use (or when the filter/sort signature changes).
-/// Turns each scroll chunk into a rowid lookup instead of a fresh
-/// `WHERE` + `ORDER BY` + `OFFSET` scan whose cost grows with the offset.
-///
-/// The total match count falls out of the materialized list for free, so the
-/// frontend no longer has to fire a separate `count_rows` scan for filtered
-/// views. The caller must already have confirmed `alias` addresses this
-/// table's real (unshadowed) rowid - see [`rowid_alias`]. `Some(Err(..))` is
-/// a real failure or a cancellation.
-#[allow(clippy::too_many_arguments)]
-fn query_with_filtered_order(
-    conn: &Connection,
-    state: &DbState,
-    generation: u64,
-    table: &str,
-    quoted_table: &str,
-    alias: &str,
-    where_clause: &str,
-    order_clause: &str,
-    params: &[String],
-    offset: i64,
-    limit: i64,
-    columns: Vec<String>,
-) -> Option<Result<QueryResult, String>> {
-    // NUL separators keep the three components unambiguous regardless of their
-    // contents (a clause/param can't contain a NUL byte).
-    let signature = format!("{where_clause}\u{0}{params:?}\u{0}{order_clause}");
-
-    let mut orders = state.filtered_orders.lock();
-    let fresh = orders.get(table).is_some_and(|o| o.signature == signature);
+    let mut orders = context.state.ordered_rows.lock();
+    let fresh = orders
+        .get(context.table)
+        .is_some_and(|order| order.key == key);
     if !fresh {
-        match build_filtered_order(
-            conn,
-            state,
-            generation,
-            quoted_table,
-            alias,
-            where_clause,
-            order_clause,
-            params,
-        ) {
-            Ok(Some(rowids)) => {
-                tracing::debug!(table, rows = rowids.len(), "built filtered order");
-                // See query_with_sorted_order: evict every other table's
-                // cached order so this map can't grow unbounded either.
-                orders.retain(|k, _| k == table);
-                orders.insert(
-                    table.to_string(),
-                    FilteredOrder {
-                        signature: signature.clone(),
-                        rowids,
-                    },
-                );
-            }
-            Ok(None) => return Some(Err("Query cancelled by a newer request".to_string())),
-            Err(e) => return Some(Err(e)),
-        }
+        let rowids = build_ordered_rows(context.conn, context.state, context.generation, &sql, params)?
+            .ok_or_else(|| "Query cancelled by a newer request".to_string())?;
+        tracing::debug!(
+            table = context.table,
+            rows = rowids.len(),
+            filtered = !where_clause.is_empty(),
+            "built ordered rowid cache"
+        );
+        // The UI browses one table at a time, so retaining only the active
+        // table bounds the full rowid vectors' memory use.
+        orders.retain(|cached_table, _| cached_table == context.table);
+        orders.insert(context.table.to_string(), OrderedRows { key, rowids });
     }
 
-    let order = match orders.get(table) {
-        Some(o) => o,
-        None => return Some(Err("Filtered order missing after build".to_string())),
-    };
+    let order = orders
+        .get(context.table)
+        .ok_or_else(|| "Ordered rows missing after build".to_string())?;
     let total_rows = order.rowids.len() as i64;
-    let start = offset.min(total_rows) as usize;
-    let end = offset.saturating_add(limit).min(total_rows) as usize;
+    let start = context.offset.min(total_rows) as usize;
+    let end = context.offset.saturating_add(context.limit).min(total_rows) as usize;
     let page: Vec<i64> = order.rowids[start..end].to_vec();
     drop(orders);
 
-    Some(
-        fetch_rows_by_rowids(conn, quoted_table, alias, &page).map(|rows| QueryResult {
-            columns,
+    fetch_rows_by_rowids(context.conn, context.quoted_table, context.alias, &page).map(|rows| {
+        QueryResult {
+            columns: context.columns,
             rows,
             total_rows: Some(total_rows),
-            offset,
-        }),
-    )
+            offset: context.offset,
+        }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -655,23 +518,24 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
         // sort column (valid_sort_column == None) falls through to the
         // unsorted fast paths below. A table with no usable rowid alias falls
         // through to the ORDER BY + OFFSET path (order_clause is set).
-        if let Some(col) = valid_sort_column {
+        if valid_sort_column.is_some() {
             if let Some(a) = alias {
-                if let Some(result) = query_with_sorted_order(
-                    conn,
-                    state,
-                    generation,
-                    table,
-                    &quoted_table,
-                    a,
-                    col,
-                    req.sort_asc,
-                    offset,
-                    limit,
-                    columns.clone(),
-                ) {
-                    return result;
-                }
+                return query_with_ordered_rows(
+                    OrderedQueryContext {
+                        conn,
+                        state,
+                        generation,
+                        table,
+                        quoted_table: &quoted_table,
+                        alias: a,
+                        offset,
+                        limit,
+                        columns,
+                    },
+                    &where_clause,
+                    &order_clause,
+                    &params,
+                );
             }
         } else if offset % limit == 0 {
             if let Some(a) = alias {
@@ -719,22 +583,22 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
     // `total_rows`, sparing the frontend a separate count_rows scan. A table
     // with no usable rowid alias falls through to the OFFSET path.
     if let Some(a) = alias {
-        if let Some(result) = query_with_filtered_order(
-            conn,
-            state,
-            generation,
-            table,
-            &quoted_table,
-            a,
+        return query_with_ordered_rows(
+            OrderedQueryContext {
+                conn,
+                state,
+                generation,
+                table,
+                quoted_table: &quoted_table,
+                alias: a,
+                offset,
+                limit,
+                columns,
+            },
             &where_clause,
             &order_clause,
             &params,
-            offset,
-            limit,
-            columns.clone(),
-        ) {
-            return result;
-        }
+        );
     }
 
     query_with_offset(
@@ -1087,7 +951,7 @@ mod tests {
     #[test]
     fn shadowed_rowid_column_sorted_paging_stays_correct() {
         // Same shadowing scenario as above, but exercising the pure sorted
-        // (no filter) fast path through query_with_sorted_order /
+        // (no filter) fast path through query_with_ordered_rows /
         // fetch_rows_by_rowids.
         let state = state_with_memory_db("CREATE TABLE t (rowid INTEGER, n INTEGER);");
         {
@@ -1158,8 +1022,8 @@ mod tests {
     }
 
     #[test]
-    fn sorted_order_cache_evicts_other_tables() {
-        // Order caches are per-table but the UI only ever browses one table
+    fn ordered_rows_cache_evicts_other_tables_for_sorted_view() {
+        // The cache is per-table but the UI only ever browses one table
         // at a time - building a sorted order for table B must evict table
         // A's cached order, not just add to it, or the map grows unbounded
         // over a long session of switching tables.
@@ -1180,10 +1044,10 @@ mod tests {
         };
 
         query_table(&state, &page("a")).unwrap();
-        assert!(state.sorted_orders.lock().contains_key("a"));
+        assert!(state.ordered_rows.lock().contains_key("a"));
 
         query_table(&state, &page("b")).unwrap();
-        let orders = state.sorted_orders.lock();
+        let orders = state.ordered_rows.lock();
         assert_eq!(
             orders.len(),
             1,
@@ -1194,7 +1058,7 @@ mod tests {
     }
 
     #[test]
-    fn filtered_order_cache_evicts_other_tables() {
+    fn ordered_rows_cache_evicts_other_tables_for_filtered_view() {
         let state = state_with_memory_db(
             "CREATE TABLE a (id INTEGER PRIMARY KEY, name TEXT);
              CREATE TABLE b (id INTEGER PRIMARY KEY, name TEXT);
@@ -1212,10 +1076,10 @@ mod tests {
         };
 
         query_table(&state, &page("a")).unwrap();
-        assert!(state.filtered_orders.lock().contains_key("a"));
+        assert!(state.ordered_rows.lock().contains_key("a"));
 
         query_table(&state, &page("b")).unwrap();
-        let orders = state.filtered_orders.lock();
+        let orders = state.ordered_rows.lock();
         assert_eq!(
             orders.len(),
             1,
@@ -1223,6 +1087,55 @@ mod tests {
         );
         assert!(orders.contains_key("b"));
         assert!(!orders.contains_key("a"));
+    }
+
+    #[test]
+    fn ordered_rows_cache_rebuilds_across_view_kinds() {
+        let state = state_with_memory_db(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, n INTEGER);
+             INSERT INTO items (name, n) VALUES
+               ('keep-a', 3), ('drop-b', 1), ('keep-c', 2);",
+        );
+        let sorted = QueryRequest {
+            table: "items".to_string(),
+            offset: 0,
+            limit: 10,
+            filters: vec![],
+            global_filter: String::new(),
+            sort_column: Some("n".to_string()),
+            sort_asc: true,
+        };
+        let filtered = QueryRequest {
+            filters: vec![text_filter("name", "keep")],
+            sort_column: None,
+            ..sorted.clone()
+        };
+
+        let first = query_table(&state, &sorted).unwrap();
+        assert_eq!(first.total_rows, Some(3));
+        assert!(state
+            .ordered_rows
+            .lock()
+            .get("items")
+            .unwrap()
+            .key
+            .where_clause
+            .is_empty());
+
+        let narrowed = query_table(&state, &filtered).unwrap();
+        assert_eq!(narrowed.total_rows, Some(2));
+        assert!(!state
+            .ordered_rows
+            .lock()
+            .get("items")
+            .unwrap()
+            .key
+            .where_clause
+            .is_empty());
+
+        let restored = query_table(&state, &sorted).unwrap();
+        assert_eq!(restored.total_rows, Some(3));
+        assert_eq!(restored.rows[0][2].as_deref(), Some("1"));
     }
 
     #[test]
@@ -1310,7 +1223,7 @@ mod tests {
     #[test]
     fn filtered_unsorted_query_pages_in_rowid_order() {
         // A filter with no sort still goes through the cached path, paging in
-        // stable rowid (insertion) order. Exercises build_filtered_order's
+        // stable rowid (insertion) order. Exercises query_with_ordered_rows'
         // `ORDER BY rowid ASC` branch and confirms the exact total is reported
         // (so the frontend skips its separate count_rows scan).
         let state = state_with_memory_db("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);");
