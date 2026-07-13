@@ -55,7 +55,7 @@ export function createAutoSelectFirstTable(
 
 /**
  * Pure decision helper for the "did the open database actually change?"
- * question that gates a per-database state reset (see B1: BrowseData used to
+ * question that gates a per-database state reset (BrowseData used to
  * keep `selectedTable`/`columns`/`totalRows`/the row cache alive across a
  * Toolbar-driven `openDatabase()` call, so switching files left the grid
  * showing the previous database's rows). Extracted as a standalone pure

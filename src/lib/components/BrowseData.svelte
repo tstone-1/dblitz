@@ -61,7 +61,7 @@
     () => resetForNewDatabase(),
   );
 
-  // B1: BrowseData used to keep selectedTable/columns/totalRows/the row
+  // BrowseData used to keep selectedTable/columns/totalRows/the row
   // cache alive across a Toolbar-driven openDatabase() call (Open DB /
   // recents), so switching to a different database left the grid showing
   // (and querying) the PREVIOUS database's table. Reset every per-database
@@ -146,7 +146,7 @@
    * and the virtualRows row cache. Called whenever appState.dbPath changes
    * (see the merged reset+auto-select effect above) so a database switch
    * can never leave the grid showing -- or querying -- the wrong database's
-   * table (B1).
+   * table.
    */
   function resetForNewDatabase() {
     selectedTable = null;

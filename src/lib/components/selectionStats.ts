@@ -23,6 +23,10 @@ interface BuildSelectionStatsOptions {
    *  `selection` is the union bounding box and only cells inside the union are
    *  counted; row/column totals report the distinct selected rows/columns. */
   isSelected?: (row: number, col: number) => boolean;
+  /** Exact distinct row/column counts from the selection rectangles. */
+  selectedRowCount?: number;
+  selectedColumnCount?: number;
+  hasMultipleSelectedCells?: boolean;
 }
 
 export const DEFAULT_MAX_STATS_ROWS = 100_000;
@@ -32,6 +36,9 @@ export function buildSelectionStats({
   getRow,
   maxRows = DEFAULT_MAX_STATS_ROWS,
   isSelected,
+  selectedRowCount,
+  selectedColumnCount,
+  hasMultipleSelectedCells,
 }: BuildSelectionStatsOptions): SelectionStats | null {
   if (!selection) return null;
 
@@ -103,28 +110,12 @@ export function buildSelectionStats({
     if (numericStopped && !isSelected) break;
   }
 
-  // DataGrid always passes `isSelected` (even for a plain click-drag
-  // rectangle or Ctrl+A - see cellSelection.svelte.ts's `setSelection`,
-  // which builds a single dense rect and exposes it through the same
-  // `isSelected` membership function as a genuine Ctrl+Click disjoint
-  // selection). When capped, we can't scan past `capRow` to know the true
-  // membership of the tail rows - but if every cell scanned so far is
-  // selected, the scanned window is a full sub-rectangle, which is exactly
-  // what a plain rectangle / Ctrl+A produces (a real disjoint selection
-  // built from Ctrl+Click only ever stacks a handful of cells and shows
-  // gaps immediately, long before `maxRows` rows in). Treat a dense scanned
-  // window as proof the same rectangle continues for the whole bounding box
-  // and report the exact geometry; otherwise fall back to what was actually
-  // proven selected within the scan.
-  const scannedRowCount = capRow - selection.r0 + 1;
   const boxCols = selection.c1 - selection.c0 + 1;
-  const scannedIsDense = !isSelected || selectedCells === scannedRowCount * boxCols;
-  const reportExactGeometry = !isSelected || (capped && scannedIsDense);
-
-  const nRows = reportExactGeometry ? selection.r1 - selection.r0 + 1 : selectedRows.size;
-  const nCols = reportExactGeometry ? boxCols : selectedCols.size;
+  const nRows = selectedRowCount
+    ?? (isSelected ? selectedRows.size : selection.r1 - selection.r0 + 1);
+  const nCols = selectedColumnCount ?? (isSelected ? selectedCols.size : boxCols);
   const cellTotal = isSelected ? selectedCells : nRows * nCols;
-  if (cellTotal <= 1) return null;
+  if (!(hasMultipleSelectedCells ?? cellTotal > 1)) return null;
 
   // A capped scan only ever aggregates the first `maxRows` rows, so the
   // numeric aggregates are never trustworthy as a total once capped -

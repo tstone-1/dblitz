@@ -39,6 +39,35 @@ function isSingleCellAt(b: SelectionBounds, row: number, col: number): boolean {
   return b.r0 === row && b.r1 === row && b.c0 === col && b.c1 === col;
 }
 
+function coveredIndexCount(intervals: Array<[number, number]>): number {
+  if (intervals.length === 0) return 0;
+  const sorted = intervals.toSorted((a, b) => a[0] - b[0] || a[1] - b[1]);
+  let total = 0;
+  let [start, end] = sorted[0];
+  for (const [nextStart, nextEnd] of sorted.slice(1)) {
+    if (nextStart <= end + 1) {
+      end = Math.max(end, nextEnd);
+    } else {
+      total += end - start + 1;
+      [start, end] = [nextStart, nextEnd];
+    }
+  }
+  return total + end - start + 1;
+}
+
+function coversMultipleCells(bounds: SelectionBounds[]): boolean {
+  let firstCell: CellAddr | null = null;
+  for (const b of bounds) {
+    if (b.r0 !== b.r1 || b.c0 !== b.c1) return true;
+    if (!firstCell) {
+      firstCell = { row: b.r0, col: b.c0 };
+    } else if (firstCell.row !== b.r0 || firstCell.col !== b.c0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function createCellSelection() {
   // Committed rectangles making up the (possibly disjoint) selection.
   let rects = $state<Rect[]>([]);
@@ -47,6 +76,13 @@ export function createCellSelection() {
   let selecting = false;
 
   const bounds = $derived(rects.map(boundsOf));
+  const selectedRowCount = $derived(
+    coveredIndexCount(bounds.map((b) => [b.r0, b.r1])),
+  );
+  const selectedColumnCount = $derived(
+    coveredIndexCount(bounds.map((b) => [b.c0, b.c1])),
+  );
+  const hasMultipleSelectedCells = $derived(coversMultipleCells(bounds));
 
   // Union bounding box of every rectangle — used by the copy/export/stats
   // helpers and by "is there a selection at all?" checks. Null when empty.
@@ -156,6 +192,9 @@ export function createCellSelection() {
 
   return {
     get sel() { return sel; },
+    get selectedRowCount() { return selectedRowCount; },
+    get selectedColumnCount() { return selectedColumnCount; },
+    get hasMultipleSelectedCells() { return hasMultipleSelectedCells; },
     isSelected,
     onCellMouseDown,
     onCellMouseEnter,

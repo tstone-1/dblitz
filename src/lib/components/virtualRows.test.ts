@@ -158,6 +158,16 @@ describe("createVirtualRows", () => {
 
   const MAX_CACHED_CHUNKS = 200; // must match the constant in virtualRows.svelte.ts
 
+  it("materializes ranges wider than the viewport cache", async () => {
+    const { rows } = makeChunkCountingRows();
+
+    const materialized = await rows.getVisibleRows(0, MAX_CACHED_CHUNKS);
+
+    expect(materialized).toHaveLength(MAX_CACHED_CHUNKS + 1);
+    expect(materialized[0]).toEqual(["0"]);
+    expect(materialized.at(-1)).toEqual([String(MAX_CACHED_CHUNKS)]);
+  });
+
   it("evicts the least-recently-used chunk once the cache exceeds its cap", async () => {
     const { rows } = makeChunkCountingRows();
 

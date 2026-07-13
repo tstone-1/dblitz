@@ -5,6 +5,17 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.7.4] - 2026-07-13
+
+### Fixed
+- **Query cancellation now remains responsive while SQL is running.** Long-running database commands execute away from Tauri's main-thread command dispatcher, so the later cancellation request can reach SQLite instead of waiting behind the query it is meant to stop.
+- **Rapidly opening multiple databases can no longer mix frontend and backend state.** Open transactions are serialized and only the newest request may publish its path, schema, configuration, and table metadata.
+- **Copying or exporting a 100,000-row selection no longer fails at chunk boundaries.** Bulk row materialization is independent of the bounded scrolling cache, so loading a range wider than the cache cannot evict its own first chunk before assembly.
+- **Capped statistics remain exact for disjoint selections.** Distinct selected row and column counts now come from the complete rectangle union instead of extrapolating a sampled dense prefix across the unscanned tail.
+
+### Changed
+- Refreshed npm and Rust dependencies to their latest compatible releases. TypeScript remains on 6.x because the current SvelteKit peer range does not yet support TypeScript 7.
+
 ## [26.7.3] - 2026-07-10
 
 Fixes from a full-codebase deep review (1 blocker, 15 warnings, 7 nitpicks; the one structural refactor flagged — consolidating the query.rs ordering caches — is deliberately deferred to its own change).

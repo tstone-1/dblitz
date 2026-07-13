@@ -37,7 +37,7 @@ pub fn open_database(state: &DbState, path: &str) -> Result<Vec<TableInfo>, Stri
     // Also deny Transaction/Savepoint: harmless on this READ_ONLY+immutable
     // connection (no locking, file never changes), but dblitz never needs an
     // explicit BEGIN/SAVEPOINT and leaving one open with no COMMIT/ROLLBACK
-    // path is untidy state on a shared connection (nitpick N1).
+    // path is untidy state on a shared connection.
     conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
         AuthAction::Attach { .. }
         | AuthAction::Detach { .. }

@@ -189,7 +189,14 @@
   const selection = createCellSelection();
   const sel = $derived(selection.sel);
 
-  const selStats = $derived(buildSelectionStats({ selection: sel, getRow: getRowData, isSelected: selection.isSelected }));
+  const selStats = $derived(buildSelectionStats({
+    selection: sel,
+    getRow: getRowData,
+    isSelected: selection.isSelected,
+    selectedRowCount: selection.selectedRowCount,
+    selectedColumnCount: selection.selectedColumnCount,
+    hasMultipleSelectedCells: selection.hasMultipleSelectedCells,
+  }));
 
   function fmtNum(n: number): string {
     return Number.isInteger(n) ? n.toLocaleString() : n.toLocaleString(undefined, { maximumFractionDigits: 6 });
