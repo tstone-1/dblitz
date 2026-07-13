@@ -31,6 +31,11 @@
   - `types.rs`, `util.rs` — shared DTOs and helpers (`safe_ident`, `read_row`, `StrErr`)
   - `benchmark.rs` — `cfg(debug_assertions)` paging benchmarks
 - `dblitz` is intended to be a read-only SQLite viewer. Preserve the read-only behavior when changing query execution or database opening logic.
+- Windows duplicate-instance detection is keyed by the full database path through the `dblitz_db_path` Win32 window property. Do not replace it with filename-only matching: same-named databases in different directories must open separately.
+- Keep the window title filename-only; the toolbar owns display of the full database path.
+- Treat DB Browser for SQLite as the primary UX comparison point when evaluating viewer behavior and parity gaps.
+- In `DataGrid.svelte`, compose new per-column state indicators with inset box shadows rather than background tints so user-selected column colors remain visible.
+- Tauri and the direct `windows` dependency can resolve to different `windows-rs` versions. `window.hwnd()` must be rewrapped as `HWND(hwnd.0)` at that boundary; other HWNDs sourced from `EnumWindows` do not need blanket conversion.
 
 ## Release
 
@@ -41,6 +46,10 @@
   - `src-tauri/tauri.conf.json`
 - Update `CHANGELOG.md` before release commits.
 - See `BUILD.md` for the release checklist. Its shared-tools copy path is a placeholder unless the user provides a real deployment target.
+- A release workflow can take 20 minutes or more when GitHub Actions has a cold Rust cache, even without dependency changes. Confirm the active job step before treating a long run as stuck.
+- The draft-first release workflow must pass the numeric `releaseId` from `create-release` to `tauri-action`; GitHub's tag lookup returns 404 for a draft release, so reverting build uploads to `tagName` breaks the matrix.
+- Rebuild-and-overwrite under an existing version label is permitted only while that version is unpublished and only after asking the user. Once its tag and GitHub release are published, cut the next version instead.
+- Expected `cargo audit` noise is the established allowed Tauri/Linux WebView transitive set (legacy GTK/glib/unic advisories). Treat any new advisory or materially different output as actionable; historical npm `cookie` findings applied only to the unreachable SvelteKit SSR path and must be re-evaluated if they reappear.
 
 ### Distribution / Homebrew tap
 

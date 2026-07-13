@@ -168,12 +168,12 @@ describe("buildSelectionStats", () => {
     });
   });
 
-  it("reports the true row count for a capped, fully-dense (Ctrl+A-shaped) isSelected selection", () => {
+  it("reports exact supplied geometry for a capped Ctrl+A selection", () => {
     // Mirrors what Ctrl+A actually produces (see cellSelection.svelte.ts's
     // `setSelection`): a single filled rectangle exposed through
     // `isSelected`, spanning more rows than the aggregate-scan cap. Every
-    // cell within the scanned window is selected, so the density check
-    // proves the rectangle continues past the cap.
+    // cell within the scanned window is selected; rectangle geometry supplies
+    // the exact count independently of the aggregate scan cap.
     const totalRows = 5;
     const maxRows = 3;
     const rows = Array.from({ length: totalRows }, (_, r) => [String(r), String(r * 10)]);
@@ -184,6 +184,8 @@ describe("buildSelectionStats", () => {
         getRow: (index) => rows[index] ?? null,
         maxRows,
         isSelected: () => true,
+        selectedRowCount: totalRows,
+        selectedColumnCount: 2,
       }),
     ).toEqual({
       rows: totalRows, // true count, not the scanned/capped 3
@@ -221,6 +223,22 @@ describe("buildSelectionStats", () => {
       numericPending: false,
       capped: true,
     });
+  });
+
+  it("uses exact disjoint geometry instead of extrapolating a dense prefix", () => {
+    const selected = new Set(["0,0", "1,0", "2,0", "5,0"]);
+    const rows = Array.from({ length: 6 }, (_, row) => [String(row)]);
+
+    expect(
+      buildSelectionStats({
+        selection: { r0: 0, r1: 5, c0: 0, c1: 0 },
+        getRow: (index) => rows[index] ?? null,
+        maxRows: 3,
+        isSelected: (row, col) => selected.has(`${row},${col}`),
+        selectedRowCount: 4,
+        selectedColumnCount: 1,
+      }),
+    ).toMatchObject({ rows: 4, cols: 1, capped: true });
   });
 
   it("exposes the default cap as DEFAULT_MAX_STATS_ROWS for callers to reference in UI copy", () => {

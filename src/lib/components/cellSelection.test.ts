@@ -115,6 +115,9 @@ describe("createCellSelection", () => {
     selection.onCellMouseDown(makeCellEvent(9, { ctrlKey: true }), 2);
 
     expect(selection.sel).toEqual({ r0: 0, r1: 5, c0: 0, c1: 9 });
+    expect(selection.selectedRowCount).toBe(3);
+    expect(selection.selectedColumnCount).toBe(3);
+    expect(selection.hasMultipleSelectedCells).toBe(true);
     // The rect list — not just the bbox — decides membership: a cell inside
     // the union bbox but outside every rect is not selected.
     expect(selection.isSelected(2, 2)).toBe(false);

@@ -149,18 +149,20 @@ export function initTheme() {
   document.documentElement.setAttribute("data-theme", appState.theme);
 }
 
-export async function openDatabase(path: string) {
-  appState.loading = true;
-  appState.error = null;
-  appState.notice = null;
+// Database opening spans several IPC calls (open, config load, then column
+// introspection). Serialize those transactions so two user actions cannot race
+// the singleton backend connection, and use a generation so an older request
+// that was already running stops before publishing frontend state.
+let databaseRequestGeneration = 0;
+let databaseRequestQueue: Promise<void> = Promise.resolve();
+
+async function runOpenDatabase(path: string, request: number) {
+  if (request !== databaseRequestGeneration) return;
   try {
-    // Fetch everything BEFORE publishing to appState. Each appState
-    // assignment is a reactive trigger; if we set `tables` first and then
-    // await `load_view_config`, the auto-select effect in BrowseData fires
-    // against an empty fileConfig and never re-runs once the real config
-    // arrives. So load it all here, then publish in one synchronous batch.
     const tables = await invoke<TableInfo[]>("open_database", { path });
+    if (request !== databaseRequestGeneration) return;
     const config = await invoke<FileConfig>("load_view_config");
+    if (request !== databaseRequestGeneration) return;
     // Fetch column names for all tables (for SQL autocomplete + as a
     // schema source for filter validation before the first query result).
     const colMap: Record<string, string[]> = {};
@@ -174,41 +176,54 @@ export async function openDatabase(path: string) {
         typeMap[t.name] = tmap;
       } catch { /* best-effort: autocomplete works without columns */ }
     }));
+    if (request !== databaseRequestGeneration) return;
 
-    // Single synchronous publish — auto-select effect sees consistent state.
+    // Single synchronous publish - auto-select effect sees consistent state.
     // Order matters: `appState.tables = tables` MUST be last because it's
     // the trigger for the auto-select effect in BrowseData. By the time the
-    // effect fires, dbPath/fileConfig/tableColumns must already be in place
-    // so that selectTable can hydrate filters and pre-populate columns.
+    // effect fires, dbPath/fileConfig/tableColumns must already be in place.
     appState.dbPath = path;
     appState.fileConfig = config;
     appState.tableColumns = colMap;
     appState.tableColumnTypes = typeMap;
     appState.tables = tables;
-    // Single-table DBs: jump straight to Browse so the user sees data
-    // immediately. Multi-table DBs leave the active tab alone — the user
-    // may want to inspect Structure first to pick a table.
-    if (tables.length === 1) {
-      appState.activeTab = "browse";
-    }
+    if (tables.length === 1) appState.activeTab = "browse";
   } catch (e) {
-    appState.error = String(e);
+    if (request === databaseRequestGeneration) appState.error = String(e);
   } finally {
-    appState.loading = false;
+    if (request === databaseRequestGeneration) appState.loading = false;
   }
 }
 
+export function openDatabase(path: string): Promise<void> {
+  const request = ++databaseRequestGeneration;
+  appState.loading = true;
+  appState.error = null;
+  appState.notice = null;
+  const task = databaseRequestQueue.then(() => runOpenDatabase(path, request));
+  databaseRequestQueue = task.catch(() => {});
+  return task;
+}
+
 export async function closeDatabase() {
-  try {
-    await invoke("close_database");
-  } catch (e) {
-    console.error("Failed to close database:", e);
-  }
-  appState.dbPath = null;
-  appState.tables = [];
-  appState.tableColumns = {};
-  appState.tableColumnTypes = {};
-  appState.fileConfig = { tables: {}, tint: null, label: null };
+  const request = ++databaseRequestGeneration;
+  appState.loading = true;
+  const task = databaseRequestQueue.then(async () => {
+    try {
+      await invoke("close_database");
+    } catch (e) {
+      console.error("Failed to close database:", e);
+    }
+    if (request !== databaseRequestGeneration) return;
+    appState.dbPath = null;
+    appState.tables = [];
+    appState.tableColumns = {};
+    appState.tableColumnTypes = {};
+    appState.fileConfig = { tables: {}, tint: null, label: null };
+    appState.loading = false;
+  });
+  databaseRequestQueue = task.catch(() => {});
+  await task;
 }
 
 export function persistSqlHistory() {
@@ -227,7 +242,7 @@ export async function refreshTables() {
   }
 }
 
-// W15: view-config saves happen silently in the background (every filter
+// View-config saves happen silently in the background (every filter
 // pin, column resize, sort change, ... calls saveViewConfig() as a fire-and-
 // forget `void` from updateTableConfig). A failure there used to only hit
 // the console, so a broken/read-only config path left the user editing view

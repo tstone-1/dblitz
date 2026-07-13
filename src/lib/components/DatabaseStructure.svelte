@@ -22,7 +22,7 @@
     () => resetForNewDatabase(),
   );
 
-  // Same stale-state class as BrowseData's B1: selectedTable/columns used to
+  // Same stale-state class as BrowseData: selectedTable/columns used to
   // survive a direct A -> B database switch (the onReset above only fires on
   // the close-to-null transition), leaving the previous database's table
   // "selected" with its stale column list. Reset runs BEFORE checkAutoSelect

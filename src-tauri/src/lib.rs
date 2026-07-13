@@ -125,7 +125,7 @@ fn add_to_recent_docs(app: &AppHandle, path: &str) {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn close_database(app: AppHandle, state: State<'_, Arc<DbState>>) {
     db::close_database(&state);
     update_window_title(&app, None);
@@ -138,7 +138,7 @@ fn cancel_queries(state: State<'_, Arc<DbState>>) {
     db::cancel_queries(&state);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn open_database(
     app: AppHandle,
     state: State<'_, Arc<DbState>>,
@@ -161,25 +161,25 @@ fn open_database(
 /// Returns the recent-files list with each entry enriched by its per-DB
 /// window marker (tint + label). Return shape changed in 26.4.6+ from
 /// `Vec<String>` to `Vec<RecentFile>`; callers must deserialize as objects.
-#[tauri::command]
+#[tauri::command(async)]
 fn get_recent_files() -> Vec<config::RecentFile> {
     config::get_recent_files_enriched()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn clear_recent_files() -> Result<(), String> {
     config::clear_recent_files()
 }
 
 /// Returns the configured Excel-export folder, or `None` when exports go to the
 /// OS temp directory (the default).
-#[tauri::command]
+#[tauri::command(async)]
 fn get_export_dir() -> Option<String> {
     config::get_export_dir()
 }
 
 /// Sets the Excel-export folder. Pass `null`/empty to reset to the temp-dir default.
-#[tauri::command]
+#[tauri::command(async)]
 fn set_export_dir(dir: Option<String>) -> Result<(), String> {
     config::set_export_dir(dir)
 }
@@ -189,23 +189,23 @@ fn get_initial_file() -> Option<String> {
     std::env::args().nth(1)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_tables(state: State<'_, Arc<DbState>>) -> Result<Vec<TableInfo>, String> {
     db::get_tables(&state)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_columns(state: State<'_, Arc<DbState>>, table: String) -> Result<Vec<ColumnInfo>, String> {
     db::get_columns(&state, &table)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_schema(state: State<'_, Arc<DbState>>) -> Result<Vec<SchemaEntry>, String> {
     db::get_schema(&state)
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tauri::command]
+#[tauri::command(async)]
 fn query_table(
     state: State<'_, Arc<DbState>>,
     table: String,
@@ -228,7 +228,7 @@ fn query_table(
     db::query_table(&state, &req).err_ctx(&format!("querying table \"{}\"", req.table))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn count_rows(
     state: State<'_, Arc<DbState>>,
     table: String,
@@ -238,12 +238,12 @@ fn count_rows(
     db::count_rows(&state, &table, &filters, &global_filter)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn execute_sql(state: State<'_, Arc<DbState>>, sql: String) -> SqlResult {
     db::execute_sql(&state, &sql)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn export_to_xlsx(
     app: tauri::AppHandle,
     headers: Vec<String>,
@@ -260,7 +260,7 @@ fn export_to_xlsx(
 }
 
 #[cfg(debug_assertions)]
-#[tauri::command]
+#[tauri::command(async)]
 fn benchmark_query(
     state: State<'_, Arc<DbState>>,
     table: String,
@@ -286,7 +286,7 @@ fn get_current_path(state: State<'_, Arc<DbState>>) -> Option<String> {
     state.current_path.lock().clone()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn load_view_config(state: State<'_, Arc<DbState>>) -> FileConfig {
     let path = state.current_path.lock();
     match path.as_ref() {
@@ -295,7 +295,7 @@ fn load_view_config(state: State<'_, Arc<DbState>>) -> FileConfig {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn save_view_config(state: State<'_, Arc<DbState>>, config: FileConfig) -> Result<(), String> {
     let path = state.current_path.lock();
     match path.as_ref() {

@@ -460,7 +460,7 @@ mod tests {
     #[test]
     fn execute_sql_rejects_plain_begin_and_savepoint_via_authorizer() {
         // Plain BEGIN/BEGIN DEFERRED and SAVEPOINT are reported read-only by
-        // `stmt.readonly()` (N1) and used to pass `execute_sql` unchallenged,
+        // `stmt.readonly()` and used to pass `execute_sql` unchallenged,
         // leaving transaction state on the shared connection with no
         // COMMIT/ROLLBACK path. The authorizer registered in `open_database`
         // now denies `AuthAction::Transaction`/`Savepoint` outright, so these

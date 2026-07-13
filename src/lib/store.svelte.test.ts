@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { appState, loadSqlHistory, loadTheme, saveViewConfig } from "./store.svelte";
+import { appState, loadSqlHistory, loadTheme, openDatabase, saveViewConfig } from "./store.svelte";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn().mockResolvedValue(undefined),
@@ -57,7 +57,7 @@ describe("store localStorage loaders", () => {
   });
 });
 
-// W15: saveViewConfig() used to swallow failures into console.error only,
+// saveViewConfig() used to swallow failures into console.error only,
 // leaving a broken/read-only config path with zero on-screen signal.
 describe("saveViewConfig failure notice", () => {
   beforeEach(() => {
@@ -83,5 +83,38 @@ describe("saveViewConfig failure notice", () => {
     expect(appState.notice).toBeNull();
 
     errorSpy.mockRestore();
+  });
+});
+
+describe("database open sequencing", () => {
+  it("lets only the latest overlapping open request publish state", async () => {
+    let resolveFirst!: (tables: { name: string; row_count: number }[]) => void;
+    const firstOpen = new Promise<{ name: string; row_count: number }[]>((resolve) => {
+      resolveFirst = resolve;
+    });
+    vi.mocked(invoke).mockImplementation((command, args) => {
+      if (command === "open_database") {
+        return (args as { path: string }).path === "A.db"
+          ? firstOpen
+          : Promise.resolve([{ name: "b_table", row_count: 1 }]);
+      }
+      if (command === "load_view_config") {
+        return Promise.resolve({ tables: {}, tint: null, label: null });
+      }
+      if (command === "get_columns") {
+        return Promise.resolve([{ cid: 0, name: "b_col", col_type: "TEXT", notnull: false, default_value: null, pk: false }]);
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const openingA = openDatabase("A.db");
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("open_database", { path: "A.db" }));
+    const openingB = openDatabase("B.db");
+    resolveFirst([{ name: "a_table", row_count: 1 }]);
+    await Promise.all([openingA, openingB]);
+
+    expect(appState.dbPath).toBe("B.db");
+    expect(appState.tables).toEqual([{ name: "b_table", row_count: 1 }]);
+    expect(appState.tableColumns).toEqual({ b_table: ["b_col"] });
   });
 });

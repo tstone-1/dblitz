@@ -122,6 +122,39 @@ export function createVirtualRows(deps: VirtualRowsDeps) {
     const myEpoch = epoch;
     const firstChunk = Math.floor(start / deps.chunkSize);
     const lastChunk = Math.floor(end / deps.chunkSize);
+
+    // Bulk operations can span more chunks than the viewport cache is allowed
+    // to retain. Materialize those ranges independently so LRU eviction cannot
+    // remove an early chunk before the result is assembled.
+    if (lastChunk - firstChunk + 1 > MAX_CACHED_CHUNKS) {
+      const chunks = new Map<number, Row[]>();
+      await Promise.all(
+        Array.from({ length: lastChunk - firstChunk + 1 }, async (_, index) => {
+          const chunkIdx = firstChunk + index;
+          const cached = rowCache.get(chunkIdx);
+          if (cached) {
+            touchRecency(chunkIdx);
+            chunks.set(chunkIdx, cached);
+            return;
+          }
+          const result = await deps.loadChunk(chunkIdx * deps.chunkSize, deps.chunkSize);
+          if (isCurrent(myEpoch)) chunks.set(chunkIdx, result.rows);
+        }),
+      );
+      if (!isCurrent(myEpoch)) {
+        throw new Error("Selection changed while rows were loading. Try again.");
+      }
+
+      const out: Row[] = [];
+      for (let idx = start; idx <= end; idx++) {
+        const chunkIdx = Math.floor(idx / deps.chunkSize);
+        const fullRow = chunks.get(chunkIdx)?.[idx - chunkIdx * deps.chunkSize];
+        if (!fullRow) throw new Error("Selection contains rows that could not be loaded.");
+        out.push(projectVisible(fullRow));
+      }
+      return out;
+    }
+
     const loads: Promise<void>[] = [];
     for (let chunkIdx = firstChunk; chunkIdx <= lastChunk; chunkIdx++) {
       if (!rowCache.has(chunkIdx)) loads.push(fetchChunk(chunkIdx));
@@ -153,6 +186,7 @@ export function createVirtualRows(deps: VirtualRowsDeps) {
     if (!isCurrent(myEpoch)) return null;
     rowCache = new Map();
     pendingChunks.clear();
+    chunkRecency.clear();
     return myEpoch;
   }
 
