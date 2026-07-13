@@ -373,8 +373,14 @@ fn query_with_ordered_rows(
         .get(context.table)
         .is_some_and(|order| order.key == key);
     if !fresh {
-        let rowids = build_ordered_rows(context.conn, context.state, context.generation, &sql, params)?
-            .ok_or_else(|| "Query cancelled by a newer request".to_string())?;
+        let rowids = build_ordered_rows(
+            context.conn,
+            context.state,
+            context.generation,
+            &sql,
+            params,
+        )?
+        .ok_or_else(|| "Query cancelled by a newer request".to_string())?;
         tracing::debug!(
             table = context.table,
             rows = rowids.len(),
