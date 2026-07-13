@@ -17,33 +17,27 @@ pub(super) struct RowidIndex {
     pub(super) chunk_size: i64,
 }
 
-/// Full sorted rowid order for a table under one specific sort key. Lets a
-/// sorted browse turn each chunk into a rowid lookup instead of a fresh
-/// full-table `ORDER BY` per chunk (the latter froze the UI when fling-
-/// scrolling a large sorted table to the bottom). One entry per table,
-/// replaced when the sort column/direction changes. Valid for the
-/// connection's lifetime under the same immutable-file promise.
-pub(super) struct SortedOrder {
-    pub(super) sort_column: String,
-    pub(super) sort_asc: bool,
-    /// every rowid in fully sorted order
-    pub(super) rowids: Vec<i64>,
+/// Complete identity of an ordered view. Keeping the SQL fragments and bound
+/// values as separate fields avoids an opaque string signature and guarantees
+/// that a filter, parameter, or sort change invalidates the cached rowids.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct OrderKey {
+    pub(super) where_clause: String,
+    pub(super) params: Vec<String>,
+    pub(super) order_clause: String,
 }
 
-/// Full ordered rowid list for one *filtered* (and optionally sorted) view of a
-/// table. Without this, every scroll chunk of a filtered view re-ran the whole
-/// `WHERE` + `ORDER BY` + `OFFSET` query — and because `OFFSET` grows as you
-/// scroll, deep pages got progressively slower (the UI lagged while fling-
-/// scrolling a filtered, sorted table). With it, the matching rowids are
-/// materialized once and each chunk becomes a rowid lookup. One entry per
-/// table, replaced when the filter/sort signature changes. Valid for the
-/// connection's lifetime under the same immutable-file promise.
-pub(super) struct FilteredOrder {
-    /// Opaque signature of the `WHERE` clause, its bound params, and the
-    /// `ORDER BY` clause. A cache hit requires an exact signature match, so any
-    /// change to the filters, the global filter, or the sort rebuilds.
-    pub(super) signature: String,
-    /// every matching rowid, in the view's display order
+/// Full rowid order for one filtered and/or sorted view of a table. Sorted-only
+/// and filtered views use the same representation because both ultimately page
+/// through an ordered rowid list. Only one view per table is retained (the
+/// active one): switching the filter or sort on the same table therefore
+/// rebuilds rather than restoring a previously cached view. That single-entry
+/// bound is deliberate — it roughly halves peak cache memory versus keeping a
+/// separate sorted and filtered order resident, at the cost of one full
+/// re-materialization when toggling between two views of the same table. Fast
+/// scrolling *within* a view stays fully cached, which is the case that matters.
+pub(super) struct OrderedRows {
+    pub(super) key: OrderKey,
     pub(super) rowids: Vec<i64>,
 }
 
@@ -51,8 +45,7 @@ pub struct DbState {
     pub conn: Mutex<Option<Connection>>,
     pub current_path: Mutex<Option<String>>,
     pub(super) rowid_indexes: Mutex<HashMap<String, RowidIndex>>,
-    pub(super) sorted_orders: Mutex<HashMap<String, SortedOrder>>,
-    pub(super) filtered_orders: Mutex<HashMap<String, FilteredOrder>>,
+    pub(super) ordered_rows: Mutex<HashMap<String, OrderedRows>>,
     pub(super) query_generation: AtomicU64,
     /// Handle to interrupt whatever statement is currently executing on
     /// `conn`. Independent of `conn`'s own mutex, so calling `.interrupt()`
@@ -69,8 +62,7 @@ impl DbState {
             conn: Mutex::new(None),
             current_path: Mutex::new(None),
             rowid_indexes: Mutex::new(HashMap::new()),
-            sorted_orders: Mutex::new(HashMap::new()),
-            filtered_orders: Mutex::new(HashMap::new()),
+            ordered_rows: Mutex::new(HashMap::new()),
             query_generation: AtomicU64::new(0),
             interrupt_handle: Mutex::new(None),
         }

@@ -7,7 +7,7 @@
 //     SELECT * FROM t WHERE <filter> ORDER BY <col> LIMIT P OFFSET k
 //   so each page re-scans, re-sorts, and skips `k` rows — cost grows with k.
 //
-//   AFTER (query_with_filtered_order): materialize the matching rowids in view
+//   AFTER (query_with_ordered_rows): materialize the matching rowids in view
 //     order ONCE, then serve each chunk as a WHERE rowid IN (...) lookup.
 //
 // Run: cargo run --release --example filtered_scroll_benchmark [rows] [page] [repeats]

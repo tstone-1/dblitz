@@ -33,16 +33,13 @@ pub fn cancel_queries(state: &DbState) {
     }
 }
 
-/// Clears all per-table caches (rowid index, sorted order, filtered order).
+/// Clears all per-table caches (rowid index and ordered row lists).
 /// Must run on both open (a new file invalidates every table-keyed cache)
 /// and close (release the materialized rowid vectors promptly rather than
-/// leaving them resident until the next open). Single-sourced here after a
-/// hand-synced pair of clear sites let `filtered_orders` (added later)
-/// leak past `close_database` while `open_database` cleared it correctly.
+/// leaving them resident until the next open).
 pub(super) fn clear_caches(state: &DbState) {
     state.rowid_indexes.lock().clear();
-    state.sorted_orders.lock().clear();
-    state.filtered_orders.lock().clear();
+    state.ordered_rows.lock().clear();
 }
 
 pub fn close_database(state: &DbState) {
@@ -56,7 +53,7 @@ pub fn close_database(state: &DbState) {
 
 #[cfg(test)]
 mod tests {
-    use super::types::{FilteredOrder, RowidIndex, SortedOrder};
+    use super::types::{OrderKey, OrderedRows, RowidIndex};
     use super::*;
 
     #[test]
@@ -70,18 +67,14 @@ mod tests {
                 chunk_size: 500,
             },
         );
-        state.sorted_orders.lock().insert(
+        state.ordered_rows.lock().insert(
             "t".to_string(),
-            SortedOrder {
-                sort_column: "id".to_string(),
-                sort_asc: true,
-                rowids: vec![1],
-            },
-        );
-        state.filtered_orders.lock().insert(
-            "t".to_string(),
-            FilteredOrder {
-                signature: "sig".to_string(),
+            OrderedRows {
+                key: OrderKey {
+                    where_clause: String::new(),
+                    params: Vec::new(),
+                    order_clause: " ORDER BY id ASC".to_string(),
+                },
                 rowids: vec![1],
             },
         );
@@ -93,12 +86,8 @@ mod tests {
             "rowid_indexes must be cleared on close"
         );
         assert!(
-            state.sorted_orders.lock().is_empty(),
-            "sorted_orders must be cleared on close"
-        );
-        assert!(
-            state.filtered_orders.lock().is_empty(),
-            "filtered_orders must be cleared on close"
+            state.ordered_rows.lock().is_empty(),
+            "ordered_rows must be cleared on close"
         );
     }
 }
