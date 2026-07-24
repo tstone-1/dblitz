@@ -30,7 +30,11 @@
   - `export.rs` — XLSX export
   - `types.rs`, `util.rs` — shared DTOs and helpers (`safe_ident`, `read_row`, `StrErr`)
   - `benchmark.rs` — `cfg(debug_assertions)` paging benchmarks
-- `dblitz` is intended to be a read-only SQLite viewer. Preserve the read-only behavior when changing query execution or database opening logic.
+- `dblitz` is a **strict read-only SQLite viewer** by explicit decision (2026-04-10). Reject feature requests that imply mutation (inline cell edit, delete row, save-as, schema changes) and surface the decision before implementing. Enforcement is layered — preserve all layers when changing query execution or database opening logic:
+  1. Connections open with `SQLITE_OPEN_READ_ONLY`.
+  2. Plus `?immutable=1` in the URI: the file is treated as a frozen snapshot for the connection's lifetime, and no `-wal`/`-shm` companion files are ever created (important because source files may sit in cloud-synced folders that other tools write to).
+  3. `execute_sql` rejects non-readonly prepared statements (`stmt.readonly()`) with a friendly message, and a SQLite authorizer denies ATTACH/DETACH/transactions at the engine level.
+  - Accepted trade-off: dblitz does not see live writes from other processes during a session; reopening the file is required to pick up changes. The SQL editor should always advertise read-only in its placeholder/hint text. Backend row/index caches need no invalidation logic because the snapshot is frozen.
 - Windows duplicate-instance detection is keyed by the full database path through the `dblitz_db_path` Win32 window property. Do not replace it with filename-only matching: same-named databases in different directories must open separately.
 - Keep the window title filename-only; the toolbar owns display of the full database path.
 - Treat DB Browser for SQLite as the primary UX comparison point when evaluating viewer behavior and parity gaps.
@@ -49,6 +53,7 @@
 - A release workflow can take 20 minutes or more when GitHub Actions has a cold Rust cache, even without dependency changes. Confirm the active job step before treating a long run as stuck.
 - The draft-first release workflow must pass the numeric `releaseId` from `create-release` to `tauri-action`; GitHub's tag lookup returns 404 for a draft release, so reverting build uploads to `tagName` breaks the matrix.
 - Rebuild-and-overwrite under an existing version label is permitted only while that version is unpublished and only after asking the user. Once its tag and GitHub release are published, cut the next version instead.
+- Keep review-fix release batches scoped to the fixes. Do not fold strategic refactors (file splits, major extractions) into the same release even when they touch the same files — defer them to separate, single-purpose releases unless the refactor is a genuine prerequisite for a fix.
 - Expected `cargo audit` noise is the established allowed Tauri/Linux WebView transitive set (legacy GTK/glib/unic advisories). Treat any new advisory or materially different output as actionable; historical npm `cookie` findings applied only to the unreachable SvelteKit SSR path and must be re-evaluated if they reappear.
 
 ### Distribution / Homebrew tap
