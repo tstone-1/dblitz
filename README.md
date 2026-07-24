@@ -38,8 +38,9 @@ The data grid is virtualized; rows are loaded in 500-row chunks. For the common
 case — unfiltered, unsorted, page-aligned browsing — dblitz builds a sparse rowid
 index on first access and pages with `WHERE rowid >= ? AND rowid < ?` instead of
 `LIMIT … OFFSET …`, so jumping to a far page is a seek, not a scan. Filtered or
-sorted queries fall back to LIMIT/OFFSET. Switching tables or changing filters
-cancels in-flight queries instead of queuing stale work.
+sorted views materialize the matching rowids once, in display order, and page by
+rowid lookup; `WITHOUT ROWID` tables fall back to LIMIT/OFFSET. Switching tables
+or changing filters cancels in-flight queries instead of queuing stale work.
 
 ### Benchmark snapshot
 

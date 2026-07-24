@@ -1,7 +1,7 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
-  import { invoke } from "@tauri-apps/api/core";
-  import { appState, openDatabase, closeDatabase, setTheme, saveViewConfig, type RecentFile } from "$lib/store.svelte";
+  import { getExportDir, setExportDir, getRecentFiles, clearRecentFiles, type RecentFile } from "$lib/ipc";
+  import { appState, openDatabase, closeDatabase, setTheme, saveViewConfig } from "$lib/store.svelte";
   import { fileName, parentDir, TINT_PRESETS, tintPillStyle, toolbarTintStyle } from "./toolbarUtils";
 
   function setTint(value: string | null) {
@@ -35,7 +35,7 @@
     }
     showSettings = true;
     try {
-      exportDir = (await invoke<string | null>("get_export_dir")) ?? "";
+      exportDir = (await getExportDir()) ?? "";
     } catch (e) {
       console.error("Failed to load export folder:", e);
       exportDir = "";
@@ -46,7 +46,7 @@
     const dir = await open({ directory: true, multiple: false });
     if (typeof dir !== "string") return;
     try {
-      await invoke("set_export_dir", { dir });
+      await setExportDir(dir);
       exportDir = dir;
     } catch (e) {
       console.error("Failed to save export folder:", e);
@@ -56,7 +56,7 @@
 
   async function resetExportDir() {
     try {
-      await invoke("set_export_dir", { dir: null });
+      await setExportDir(null);
       exportDir = "";
     } catch (e) {
       console.error("Failed to reset export folder:", e);
@@ -86,7 +86,7 @@
     // out files that no longer exist, so the list stays self-cleaning.
     showRecents = true;
     try {
-      recentFiles = await invoke<RecentFile[]>("get_recent_files");
+      recentFiles = await getRecentFiles();
     } catch (e) {
       console.error("Failed to load recent files:", e);
       recentFiles = [];
@@ -100,7 +100,7 @@
 
   async function clearRecents() {
     try {
-      await invoke("clear_recent_files");
+      await clearRecentFiles();
       recentFiles = [];
     } catch (e) {
       console.error("Failed to clear recent files:", e);

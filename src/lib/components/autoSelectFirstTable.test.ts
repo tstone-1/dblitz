@@ -1,44 +1,28 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { appState, type TableInfo } from "$lib/store.svelte";
-import { createAutoSelectFirstTable, didDbPathChange } from "./autoSelectFirstTable.svelte";
-
-describe("didDbPathChange", () => {
-  it("fires on opening a first database (null -> path)", () => {
-    expect(didDbPathChange(null, "/a.db")).toBe(true);
-  });
-
-  it("fires on switching to a different database (open A -> open B)", () => {
-    expect(didDbPathChange("/a.db", "/b.db")).toBe(true);
-  });
-
-  it("fires on closing a database (path -> null)", () => {
-    expect(didDbPathChange("/a.db", null)).toBe(true);
-  });
-
-  it("does not fire when the same path is seen again (reopen same path)", () => {
-    expect(didDbPathChange("/a.db", "/a.db")).toBe(false);
-    expect(didDbPathChange(null, null)).toBe(false);
-  });
-});
+import { appState } from "$lib/store.svelte";
+import type { TableInfo } from "$lib/ipc";
+import { createAutoSelectFirstTable } from "./autoSelectFirstTable.svelte";
 
 describe("createAutoSelectFirstTable", () => {
   beforeEach(() => {
     appState.dbPath = null;
     appState.tables = [];
+    appState.dbOpenGeneration = 0;
   });
 
   function table(name: string, row_count = 0): TableInfo {
     return { name, row_count };
   }
 
-  it("auto-selects the lone table exactly once per db path", () => {
+  it("auto-selects the lone table exactly once per open generation", () => {
     const selected: string[] = [];
     const check = createAutoSelectFirstTable((name) => selected.push(name));
 
+    appState.dbOpenGeneration = 1;
     appState.dbPath = "/a.db";
     appState.tables = [table("only_table")];
     check();
-    check(); // re-checking the same path must not re-fire
+    check(); // re-checking the same generation must not re-fire
 
     expect(selected).toEqual(["only_table"]);
   });
@@ -47,6 +31,7 @@ describe("createAutoSelectFirstTable", () => {
     const selected: string[] = [];
     const check = createAutoSelectFirstTable((name) => selected.push(name));
 
+    appState.dbOpenGeneration = 1;
     appState.dbPath = "/a.db";
     appState.tables = [table("t1"), table("t2")];
     check();
@@ -58,15 +43,35 @@ describe("createAutoSelectFirstTable", () => {
     const selected: string[] = [];
     const check = createAutoSelectFirstTable((name) => selected.push(name));
 
+    appState.dbOpenGeneration = 1;
     appState.dbPath = "/a.db";
     appState.tables = [table("t1")];
     check();
 
+    appState.dbOpenGeneration = 2;
     appState.dbPath = "/b.db";
     appState.tables = [table("t2")];
     check();
 
     expect(selected).toEqual(["t1", "t2"]);
+  });
+
+  it("re-fires when the SAME single-table path is reopened (generation bumps, path does not)", () => {
+    // Reopening the already-open file is the natural refresh gesture: the
+    // reset that reopen triggers clears the selection, so the lone table must
+    // be auto-selected again even though dbPath never changed.
+    const selected: string[] = [];
+    const check = createAutoSelectFirstTable((name) => selected.push(name));
+
+    appState.dbOpenGeneration = 1;
+    appState.dbPath = "/a.db";
+    appState.tables = [table("only_table")];
+    check();
+
+    appState.dbOpenGeneration = 2; // same path reopened
+    check();
+
+    expect(selected).toEqual(["only_table", "only_table"]);
   });
 
   it("calls onReset exactly when the db path becomes null, not on every check", () => {
@@ -76,6 +81,7 @@ describe("createAutoSelectFirstTable", () => {
       () => { resetCalls++; },
     );
 
+    appState.dbOpenGeneration = 1;
     appState.dbPath = "/a.db";
     appState.tables = [];
     check();

@@ -10,6 +10,39 @@ use super::util::read_row;
 // covers any realistic interactive result; beyond that, page with LIMIT/OFFSET.
 const SQL_RESULT_LIMIT: usize = 50_000;
 
+impl SqlResult {
+    /// Empty-result error: no columns/rows, just the message. The shape every
+    /// pre-row rejection returns (no DB open, the ATTACH/DETACH gate, the
+    /// write gate, a prepare failure, a query-start failure).
+    fn error(message: String) -> Self {
+        SqlResult {
+            columns: vec![],
+            rows: vec![],
+            column_types: vec![],
+            error: Some(message),
+            truncated: false,
+        }
+    }
+
+    /// Error carrying the partial columns/rows already collected before a
+    /// mid-iteration failure (a `next()` error, or cancellation by a newer
+    /// request), so the frontend can still render what was fetched.
+    fn partial_error(
+        columns: Vec<String>,
+        rows: Vec<Vec<Option<String>>>,
+        column_types: Vec<String>,
+        message: String,
+    ) -> Self {
+        SqlResult {
+            columns,
+            rows,
+            column_types,
+            error: Some(message),
+            truncated: false,
+        }
+    }
+}
+
 /// Skip leading whitespace, SQL comments, and empty-statement `;` separators
 /// so statement-kind guards see the first executable token, not a prefix
 /// comment or a leading semicolon. SQLite's own parser silently skips a
@@ -50,15 +83,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
     let guard = state.conn.lock();
     let conn = match guard.as_ref() {
         Some(c) => c,
-        None => {
-            return SqlResult {
-                columns: vec![],
-                rows: vec![],
-                column_types: vec![],
-                error: Some("No database open".to_string()),
-                truncated: false,
-            }
-        }
+        None => return SqlResult::error("No database open".to_string()),
     };
 
     let trimmed = sql.trim();
@@ -69,40 +94,20 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
     // dblitz's "this viewer cannot reach beyond the file you opened"
     // promise. Reject them at the input boundary before prepare.
     if is_attach_or_detach(trimmed) {
-        return SqlResult {
-            columns: vec![],
-            rows: vec![],
-            column_types: vec![],
-            error: Some(
-                "dblitz is a read-only viewer - ATTACH and DETACH are not allowed.".to_string(),
-            ),
-            truncated: false,
-        };
+        return SqlResult::error(
+            "dblitz is a read-only viewer - ATTACH and DETACH are not allowed.".to_string(),
+        );
     }
 
     let mut stmt = match conn.prepare(trimmed) {
         Ok(s) => s,
-        Err(e) => {
-            return SqlResult {
-                columns: vec![],
-                rows: vec![],
-                column_types: vec![],
-                error: Some(e.to_string()),
-                truncated: false,
-            };
-        }
+        Err(e) => return SqlResult::error(e.to_string()),
     };
 
     if !stmt.readonly() {
-        return SqlResult {
-            columns: vec![],
-            rows: vec![],
-            column_types: vec![],
-            error: Some(
-                "dblitz is a read-only viewer - write statements (INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, etc.) are not supported.".to_string(),
-            ),
-            truncated: false,
-        };
+        return SqlResult::error(
+            "dblitz is a read-only viewer - write statements (INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, etc.) are not supported.".to_string(),
+        );
     }
 
     let col_count = stmt.column_count();
@@ -137,13 +142,12 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
                         // check catches the rest: a query that keeps
                         // completing rows quickly but should still stop.
                         if state.query_generation.load(Ordering::Relaxed) != generation {
-                            return SqlResult {
+                            return SqlResult::partial_error(
                                 columns,
                                 rows,
                                 column_types,
-                                error: Some("Query cancelled by a newer request".to_string()),
-                                truncated: false,
-                            };
+                                "Query cancelled by a newer request".to_string(),
+                            );
                         }
                         // Only flag truncation once we've collected the cap
                         // AND confirmed at least one more row exists. Checking
@@ -157,13 +161,12 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        return SqlResult {
+                        return SqlResult::partial_error(
                             columns,
                             rows,
                             column_types,
-                            error: Some(e.to_string()),
-                            truncated: false,
-                        };
+                            e.to_string(),
+                        );
                     }
                 }
             }
@@ -175,13 +178,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
                 truncated,
             }
         }
-        Err(e) => SqlResult {
-            columns: vec![],
-            rows: vec![],
-            column_types: vec![],
-            error: Some(e.to_string()),
-            truncated: false,
-        },
+        Err(e) => SqlResult::error(e.to_string()),
     }
 }
 
@@ -664,6 +661,89 @@ mod tests {
             "an interrupted query should return an error, got: {:?}",
             result
         );
+
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn authorizer_denies_state_changing_pragma() {
+        // `case_sensitive_like=1` reports `readonly = true` to `stmt.readonly()`,
+        // so it slips past the write gate - but it silently makes every later
+        // LIKE filter case-sensitive on this shared connection. The authorizer's
+        // PRAGMA allowlist must reject it, and the rejection must land on
+        // execute_sql's normal error path (message set, no rows).
+        let (state, path) = setup_temp_db_with_table();
+
+        let denied = execute_sql(&state, "PRAGMA case_sensitive_like = 1");
+        assert!(
+            denied.error.is_some(),
+            "a state-changing PRAGMA must be rejected"
+        );
+        assert!(denied.rows.is_empty(), "a denied PRAGMA returns no rows");
+
+        // Browse-visible proof: LIKE is still case-insensitive (SQLite's
+        // default), so an upper-cased needle still matches the stored 'alice'.
+        // If the PRAGMA had taken effect, this would return zero rows.
+        let like = execute_sql(&state, "SELECT name FROM users WHERE name LIKE 'ALICE'");
+        assert!(like.error.is_none(), "got: {:?}", like.error);
+        assert_eq!(
+            like.rows.len(),
+            1,
+            "LIKE must remain case-insensitive: the denied PRAGMA must not have changed semantics"
+        );
+
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn authorizer_allows_introspection_pragma() {
+        // The read-only introspection allowlist must still let schema PRAGMAs
+        // through - dblitz's own column lookup and the schema browser depend on
+        // PRAGMA table_info reaching the engine.
+        let (state, path) = setup_temp_db_with_table();
+
+        let result = execute_sql(&state, "PRAGMA table_info(users)");
+        assert!(
+            result.error.is_none(),
+            "an allowlisted introspection PRAGMA must succeed, got: {:?}",
+            result.error
+        );
+        // table_info returns one row per column - users has id + name.
+        assert_eq!(result.rows.len(), 2);
+
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn open_then_query_table_round_trip_survives_pragma_authorizer() {
+        // The PRAGMA allowlist must not break the internal PRAGMA table_info
+        // that query_table issues (via get_column_names) on the shared,
+        // authorizer-bearing connection. A full open -> query_table round trip
+        // proves the internal introspection PRAGMAs still pass the gate.
+        use crate::db::{query_table, QueryRequest};
+
+        let (state, path) = setup_temp_db_with_table();
+
+        let result = query_table(
+            &state,
+            &QueryRequest {
+                table: "users".to_string(),
+                offset: 0,
+                limit: 10,
+                filters: vec![],
+                global_filter: String::new(),
+                sort_column: None,
+                sort_asc: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.columns, vec!["id", "name"]);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][1].as_deref(), Some("alice"));
 
         close_database(&state);
         let _ = std::fs::remove_file(&path);

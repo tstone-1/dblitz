@@ -118,3 +118,31 @@ describe("database open sequencing", () => {
     expect(appState.tableColumns).toEqual({ b_table: ["b_col"] });
   });
 });
+
+// Reopening the already-open file reopens the backend connection (clearing its
+// caches) but leaves dbPath unchanged, so dbPath alone can't tell the frontend
+// to drop its stale caches. dbOpenGeneration is the signal that DOES bump on
+// every successful open, same-path included.
+describe("database open generation", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke).mockImplementation((command) => {
+      if (command === "open_database") return Promise.resolve([{ name: "t", row_count: 1 }]);
+      if (command === "load_view_config") return Promise.resolve({ tables: {}, tint: null, label: null });
+      if (command === "get_columns") return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+  });
+
+  it("bumps dbOpenGeneration on every successful open, reopening the same path included", async () => {
+    const before = appState.dbOpenGeneration;
+
+    await openDatabase("A.db");
+    expect(appState.dbOpenGeneration).toBe(before + 1);
+    expect(appState.dbPath).toBe("A.db");
+
+    await openDatabase("A.db"); // same path -- still a fresh session
+    expect(appState.dbOpenGeneration).toBe(before + 2);
+    expect(appState.dbPath).toBe("A.db");
+  });
+});

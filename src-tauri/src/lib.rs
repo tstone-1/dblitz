@@ -306,7 +306,7 @@ fn save_view_config(state: State<'_, Arc<DbState>>, config: FileConfig) -> Resul
 
 /// Search for an existing dblitz window that has the same file open by
 /// comparing the `dblitz_db_path` window property (a 64-bit hash of the
-/// full, lowercased path set by [`update_window_title`]).
+/// full, lowercased path set by [`set_window_db_marker`]).
 ///
 /// If found, restore (un-minimise) and activate it, returning `true` so
 /// the caller can exit early.
