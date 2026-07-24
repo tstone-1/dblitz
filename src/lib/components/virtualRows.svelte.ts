@@ -1,11 +1,52 @@
-import type { QueryResult } from "$lib/store.svelte";
+import type { QueryResult } from "$lib/ipc";
+
+// =============================================================================
+// Reload / generation protocol (the whole picture, front to back)
+// -----------------------------------------------------------------------------
+// A database switch, a filter/sort change, and a same-path reopen all have to
+// invalidate different amounts of cached state without ever letting a
+// late-arriving async result repopulate a cache it no longer belongs to.
+// The layers, outermost to innermost, and what each protects against:
+//
+// * store.databaseRequestGeneration (+ databaseRequestQueue) -- serializes
+//   overlapping open/close IPC transactions against the singleton backend
+//   connection; an older open that's still running stops before it publishes
+//   frontend state. store.dbOpenGeneration -- bumped on EVERY successful open
+//   (same-path reopen included) and is the signal every frontend reset keys on,
+//   because dbPath alone can't detect "reopened the file I already had open".
+//
+// * BrowseData's reset effect -- on a dbOpenGeneration change, drops
+//   selectedTable/columns/filters/sort and calls virtualRows.reset(). Its
+//   `lastFilterState` memo dedupes the ~500ms filter debounce so an unchanged
+//   filter never re-queries.
+//
+// * virtualRows.epoch -- the row-cache generation. beginReload() bumps epoch,
+//   AWAITS cancelQueries() (a reload is commencing that the caller will await),
+//   captures a per-epoch snapshot of table/filters/sort, then clears the cache.
+//   reset() bumps epoch fire-and-forget (no reload to await) for a DB switch.
+//   Every getRow-triggered background fetch is tagged with the epoch and the
+//   snapshot LIVE AT beginReload -- never current component state -- so a chunk
+//   fetched during a still-armed filter/sort debounce can't land new-filter
+//   rows into the old epoch's cache (isCurrent() discards it; the snapshot
+//   keeps its query self-consistent even before that check).
+//
+// * backend query_generation + cancellation token -- open_database bumps the
+//   Rust-side generation and cancel_queries flips a token so in-flight SQL on
+//   the old connection stops and returns partial rows rather than fighting the
+//   new one.
+// =============================================================================
 
 type Row = (string | null)[];
 
-export interface VirtualRowsDeps {
+// `S` is an opaque per-reload query snapshot (table + filters + sort) captured
+// by the caller. virtualRows never inspects it; it only pins the value taken at
+// beginReload/reset time and hands it back to loadChunk so background fetches
+// query with the epoch's state, not whatever the component holds now.
+export interface VirtualRowsDeps<S = void> {
   chunkSize: number;
   getSelectedTable: () => string | null;
-  loadChunk: (offset: number, limit: number) => Promise<QueryResult>;
+  makeSnapshot?: () => S;
+  loadChunk: (offset: number, limit: number, snapshot: S) => Promise<QueryResult>;
   cancelQueries: () => Promise<void>;
   getVisibleColumns: () => string[];
   getColumnIndex: (column: string) => number | undefined;
@@ -15,10 +56,19 @@ export interface VirtualRowsDeps {
   setError: (message: string) => void;
 }
 
-export function createVirtualRows(deps: VirtualRowsDeps) {
+export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
   let rowCache = $state<Map<number, Row[]>>(new Map());
   let pendingChunks = new Map<number, Promise<void>>();
   let epoch = 0;
+
+  function captureSnapshot(): S {
+    return deps.makeSnapshot ? deps.makeSnapshot() : (undefined as S);
+  }
+
+  // The query state (table/filters/sort) this epoch's fetches must use. Pinned
+  // at beginReload/reset so a getRow-triggered fetch can never read a newer
+  // filter/sort that the component has since moved to but not yet reloaded.
+  let currentSnapshot: S = captureSnapshot();
 
   // Bounds how many chunks stay resident in rowCache so scrolling through a
   // huge (multi-million-row) table doesn't grow memory without limit. 200
@@ -84,10 +134,11 @@ export function createVirtualRows(deps: VirtualRowsDeps) {
     if (pending) return pending;
 
     const myEpoch = epoch;
+    const snapshot = currentSnapshot;
     const offset = chunkIdx * deps.chunkSize;
     let task: Promise<void>;
     task = (async () => {
-      const result = await deps.loadChunk(offset, deps.chunkSize);
+      const result = await deps.loadChunk(offset, deps.chunkSize, snapshot);
       if (!isCurrent(myEpoch)) return;
       applyResult(chunkIdx, result, "if-empty");
     })().catch((e) => {
@@ -120,6 +171,7 @@ export function createVirtualRows(deps: VirtualRowsDeps) {
     if (!deps.getSelectedTable()) return [];
 
     const myEpoch = epoch;
+    const snapshot = currentSnapshot;
     const firstChunk = Math.floor(start / deps.chunkSize);
     const lastChunk = Math.floor(end / deps.chunkSize);
 
@@ -137,7 +189,7 @@ export function createVirtualRows(deps: VirtualRowsDeps) {
             chunks.set(chunkIdx, cached);
             return;
           }
-          const result = await deps.loadChunk(chunkIdx * deps.chunkSize, deps.chunkSize);
+          const result = await deps.loadChunk(chunkIdx * deps.chunkSize, deps.chunkSize, snapshot);
           if (isCurrent(myEpoch)) chunks.set(chunkIdx, result.rows);
         }),
       );
@@ -179,15 +231,18 @@ export function createVirtualRows(deps: VirtualRowsDeps) {
     return out;
   }
 
-  async function beginReload(): Promise<number | null> {
+  async function beginReload(): Promise<{ epoch: number; snapshot: S } | null> {
     epoch++;
     const myEpoch = epoch;
+    // Pin the query snapshot for this epoch BEFORE awaiting -- fetches kicked
+    // off between now and the next reload must all query the same state.
+    currentSnapshot = captureSnapshot();
     await deps.cancelQueries();
     if (!isCurrent(myEpoch)) return null;
     rowCache = new Map();
     pendingChunks.clear();
     chunkRecency.clear();
-    return myEpoch;
+    return { epoch: myEpoch, snapshot: currentSnapshot };
   }
 
   function applyFirstChunk(myEpoch: number, result: QueryResult): boolean {
@@ -211,6 +266,7 @@ export function createVirtualRows(deps: VirtualRowsDeps) {
    */
   function reset(): void {
     epoch++;
+    currentSnapshot = captureSnapshot();
     rowCache = new Map();
     pendingChunks.clear();
     chunkRecency.clear();

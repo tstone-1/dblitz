@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 
-use super::query::{build_rowid_index, rowid_alias};
+use super::query::{build_rowid_index, rowid_alias, rowid_page_sql};
 use super::types::DbState;
 use super::util::{quote_ident, read_row, StrErr};
 
@@ -100,21 +100,13 @@ pub fn benchmark_query(
             let (sql, p1, p2): (String, i64, i64) = if chunk + 1 < idx.boundaries.len() {
                 let end_rid = idx.boundaries[chunk + 1];
                 (
-                    format!(
-                        "SELECT * FROM {table} WHERE {alias} >= ? AND {alias} < ? ORDER BY {alias} ASC",
-                        table = quoted_table,
-                        alias = alias
-                    ),
+                    rowid_page_sql(&quoted_table, alias, true),
                     start_rid,
                     end_rid,
                 )
             } else {
                 (
-                    format!(
-                        "SELECT * FROM {table} WHERE {alias} >= ? ORDER BY {alias} ASC LIMIT ?",
-                        table = quoted_table,
-                        alias = alias
-                    ),
+                    rowid_page_sql(&quoted_table, alias, false),
                     start_rid,
                     limit,
                 )

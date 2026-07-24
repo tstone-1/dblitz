@@ -1,86 +1,16 @@
-import { invoke } from "@tauri-apps/api/core";
-
-// Types matching Rust structs
-export interface TableInfo {
-  name: string;
-  row_count: number;
-}
-
-export interface ColumnInfo {
-  cid: number;
-  name: string;
-  col_type: string;
-  notnull: boolean;
-  default_value: string | null;
-  pk: boolean;
-}
-
-export interface SchemaEntry {
-  obj_type: string;
-  name: string;
-  tbl_name: string;
-  sql: string | null;
-}
-
-export interface ColumnFilter {
-  column: string;
-  value: string;
-  is_regex: boolean;
-}
-
-export interface ColumnFilterValue {
-  value: string;
-  is_regex: boolean;
-}
-
-export interface QueryResult {
-  columns: string[];
-  rows: (string | null)[][];
-  total_rows: number | null;
-  offset: number;
-}
-
-export interface SqlResult {
-  columns: string[];
-  rows: (string | null)[][];
-  // Per-column declared type (e.g. "INTEGER", "TEXT"), aligned 1:1 with
-  // `columns`. Empty string for a column with no declared type (a computed
-  // expression). Used to pass the correct numeric/text formatting through to
-  // an XLSX export of the SQL result.
-  column_types: string[];
-  error: string | null;
-  // Non-fatal: set when the result exceeded the 50,000-row cap and only the
-  // first N rows were returned. Travels alongside `rows`, not in `error`.
-  truncated: boolean;
-}
-
-export interface PinnedFilter {
-  value: string;
-  is_regex: boolean;
-}
-
-export interface RecentFile {
-  path: string;
-  tint: string | null;
-  label: string | null;
-}
-
-export interface ViewConfig {
-  hidden_columns: string[];
-  column_colors: Record<string, string>;
-  sort_column: string | null;
-  sort_asc: boolean;
-  column_order: string[];
-  pinned_filters: Record<string, PinnedFilter>;
-  pinned_global_filter: string | null;
-  column_widths: Record<string, number>;
-}
-
-export interface FileConfig {
-  tables: Record<string, ViewConfig>;
-  tint: string | null;
-  label: string | null;
-}
+// The Rust-mirroring DTO interfaces and the typed `invoke` wrappers live in
+// ipc.ts (the single IPC boundary). Import the wrappers this module needs plus
+// the config types it operates on. The public openDatabase/closeDatabase/
+// saveViewConfig functions below add sequencing + error handling on top of the
+// raw command wrappers, hence the aliased imports.
+import {
+  openDatabase as openDatabaseCmd,
+  closeDatabase as closeDatabaseCmd,
+  loadViewConfig,
+  saveViewConfig as saveViewConfigCmd,
+  getColumns,
+} from "$lib/ipc";
+import type { TableInfo, ColumnInfo, FileConfig, ViewConfig } from "$lib/ipc";
 
 export interface SqlHistoryEntry {
   sql: string;
@@ -127,6 +57,14 @@ export function loadTheme(): Theme {
 // Global reactive state
 export const appState = $state({
   dbPath: null as string | null,
+  // Bumped by openDatabase on every SUCCESSFUL open, including reopening the
+  // already-open path. dbPath alone can't gate a frontend reset because a
+  // Toolbar/recents reopen of the current file reopens the backend connection
+  // (clearing its caches) without changing dbPath -- so the row cache, schema,
+  // and SQL results would otherwise keep serving the previous connection's
+  // stale data. Reset effects in BrowseData/DatabaseStructure/ExecuteSQL and
+  // the single-table auto-select key on this instead of (or alongside) dbPath.
+  dbOpenGeneration: 0,
   tables: [] as TableInfo[],
   activeTab: "structure" as "structure" | "browse" | "sql",
   loading: false,
@@ -159,9 +97,9 @@ let databaseRequestQueue: Promise<void> = Promise.resolve();
 async function runOpenDatabase(path: string, request: number) {
   if (request !== databaseRequestGeneration) return;
   try {
-    const tables = await invoke<TableInfo[]>("open_database", { path });
+    const tables = await openDatabaseCmd(path);
     if (request !== databaseRequestGeneration) return;
-    const config = await invoke<FileConfig>("load_view_config");
+    const config = await loadViewConfig();
     if (request !== databaseRequestGeneration) return;
     // Fetch column names for all tables (for SQL autocomplete + as a
     // schema source for filter validation before the first query result).
@@ -169,7 +107,7 @@ async function runOpenDatabase(path: string, request: number) {
     const typeMap: Record<string, Record<string, string>> = {};
     await Promise.all(tables.map(async (t) => {
       try {
-        const cols = await invoke<ColumnInfo[]>("get_columns", { table: t.name });
+        const cols = await getColumns(t.name);
         colMap[t.name] = cols.map((c) => c.name);
         const tmap: Record<string, string> = {};
         for (const c of cols) tmap[c.name] = c.col_type;
@@ -186,6 +124,10 @@ async function runOpenDatabase(path: string, request: number) {
     appState.fileConfig = config;
     appState.tableColumns = colMap;
     appState.tableColumnTypes = typeMap;
+    // Bump BEFORE `tables` so that by the time the reset+auto-select effect
+    // fires (Svelte batches effects to after this synchronous publish), the
+    // new generation is already visible alongside the fresh tables.
+    appState.dbOpenGeneration++;
     appState.tables = tables;
     if (tables.length === 1) appState.activeTab = "browse";
   } catch (e) {
@@ -210,7 +152,7 @@ export async function closeDatabase() {
   appState.loading = true;
   const task = databaseRequestQueue.then(async () => {
     try {
-      await invoke("close_database");
+      await closeDatabaseCmd();
     } catch (e) {
       console.error("Failed to close database:", e);
     }
@@ -233,15 +175,6 @@ export function persistSqlHistory() {
   );
 }
 
-export async function refreshTables() {
-  try {
-    const tables = await invoke<TableInfo[]>("get_tables");
-    appState.tables = tables;
-  } catch (e) {
-    appState.error = String(e);
-  }
-}
-
 // View-config saves happen silently in the background (every filter
 // pin, column resize, sort change, ... calls saveViewConfig() as a fire-and-
 // forget `void` from updateTableConfig). A failure there used to only hit
@@ -254,7 +187,7 @@ let saveFailureNotified = false;
 
 export async function saveViewConfig() {
   try {
-    await invoke("save_view_config", { config: appState.fileConfig });
+    await saveViewConfigCmd(appState.fileConfig);
   } catch (e) {
     console.error("Failed to save view config:", e);
     if (!saveFailureNotified) {

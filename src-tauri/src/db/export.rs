@@ -1,6 +1,52 @@
 use super::util::StrErr;
 use std::path::Path;
 
+/// Prefix every "Open in Excel" workbook is written with (see [`export_to_xlsx`]).
+/// The cleanup sweep only ever touches files carrying exactly this prefix and
+/// the `.xlsx` extension, so nothing else in the export directory is at risk.
+const EXPORT_PREFIX: &str = "dblitz_export_";
+
+/// Age past which a previously-exported workbook is eligible for the cleanup
+/// sweep. Roughly a week - long enough that a file a user re-opens the next
+/// working day is never yanked out from under them.
+const EXPORT_RETENTION: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Best-effort removal of stale `dblitz_export_*.xlsx` files in `dir`. Every
+/// "Open in Excel" drops a fresh timestamped workbook and nothing ever
+/// reclaimed them, so the export directory grew without bound. Only files whose
+/// name carries the exact [`EXPORT_PREFIX`] and `.xlsx` extension this module
+/// writes are ever considered - no other file in the directory is touched.
+///
+/// Every step is deliberately fallible-and-ignored: a workbook the user still
+/// has open in Excel is locked on Windows, and silently skipping it is the
+/// desired behavior, not a failure worth surfacing. A directory that can't even
+/// be read just yields no sweep.
+fn sweep_stale_exports(dir: &Path) {
+    let now = std::time::SystemTime::now();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !(name.starts_with(EXPORT_PREFIX) && name.ends_with(".xlsx")) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > EXPORT_RETENTION);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Classify a SQLite declared column type as numeric-affinity or not, using
 /// the SQLite type-affinity rules (https://www.sqlite.org/datatype3.html section 3.1).
 fn is_numeric_affinity(declared: &str) -> bool {
@@ -135,11 +181,15 @@ pub fn export_to_xlsx(
     ws.add_table(0, 0, last_row, last_col, &table).str_err()?;
     ws.autofit();
 
+    // Reclaim old exports before writing the new one. Best-effort: a failure
+    // here must never block the export the user actually asked for.
+    sweep_stale_exports(dest_dir);
+
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let path = dest_dir.join(format!("dblitz_export_{}.xlsx", ts));
+    let path = dest_dir.join(format!("{EXPORT_PREFIX}{ts}.xlsx"));
     let path_str = path.to_string_lossy().to_string();
     wb.save(&path).str_err()?;
 
@@ -265,6 +315,40 @@ mod tests {
             unique.len(),
             deduped.len(),
             "deduped headers must all be unique"
+        );
+    }
+
+    #[test]
+    fn sweep_removes_only_stale_export_files() {
+        use std::time::{Duration, SystemTime};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let stale = dir.path().join("dblitz_export_111.xlsx");
+        let fresh = dir.path().join("dblitz_export_222.xlsx");
+        let wrong_ext = dir.path().join("dblitz_export_333.txt");
+        let unrelated = dir.path().join("quarterly_report.xlsx");
+        for p in [&stale, &fresh, &wrong_ext, &unrelated] {
+            std::fs::write(p, b"x").unwrap();
+        }
+
+        // Backdate only the stale export past the retention window. The others
+        // keep their just-now mtime.
+        let old = SystemTime::now() - EXPORT_RETENTION - Duration::from_secs(60);
+        let handle = std::fs::File::options().write(true).open(&stale).unwrap();
+        handle.set_modified(old).unwrap();
+        drop(handle);
+
+        sweep_stale_exports(dir.path());
+
+        assert!(!stale.exists(), "a stale dblitz export must be swept");
+        assert!(fresh.exists(), "a recent dblitz export must be kept");
+        assert!(
+            wrong_ext.exists(),
+            "a non-.xlsx file must never be swept, even with the export prefix"
+        );
+        assert!(
+            unrelated.exists(),
+            "a file without the dblitz_export_ prefix must never be swept"
         );
     }
 }

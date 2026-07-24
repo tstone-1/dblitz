@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createVirtualRows } from "./virtualRows.svelte";
-import type { QueryResult } from "$lib/store.svelte";
+import type { QueryResult } from "$lib/ipc";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -221,6 +221,70 @@ describe("createVirtualRows", () => {
     await rows.getVisibleRows(0, 0); // dedupes with that in-flight fetch and awaits it
     expect(loadCountRef()).toBe(loadsBeforeRefetch + 1);
     expect(rows.getVisibleRow(0)).toEqual(["0"]); // cache hit now
+  });
+
+  it("fetches chunks with the snapshot captured at beginReload, not live state", async () => {
+    // makeSnapshot reads a mutable `live` value; a background fetch kicked off
+    // after `live` has moved on must still query with the value pinned when the
+    // reload began (W2: a still-armed filter/sort debounce must not leak newer
+    // state into the current epoch's cache).
+    let live = 1;
+    const seen: number[] = [];
+    const rows = createVirtualRows<number>({
+      chunkSize: 2,
+      getSelectedTable: () => "items",
+      makeSnapshot: () => live,
+      loadChunk: async (offset, _limit, snapshot) => {
+        seen.push(snapshot);
+        return { columns: ["id"], rows: [["a"], ["b"]], total_rows: 4, offset };
+      },
+      cancelQueries: async () => {},
+      getVisibleColumns: () => ["id"],
+      getColumnIndex: () => 0,
+      hasColumns: () => true,
+      setColumns: () => {},
+      setTotalRows: () => {},
+      setError: () => {},
+    });
+
+    const reload = await rows.beginReload();
+    expect(reload).not.toBeNull();
+    expect(reload?.snapshot).toBe(1);
+
+    live = 2; // component state moves on AFTER the reload began
+    expect(rows.getVisibleRow(2)).toBeNull(); // chunk 1 miss -> background fetch
+    await loadsSettled();
+
+    expect(seen).toContain(1);
+    expect(seen).not.toContain(2);
+  });
+
+  it("discards a chunk fetched under the old epoch once a newer reload begins", async () => {
+    const pending = deferred<QueryResult>();
+    let live = 1;
+    const rows = createVirtualRows<number>({
+      chunkSize: 2,
+      getSelectedTable: () => "items",
+      makeSnapshot: () => live,
+      loadChunk: () => pending.promise,
+      cancelQueries: async () => {},
+      getVisibleColumns: () => ["id"],
+      getColumnIndex: () => 0,
+      hasColumns: () => true,
+      setColumns: () => {},
+      setTotalRows: () => {},
+      setError: () => {},
+    });
+
+    await rows.beginReload(); // epoch 1, snapshot 1
+    expect(rows.getVisibleRow(0)).toBeNull(); // kicks a fetch under epoch 1
+    live = 2;
+    await rows.beginReload(); // epoch 2 invalidates the epoch-1 fetch
+
+    pending.resolve({ columns: ["id"], rows: [["1"], ["2"]], total_rows: 2, offset: 0 });
+    await loadsSettled();
+
+    expect(rows.getVisibleRow(0)).toBeNull(); // stale epoch-1 result was dropped
   });
 
   it("reset() clears the cache, drops pending loads, and invalidates in-flight chunks", async () => {

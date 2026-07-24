@@ -1,10 +1,14 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import {
+    executeSql as executeSqlCmd,
+    cancelQueries,
+    exportToXlsx,
+    type SqlResult,
+  } from "$lib/ipc";
   import {
     appState,
     getTableConfig,
     persistSqlHistory,
-    type SqlResult,
   } from "$lib/store.svelte";
   import DataGrid from "./DataGrid.svelte";
   import type { SelectionData } from "./selectionData";
@@ -37,14 +41,36 @@
       : {},
   );
 
+  // Clear results on a database-session change (dbOpenGeneration bumps on every
+  // successful open, same-path reopen included). Without this the SQL tab keeps
+  // showing the previous database's rows under the new DB's context, and
+  // resultColumnColors re-resolves the stale executedSql against the new DB's
+  // tables. The typed `sql` text is deliberately KEPT -- re-running the same
+  // query against the just-opened database is a natural next step; only the
+  // executed result and the query it was resolved against are dropped.
+  let prevDbGen = 0;
+  $effect(() => {
+    const gen = appState.dbOpenGeneration;
+    if (gen !== prevDbGen) {
+      prevDbGen = gen;
+      result = null;
+      executedSql = "";
+    }
+  });
+
   async function executeSql() {
+    // Re-entrancy guard: the CodeMirror Ctrl+Enter keymap calls onexecute
+    // unconditionally, so without this a second Ctrl+Enter (or Enter while the
+    // button is disabled) would fire a concurrent invoke and a duplicate
+    // history entry. Ctrl+Enter while running is simply ignored (not a cancel).
+    if (running) return;
     const trimmed = sql.trim();
     if (!trimmed) return;
 
     running = true;
     result = null;
     try {
-      result = await invoke<SqlResult>("execute_sql", { sql: trimmed });
+      result = await executeSqlCmd(trimmed);
       executedSql = trimmed;
 
       appState.sqlHistory = [
@@ -66,6 +92,18 @@
       };
     } finally {
       running = false;
+    }
+  }
+
+  async function cancelExecution() {
+    // The backend cancel_queries command flips the cancellation token for the
+    // in-flight statement; execute_sql then returns whatever rows it had
+    // fetched so far (partial results this component already renders). `running`
+    // clears in executeSql's finally when that resolves.
+    try {
+      await cancelQueries();
+    } catch (e) {
+      appState.error = String(e);
     }
   }
 
@@ -98,7 +136,7 @@
       searchFrom = idx + 1;
       return types[idx] ?? "";
     });
-    await invoke("export_to_xlsx", {
+    await exportToXlsx({
       headers: data.headers,
       rows: data.rows,
       columnTypes,
@@ -119,9 +157,15 @@
         >
           History ({appState.sqlHistory.length})
         </button>
-        <button onclick={executeSql} class="run-btn" disabled={running || !sql.trim()}>
-          {running ? "Running..." : "Execute"}
-        </button>
+        {#if running}
+          <button onclick={cancelExecution} class="run-btn cancel-btn">
+            Cancel
+          </button>
+        {:else}
+          <button onclick={executeSql} class="run-btn" disabled={!sql.trim()}>
+            Execute
+          </button>
+        {/if}
       </div>
       <SqlEditor
         bind:value={sql}
@@ -254,6 +298,15 @@
   .run-btn:disabled {
     opacity: 0.5;
     cursor: default;
+  }
+
+  .cancel-btn {
+    background: var(--error);
+  }
+
+  .cancel-btn:hover {
+    background: var(--error);
+    opacity: 0.85;
   }
 
   .history-panel {

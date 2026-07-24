@@ -5,6 +5,35 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.7.5] - 2026-07-24
+
+Fixes and refactors from a full-codebase deep review (0 blockers, 12 warnings, 10 nitpicks — all addressed).
+
+### Security
+- **Ad-hoc SQL can no longer change connection behavior through PRAGMAs.** Configuration PRAGMAs count as "read-only" statements in SQLite, so the Execute SQL tab could run e.g. `PRAGMA case_sensitive_like=1` or `PRAGMA reverse_unordered_selects=1` on the shared connection — silently making Browse Data filters case-sensitive or letting unsorted pages duplicate/skip rows until the file was reopened. The read-only authorizer now allows only harmless introspection PRAGMAs (`table_info`, `index_list`, …) and denies everything else; the app's own open-time tuning runs before the authorizer is installed, so it can neither be replayed nor undone from the SQL tab.
+
+### Added
+- **The Execute SQL tab has a Cancel button.** While a statement is running, Execute becomes Cancel and stops the query with SQLite's engine-level interrupt (the machinery added in 26.7.3, previously reachable only via Browse Data side effects). Rows fetched before the cancel are shown, as with any mid-run error.
+
+### Fixed
+- **Execute SQL results no longer survive a database switch.** Switching files reset Browse Data and Structure (26.7.3) but left the SQL tab showing the previous database's result rows under the new database's context. The result pane now clears on any switch; the typed SQL text is kept.
+- **Reopening the already-open file now works as a full refresh.** Picking the open file again via Open/recents reopened the backend connection but left the frontend's cached rows and schema untouched, so external changes never appeared. Every successful open now publishes a fresh session — rows, schema, and auto-select all reset, same path or not.
+- **Scrolling while a filter or sort change is pending can no longer mix states in the grid.** Chunk fetches triggered by scrolling read the *live* filter/sort state while the cache epoch only advanced when the debounced reload ran — so typing a filter and scrolling immediately (or sorting while a filter cell held a bare operator like `<`) could interleave old and new rows in one view. Fetches now use an immutable per-reload snapshot, and sorting always reloads (incomplete filter segments are ignored rather than blocking the reload).
+- **A cancelled table-index build no longer degrades that table permanently.** Interrupting the rowid-index build (switching tables, cancelling) cached the truncated index, silently forcing slow OFFSET paging for deep pages until the file was reopened — and a genuine mid-scan error (e.g. corruption) vanished. Errors now abort without caching and are logged.
+- **Closed a narrow race when opening a database.** The new connection was published before the old ordering caches were cleared, so a query already waiting on the connection lock could serve one page of stale rowids against the new file. Cache clear and connection swap now happen atomically.
+- **Ctrl+Enter can no longer double-run a statement.** The Execute button was disabled while running but the editor keybinding wasn't guarded; a second Ctrl+Enter queued a duplicate execution and history entry.
+- **Stale Excel exports are cleaned up.** `dblitz_export_*.xlsx` files older than 7 days are swept from the export folder on the next export instead of accumulating forever.
+
+### Changed
+- **The frontend↔backend boundary is now typed.** All 21 Tauri command call sites go through typed wrappers in a single module (`src/lib/ipc.ts`) that also owns the Rust-mirroring types, so a renamed command or field is a compile error instead of a runtime surprise.
+- **One shared context-menu component** replaces four hand-copied backdrop/positioning implementations across the grid and browse views, and the pin-menu labels come from one tested helper instead of two duplicated ternaries.
+- **DataGrid's API shrank from 24 props to 13** by grouping filtering, column operations, and pinning into cohesive optional objects — the static (SQL-results) mode contract is now explicit rather than implied by which of 21 optional props are omitted.
+- Internal cleanups with no user-visible change: per-database config persistence refactored behind a single `ConfigStore` (removing nine duplicated function pairs), `pinnedFilters` fully dependency-injected like its sibling modules, SQL error results built by one helper, the debug benchmark shares the real paging SQL instead of a drifting copy, dead code removed, and the frontend's reload/cancellation protocol is documented in one canonical place.
+- Tests: 19 added across both languages (frontend 98 → 111, backend 95 → 101), including the first direct tests for schema introspection and regression tests for every fix above.
+
+### Dependencies
+- Refreshed npm and Rust dependencies to latest compatible releases (`@sveltejs/kit` 2.70.1, `svelte` 5.56.7, `vite` 8.1.5, `tauri-plugin-dialog` 2.7.2, `tokio` 1.53.1, `thiserror` 2.0.19, and other patch/minor bumps). TypeScript remains on 6.x (SvelteKit peer range). CI workflow actions aligned at `checkout@v5`/`setup-node@v5`.
+
 ## [26.7.4] - 2026-07-13
 
 ### Fixed

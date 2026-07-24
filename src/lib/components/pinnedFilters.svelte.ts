@@ -2,14 +2,14 @@
  * Pinned filter state machine — opt-in persistence for column and global filters.
  *
  * Mirrors the extraction pattern of cellSelection.svelte.ts and dragReorder.svelte.ts:
- * a small factory that owns its derived state and exposes a tight API. The host
- * component (BrowseData.svelte) supplies getters/setters for the ephemeral filter
- * state it owns; this helper drives the persistence layer (read/write to the
- * appState.fileConfig.tables[t].pinned_* fields via store.svelte.ts).
+ * a small factory that owns its derived state and exposes a tight API. Every
+ * dependency is injected through PinnedFiltersDeps -- the host (BrowseData.svelte)
+ * supplies getters/setters for the ephemeral filter state it owns AND the config
+ * read/write pair (getConfig/updateConfig). This module imports nothing from the
+ * store, so it is unit-testable with plain fakes like its fully-injected siblings.
  */
 
-import { getTableConfig, updateTableConfig } from "$lib/store.svelte";
-import type { ColumnFilterValue } from "$lib/store.svelte";
+import type { ColumnFilterValue, ViewConfig } from "$lib/ipc";
 
 type PinState = "none" | "pinned" | "modified";
 
@@ -26,6 +26,10 @@ export interface PinnedFiltersDeps {
   setGlobalFilter: (v: string) => void;
   /** Schedule a debounced data reload after a filter change. */
   triggerReload: () => void;
+  /** Read a table's persisted view config (read-only). Injected store.getTableConfig. */
+  getConfig: (tableName: string) => ViewConfig;
+  /** Mutate + persist a table's view config in one step. Injected store.updateTableConfig. */
+  updateConfig: (tableName: string, mutate: (cfg: ViewConfig) => void) => ViewConfig;
 }
 
 export function createPinnedFilters(deps: PinnedFiltersDeps) {
@@ -36,7 +40,7 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
   function pinStateOf(col: string): PinState {
     const selectedTable = deps.getSelectedTable();
     if (!selectedTable) return "none";
-    const pinned = getTableConfig(selectedTable).pinned_filters[col];
+    const pinned = deps.getConfig(selectedTable).pinned_filters[col];
     if (!pinned) return "none";
     const live = deps.getColumnFilters()[col];
     const liveVal = live?.value ?? "";
@@ -51,7 +55,7 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
     const out: Record<string, PinState> = {};
     const selectedTable = deps.getSelectedTable();
     if (!selectedTable) return out;
-    const pinned = getTableConfig(selectedTable).pinned_filters;
+    const pinned = deps.getConfig(selectedTable).pinned_filters;
     for (const col of Object.keys(pinned)) out[col] = pinStateOf(col);
     return out;
   });
@@ -59,7 +63,7 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
   const globalFilterPinState = $derived.by<PinState>(() => {
     const selectedTable = deps.getSelectedTable();
     if (!selectedTable) return "none";
-    const pinned = getTableConfig(selectedTable).pinned_global_filter;
+    const pinned = deps.getConfig(selectedTable).pinned_global_filter;
     if (pinned == null) return "none";
     return deps.getGlobalFilter() === pinned ? "pinned" : "modified";
   });
@@ -71,7 +75,7 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
     if (!selectedTable) return;
     const f = deps.getColumnFilters()[col];
     if (!f || f.value.trim() === "") return; // no-op for empty input
-    updateTableConfig(selectedTable, (cfg) => {
+    deps.updateConfig(selectedTable, (cfg) => {
       cfg.pinned_filters[col] = { value: f.value, is_regex: f.is_regex };
     });
   }
@@ -79,8 +83,8 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
   function unpinColumnFilter(col: string) {
     const selectedTable = deps.getSelectedTable();
     if (!selectedTable) return;
-    if (!(col in getTableConfig(selectedTable).pinned_filters)) return;
-    updateTableConfig(selectedTable, (cfg) => {
+    if (!(col in deps.getConfig(selectedTable).pinned_filters)) return;
+    deps.updateConfig(selectedTable, (cfg) => {
       delete cfg.pinned_filters[col];
     });
   }
@@ -88,7 +92,7 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
   function revertColumnFilter(col: string) {
     const selectedTable = deps.getSelectedTable();
     if (!selectedTable) return;
-    const pinned = getTableConfig(selectedTable).pinned_filters[col];
+    const pinned = deps.getConfig(selectedTable).pinned_filters[col];
     if (!pinned) return;
     const cf = deps.getColumnFilters();
     cf[col] = { value: pinned.value, is_regex: pinned.is_regex };
@@ -117,7 +121,7 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
     if (!selectedTable) return;
     const gf = deps.getGlobalFilter();
     if (gf.trim() === "") return;
-    updateTableConfig(selectedTable, (cfg) => {
+    deps.updateConfig(selectedTable, (cfg) => {
       cfg.pinned_global_filter = gf;
     });
   }
@@ -125,8 +129,8 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
   function unpinGlobalFilter() {
     const selectedTable = deps.getSelectedTable();
     if (!selectedTable) return;
-    if (getTableConfig(selectedTable).pinned_global_filter == null) return;
-    updateTableConfig(selectedTable, (cfg) => {
+    if (deps.getConfig(selectedTable).pinned_global_filter == null) return;
+    deps.updateConfig(selectedTable, (cfg) => {
       cfg.pinned_global_filter = null;
     });
   }
@@ -134,7 +138,7 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
   function revertGlobalFilter() {
     const selectedTable = deps.getSelectedTable();
     if (!selectedTable) return;
-    const pinned = getTableConfig(selectedTable).pinned_global_filter;
+    const pinned = deps.getConfig(selectedTable).pinned_global_filter;
     if (pinned == null) return;
     deps.setGlobalFilter(pinned);
     deps.triggerReload();
@@ -156,7 +160,7 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
   function resetFiltersToPinned() {
     const selectedTable = deps.getSelectedTable();
     if (!selectedTable) return;
-    const cfg = getTableConfig(selectedTable);
+    const cfg = deps.getConfig(selectedTable);
     deps.setColumnFilters(
       Object.fromEntries(
         Object.entries(cfg.pinned_filters).map(([col, pf]) => [
@@ -175,7 +179,7 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
     if (!selectedTable) return;
     deps.setColumnFilters({});
     deps.setGlobalFilter("");
-    updateTableConfig(selectedTable, (cfg) => {
+    deps.updateConfig(selectedTable, (cfg) => {
       cfg.pinned_filters = {};
       cfg.pinned_global_filter = null;
     });

@@ -2,7 +2,7 @@
   import "../app.css";
   import { dev } from "$app/environment";
   import { onMount } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  import { getInitialFile, toggleDevtools } from "$lib/ipc";
   import { appState, initTheme, openDatabase, closeDatabase } from "$lib/store.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import DatabaseStructure from "$lib/components/DatabaseStructure.svelte";
@@ -19,14 +19,14 @@
     initTheme();
 
     // Open file passed via CLI args (file association / jump list launch)
-    invoke<string | null>("get_initial_file").then((path) => {
+    getInitialFile().then((path) => {
       if (path) handleOpenFile(path);
     });
 
     function onKeyDown(e: KeyboardEvent) {
       if (dev && e.key === "F12") {
         e.preventDefault();
-        invoke("toggle_devtools");
+        toggleDevtools();
       }
     }
     document.addEventListener("keydown", onKeyDown);

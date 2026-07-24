@@ -60,6 +60,28 @@ pub(super) fn rowid_alias(conn: &Connection, quoted_table: &str) -> Option<&'sta
     })
 }
 
+/// SQL for one rowid-index chunk. Two forms: a bounded `>= start AND < end`
+/// range when a following boundary exists, or an open `>= start ... LIMIT n`
+/// tail for the final chunk. `has_next_boundary` selects the form; the two
+/// placeholders bind (start_rid, end_rid) or (start_rid, limit) accordingly.
+/// Shared by the live query path and the debug benchmark so the generated SQL
+/// can't drift between the thing measured and the thing shipped.
+pub(super) fn rowid_page_sql(quoted_table: &str, alias: &str, has_next_boundary: bool) -> String {
+    if has_next_boundary {
+        format!(
+            "SELECT * FROM {table} WHERE {alias} >= ? AND {alias} < ? ORDER BY {alias} ASC",
+            table = quoted_table,
+            alias = alias
+        )
+    } else {
+        format!(
+            "SELECT * FROM {table} WHERE {alias} >= ? ORDER BY {alias} ASC LIMIT ?",
+            table = quoted_table,
+            alias = alias
+        )
+    }
+}
+
 /// Build a sparse rowid index for a table: sample the rowid at every chunk_size boundary.
 /// This turns OFFSET-based queries into O(log n) rowid seeks.
 pub(super) fn build_rowid_index(
@@ -89,16 +111,38 @@ pub(super) fn build_rowid_index(
 
     let mut boundaries: Vec<i64> = Vec::with_capacity((total_rows / chunk_size + 1) as usize);
     let mut idx = 0i64;
-    while let Ok(Some(row)) = rows_iter.next() {
-        if state.query_generation.load(Ordering::Relaxed) != generation {
-            return None;
-        }
-        if idx % chunk_size == 0 {
-            if let Ok(rid) = row.get::<_, i64>(0) {
-                boundaries.push(rid);
+    // Match `next()` explicitly rather than `while let Ok(Some(..))`: the latter
+    // treats an `Err` (SQLITE_INTERRUPT from a cancel, SQLITE_CORRUPT mid-scan)
+    // identically to end-of-rows, so it would fall out of the loop and cache a
+    // *truncated* boundary list. That poisons the per-table cache - every later
+    // deep page then seeks against a short index and silently mis-pages until
+    // reopen - while the underlying error vanishes. Returning `None` on `Err`
+    // caches nothing, so the caller retries and rebuilds a full index next time.
+    // Keeping the arm explicit also keeps the generation check below reachable,
+    // which the `while let` swallowed alongside errors.
+    loop {
+        match rows_iter.next() {
+            Ok(Some(row)) => {
+                if state.query_generation.load(Ordering::Relaxed) != generation {
+                    return None;
+                }
+                if idx % chunk_size == 0 {
+                    if let Ok(rid) = row.get::<_, i64>(0) {
+                        boundaries.push(rid);
+                    }
+                }
+                idx += 1;
+            }
+            Ok(None) => break,
+            Err(e) => {
+                tracing::warn!(
+                    table = %quoted_table,
+                    error = %e,
+                    "rowid index build failed mid-scan; not caching a truncated index"
+                );
+                return None;
             }
         }
-        idx += 1;
     }
 
     Some(RowidIndex {
@@ -203,27 +247,19 @@ fn query_with_rowid_index(
     }
 
     let start_rid = idx.boundaries[chunk];
-    let (sql, query_params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) =
-        if chunk + 1 < idx.boundaries.len() {
-            let end_rid = idx.boundaries[chunk + 1];
-            (
-                format!(
-                    "SELECT * FROM {table} WHERE {alias} >= ? AND {alias} < ? ORDER BY {alias} ASC",
-                    table = quoted_table,
-                    alias = alias
-                ),
-                vec![Box::new(start_rid), Box::new(end_rid)],
-            )
-        } else {
-            (
-                format!(
-                    "SELECT * FROM {table} WHERE {alias} >= ? ORDER BY {alias} ASC LIMIT ?",
-                    table = quoted_table,
-                    alias = alias
-                ),
-                vec![Box::new(start_rid), Box::new(limit)],
-            )
-        };
+    let has_next_boundary = chunk + 1 < idx.boundaries.len();
+    let (sql, query_params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if has_next_boundary {
+        let end_rid = idx.boundaries[chunk + 1];
+        (
+            rowid_page_sql(quoted_table, alias, true),
+            vec![Box::new(start_rid), Box::new(end_rid)],
+        )
+    } else {
+        (
+            rowid_page_sql(quoted_table, alias, false),
+            vec![Box::new(start_rid), Box::new(limit)],
+        )
+    };
 
     drop(indexes);
 

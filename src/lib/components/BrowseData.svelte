@@ -1,20 +1,25 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
   import { tick } from "svelte";
+  import {
+    queryTable,
+    cancelQueries,
+    countRows,
+    exportToXlsx,
+    type ColumnFilter,
+    type ColumnFilterValue,
+    type QueryResult,
+  } from "$lib/ipc";
   import {
     appState,
     getTableConfig,
     ensureTableConfig,
     updateTableConfig,
-    type ColumnFilter,
-    type ColumnFilterValue,
-    type QueryResult,
   } from "$lib/store.svelte";
   import DataGrid from "./DataGrid.svelte";
   import ColumnSettings from "./ColumnSettings.svelte";
   import ColumnFinder from "./ColumnFinder.svelte";
   import { createPinnedFilters } from "./pinnedFilters.svelte";
-  import { createAutoSelectFirstTable, didDbPathChange } from "./autoSelectFirstTable.svelte";
+  import { createAutoSelectFirstTable } from "./autoSelectFirstTable.svelte";
   import { createVirtualRows } from "./virtualRows.svelte";
   import {
     buildActiveFilters,
@@ -23,9 +28,11 @@
     visibleColumns,
   } from "./columnView";
   import { computeAutoWidths } from "./columnWidths";
-  import { INCOMPLETE_OPS } from "./filterOperators";
+  import { hasIncompleteOperator, stripIncompleteSegments } from "./filterOperators";
   import type { SelectionData } from "./selectionData";
   import { pinGlyphPath } from "./pinGlyph";
+  import ContextMenu from "./ContextMenu.svelte";
+  import { pinToggleLabel } from "./pinLabel";
 
   const CHUNK_SIZE = 500;
   const FILTER_DEBOUNCE_MS = 500;
@@ -65,25 +72,30 @@
   // cache alive across a Toolbar-driven openDatabase() call (Open DB /
   // recents), so switching to a different database left the grid showing
   // (and querying) the PREVIOUS database's table. Reset every per-database
-  // local state whenever appState.dbPath actually changes.
+  // local state whenever a new backend session is published.
   //
-  // `prevDbPath` is a plain `let`, not `$state` -- it's only ever read and
-  // written from inside this effect, so wrapping it reactively would just
-  // be redundant bookkeeping (and risks the effect depending on its own
-  // write). `didDbPathChange` is the pure, independently-tested decision:
-  // it fires for null -> A, A -> B, and A -> null, but not for A -> A.
+  // Gated on appState.dbOpenGeneration, not dbPath: reopening the ALREADY-open
+  // file reopens the backend connection (clearing its caches) without changing
+  // dbPath, so a dbPath-only gate would keep serving the previous connection's
+  // stale rows. The generation bumps on every successful open, same-path
+  // included; the close-to-null case is still covered because checkAutoSelect()
+  // fires onReset (-> resetForNewDatabase) whenever dbPath becomes null.
+  //
+  // `prevDbGen` is a plain `let`, not `$state` -- it's only ever read and
+  // written from inside this effect, so wrapping it reactively would just be
+  // redundant bookkeeping (and risks the effect depending on its own write).
   //
   // The reset and the single-table auto-select deliberately live in ONE
   // effect (not two separate ones) so their ordering is guaranteed rather
   // than left to Svelte's effect-scheduling order: resetForNewDatabase()
-  // always runs BEFORE checkAutoSelect() for the same dbPath change, so a
-  // single-table DB's auto-selected table is never clobbered by the reset
-  // that opening it triggered.
-  let prevDbPath: string | null = null;
+  // always runs BEFORE checkAutoSelect() for the same open, so a single-table
+  // DB's auto-selected table is never clobbered by the reset that opening it
+  // triggered.
+  let prevDbGen = 0;
   $effect(() => {
-    const path = appState.dbPath;
-    if (didDbPathChange(prevDbPath, path)) {
-      prevDbPath = path;
+    const gen = appState.dbOpenGeneration;
+    if (gen !== prevDbGen) {
+      prevDbGen = gen;
       resetForNewDatabase();
     }
     checkAutoSelect();
@@ -103,8 +115,40 @@
 
   function buildFilters(): ColumnFilter[] {
     // Drop filters for columns that no longer exist in the schema
-    // (e.g. a pinned filter on a column that was renamed externally).
-    return buildActiveFilters(columns, columnFilters);
+    // (e.g. a pinned filter on a column that was renamed externally), and
+    // strip bare half-typed operator segments (">" with no operand) from
+    // non-regex values so a reload triggered by a discrete action (a sort
+    // click) queries with the still-valid segments instead of a broken filter.
+    const cleaned: Record<string, ColumnFilterValue> = {};
+    for (const [col, f] of Object.entries(columnFilters)) {
+      cleaned[col] = f.is_regex
+        ? f
+        : { ...f, value: stripIncompleteSegments(f.value) };
+    }
+    return buildActiveFilters(columns, cleaned);
+  }
+
+  // An immutable snapshot of the query state (table + filters + sort) taken at
+  // reload time. virtualRows pins it per-epoch and feeds it back to loadChunk
+  // so a background chunk fetch queries the epoch's state, never whatever the
+  // component holds by the time the fetch fires (see W2 / the protocol comment
+  // in virtualRows.svelte.ts).
+  interface QuerySnapshot {
+    table: string | null;
+    filters: ColumnFilter[];
+    globalFilter: string;
+    sortColumn: string | null;
+    sortAsc: boolean;
+  }
+
+  function makeSnapshot(): QuerySnapshot {
+    return {
+      table: selectedTable,
+      filters: buildFilters(),
+      globalFilter: globalFilter.trim(),
+      sortColumn,
+      sortAsc,
+    };
   }
 
   // Precomputed column name -> index for O(1) lookups
@@ -113,24 +157,25 @@
   function loadChunk(
     offset: number,
     limit: number,
-    filters: ColumnFilter[] = buildFilters(),
+    snapshot: QuerySnapshot,
   ): Promise<QueryResult> {
-    return invoke<QueryResult>("query_table", {
-      table: selectedTable,
+    return queryTable({
+      table: snapshot.table,
       offset,
       limit,
-      filters,
-      globalFilter: globalFilter.trim(),
-      sortColumn,
-      sortAsc,
+      filters: snapshot.filters,
+      globalFilter: snapshot.globalFilter,
+      sortColumn: snapshot.sortColumn,
+      sortAsc: snapshot.sortAsc,
     });
   }
 
-  const virtualRows = createVirtualRows({
+  const virtualRows = createVirtualRows<QuerySnapshot>({
     chunkSize: CHUNK_SIZE,
     getSelectedTable: () => selectedTable,
+    makeSnapshot,
     loadChunk,
-    cancelQueries: () => invoke("cancel_queries"),
+    cancelQueries: () => cancelQueries(),
     getVisibleColumns: () => visCols(),
     getColumnIndex: (col) => colIndexMap.get(col),
     hasColumns: () => columns.length > 0,
@@ -205,11 +250,13 @@
   async function reloadData() {
     if (!selectedTable) return;
     loading = true;
-    const myEpoch = await virtualRows.beginReload();
-    if (myEpoch === null) return;
+    const reload = await virtualRows.beginReload();
+    if (reload === null) return;
+    const { epoch: myEpoch, snapshot } = reload;
     try {
-      const filters = buildFilters();
-      const result = await loadChunk(0, CHUNK_SIZE, filters);
+      // Use the epoch's pinned snapshot for the first chunk AND the row count
+      // so both agree with the background chunk fetches virtualRows will run.
+      const result = await loadChunk(0, CHUNK_SIZE, snapshot);
       if (!virtualRows.applyFirstChunk(myEpoch, result)) return;
 
       if (result.total_rows !== null) {
@@ -218,8 +265,8 @@
       } else {
         totalRows = result.rows.length < CHUNK_SIZE ? result.rows.length : CHUNK_SIZE;
         countPending = true;
-        invoke<number>("count_rows", {
-          table: selectedTable, filters, globalFilter: globalFilter.trim(),
+        countRows({
+          table: snapshot.table, filters: snapshot.filters, globalFilter: snapshot.globalFilter,
         }).then((count) => {
           if (virtualRows.isCurrent(myEpoch)) {
             totalRows = count;
@@ -247,14 +294,10 @@
   let lastFilterState = "";
 
   function hasIncompleteFilter(): boolean {
-    return Object.values(columnFilters).some((f) => {
-      if (f.is_regex || f.value.trim() === "") return false;
-      // Check every semicolon-separated segment for incomplete operator
-      return f.value.split(';').some((seg) => {
-        const trimmed = seg.trim();
-        return trimmed !== "" && INCOMPLETE_OPS.test(trimmed);
-      });
-    });
+    // Segment/regex logic lives in filterOperators.ts (pure + tested).
+    return Object.values(columnFilters).some((f) =>
+      hasIncompleteOperator(f.value, f.is_regex),
+    );
   }
 
   function debouncedReload() {
@@ -277,7 +320,9 @@
         cfg.sort_asc = sortAsc;
       });
     }
-    if (hasIncompleteFilter()) return;
+    // Always reload after a sort click. buildFilters() strips any half-typed
+    // operator segment, so a bare operator in a filter cell can't leave the
+    // grid persistently ordered one way while the header shows the other.
     reloadData();
   }
 
@@ -338,7 +383,7 @@
     const types = data.headers.map((h) =>
       selectedTable ? (appState.tableColumnTypes[selectedTable]?.[h] ?? "") : "",
     );
-    await invoke("export_to_xlsx", {
+    await exportToXlsx({
       headers: data.headers,
       rows: data.rows,
       columnTypes: types,
@@ -362,10 +407,11 @@
     if (columnFilters[col]?.value.trim()) debouncedReload();
   }
 
-  // Pinned filter state machine — extracted helper.
-  // The helper owns the persistence layer (read/write to appState.fileConfig)
-  // and the global-filter pin context menu state. It depends on getters/setters
-  // for the ephemeral filter state owned by this component.
+  // Pinned filter state machine — extracted helper. Fully injected: this
+  // component supplies getters/setters for the ephemeral filter state it owns
+  // AND the config read/write pair (getConfig/updateConfig), so the helper
+  // imports nothing from the store itself. It owns the global-filter pin
+  // context menu state.
   const pinned = createPinnedFilters({
     getSelectedTable: () => selectedTable,
     getColumnFilters: () => columnFilters,
@@ -373,6 +419,8 @@
     getGlobalFilter: () => globalFilter,
     setGlobalFilter: (v) => { globalFilter = v; },
     triggerReload: () => debouncedReload(),
+    getConfig: getTableConfig,
+    updateConfig: updateTableConfig,
   });
 
   let showFilterHelp = $state(false);
@@ -570,24 +618,30 @@
             getRow: virtualRows.getVisibleRow,
             getRows: virtualRows.getVisibleRows,
           }}
+          columnColors={visColColors}
           sortColumn={sortColumn}
           sortAsc={sortAsc}
           onSort={handleSort}
-          columnColors={visColColors}
-          columnFilters={columnFilters}
-          onFilterInput={handleFilterInput}
-          onToggleRegex={toggleRegex}
-          onHideColumn={toggleColumnHidden}
-          onSetColumnColor={setColumnColor}
-          onReorderColumn={reorderColumns}
-          colorPresets={colorPresets()}
-          pinStates={pinned.pinStates}
-          onTogglePinFilter={pinned.togglePinColumnFilter}
-          onRevertFilter={pinned.revertColumnFilter}
-          onClearFilter={pinned.clearColumnFilter}
-          initialColumnWidths={selectedTable ? (getTableConfig(selectedTable).column_widths ?? {}) : {}}
-          onResizeColumn={setColumnWidth}
-          onResetColumnWidths={resetColumnWidths}
+          filtering={{
+            columnFilters,
+            onFilterInput: handleFilterInput,
+            onToggleRegex: toggleRegex,
+          }}
+          columnOps={{
+            onHideColumn: toggleColumnHidden,
+            onSetColumnColor: setColumnColor,
+            onReorderColumn: reorderColumns,
+            colorPresets: colorPresets(),
+            initialColumnWidths: selectedTable ? (getTableConfig(selectedTable).column_widths ?? {}) : {},
+            onResizeColumn: setColumnWidth,
+            onResetColumnWidths: resetColumnWidths,
+          }}
+          pinning={{
+            pinStates: pinned.pinStates,
+            onTogglePinFilter: pinned.togglePinColumnFilter,
+            onRevertFilter: pinned.revertColumnFilter,
+            onClearFilter: pinned.clearColumnFilter,
+          }}
           onExport={exportSelection}
           onNotice={(message) => (appState.notice = message)}
           onError={(message) => (appState.error = message)}
@@ -613,19 +667,16 @@
 {/if}
 
 {#if pinned.globalPinCtx}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div class="ctx-backdrop" onclick={pinned.closeGlobalPinCtx} oncontextmenu={(e) => { e.preventDefault(); pinned.closeGlobalPinCtx(); }}></div>
-  <div class="ctx-menu" style="left: {pinned.globalPinCtx.x}px; top: {pinned.globalPinCtx.y}px;">
+  <ContextMenu x={pinned.globalPinCtx.x} y={pinned.globalPinCtx.y} onClose={pinned.closeGlobalPinCtx}>
     <button class="ctx-item" onclick={() => { pinned.toggleGlobalFilterPin(); pinned.closeGlobalPinCtx(); }}>
-      {pinned.globalFilterPinState === "pinned" ? "Unpin global filter" : pinned.globalFilterPinState === "modified" ? "Re-pin global filter (save current value)" : "Pin global filter (save as default)"}
+      {pinToggleLabel(pinned.globalFilterPinState, "global filter")}
     </button>
     {#if pinned.globalFilterPinState === "modified"}
       <button class="ctx-item" onclick={() => { pinned.revertGlobalFilter(); pinned.closeGlobalPinCtx(); }}>Revert to pinned value</button>
     {/if}
     <div class="ctx-sep"></div>
     <button class="ctx-item" onclick={() => { pinned.clearGlobalFilter(); pinned.closeGlobalPinCtx(); }}>Clear global filter</button>
-  </div>
+  </ContextMenu>
 {/if}
 
 <style>

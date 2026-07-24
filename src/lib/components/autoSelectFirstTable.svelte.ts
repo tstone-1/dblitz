@@ -37,39 +37,22 @@ export function createAutoSelectFirstTable(
   onSelect: (tableName: string) => void,
   onReset?: () => void,
 ): () => void {
-  let autoSelectedDb: string | null = null;
+  // Keyed on dbOpenGeneration, NOT dbPath: reopening the already-open file
+  // (Toolbar/recents) must re-auto-select the lone table after the reset that
+  // reopen triggers, and dbPath doesn't change in that case. 0 is the "no db
+  // opened yet" sentinel matching appState.dbOpenGeneration's initial value.
+  let autoSelectedGen = 0;
 
   return function check() {
-    const path = appState.dbPath;
-    if (!path) {
-      autoSelectedDb = null;
+    if (!appState.dbPath) {
+      autoSelectedGen = 0;
       onReset?.();
       return;
     }
-    if (appState.tables.length === 1 && autoSelectedDb !== path) {
-      autoSelectedDb = path;
+    const gen = appState.dbOpenGeneration;
+    if (appState.tables.length === 1 && autoSelectedGen !== gen) {
+      autoSelectedGen = gen;
       onSelect(appState.tables[0].name);
     }
   };
-}
-
-/**
- * Pure decision helper for the "did the open database actually change?"
- * question that gates a per-database state reset (BrowseData used to
- * keep `selectedTable`/`columns`/`totalRows`/the row cache alive across a
- * Toolbar-driven `openDatabase()` call, so switching files left the grid
- * showing the previous database's rows). Extracted as a standalone pure
- * function - rather than baked into an effect - so the "open A -> open B
- * fires a reset, reopening the same path does not" contract is unit
- * testable without a component harness.
- *
- * A caller tracks `prevPath` itself (a plain, non-reactive `let`, mirroring
- * `autoSelectedDb` above) and calls this on every reactive check; a `true`
- * result means "reset now, and remember `nextPath` as the new baseline".
- */
-export function didDbPathChange(
-  prevPath: string | null,
-  nextPath: string | null,
-): boolean {
-  return prevPath !== nextPath;
 }

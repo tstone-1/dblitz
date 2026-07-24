@@ -13,6 +13,8 @@
   } from "./gridGeometry";
   import { shouldHandleWindowCopy } from "./copyGate";
   import { pinGlyphPath } from "./pinGlyph";
+  import ContextMenu from "./ContextMenu.svelte";
+  import { pinToggleLabel } from "./pinLabel";
 
   const ROW_HEIGHT = 26;
   const HEADER_HEIGHT = 26;
@@ -29,72 +31,98 @@
         getRows: (start: number, end: number) => Promise<(string | null)[][]>;
       };
 
-  // Props
-  interface Props {
-    columns: string[];
-    mode: GridMode;
-    // Optional: sorting
-    sortColumn?: string | null;
-    sortAsc?: boolean;
-    onSort?: (col: string) => void;
-    // Optional: column colors
-    columnColors?: Record<string, string>;
-    // Optional: per-column filters
+  // Props. The grid runs in two modes: mode.kind === "virtual" (BrowseData,
+  // which wires up all three optional groups below) and "static" (ExecuteSQL,
+  // which wires up none of them). A group's presence/absence therefore *is* the
+  // virtual-vs-static feature contract, made explicit instead of implied by a
+  // flat wall of 20+ optional props:
+  //   - filtering: the column-filter row (input + regex toggle).
+  //   - columnOps: hide / color / reorder / resize / auto-fit management.
+  //   - pinning:   pinned (persistent) filter affordances.
+  // Static mode supports none of these; it uses only the core props below
+  // (columns, mode, columnColors, sort*, onExport/onNotice/onError, locateRequest).
+
+  /** Column-filter row: live filter values + edit callbacks. */
+  interface FilteringProps {
     columnFilters?: Record<string, { value: string; is_regex: boolean }>;
     onFilterInput?: (col: string, value: string) => void;
     onToggleRegex?: (col: string) => void;
-    // Optional: column management
+  }
+  /** Column management: hide/color/reorder plus persisted widths (px). */
+  interface ColumnOpsProps {
     onHideColumn?: (col: string) => void;
     onSetColumnColor?: (col: string, color: string) => void;
     onReorderColumn?: (fromCol: string, toCol: string) => void;
     colorPresets?: string[];
-    // Optional: pinned (persistent) filters
+    // Drives initial layout; emits back via `onResizeColumn` on drag-end.
+    initialColumnWidths?: Record<string, number>;
+    onResizeColumn?: (col: string, width: number) => void;
+    onResetColumnWidths?: () => void;
+  }
+  /** Pinned (persistent) filter state + its three toggle/revert/clear actions. */
+  interface PinningProps {
     pinStates?: Record<string, "none" | "pinned" | "modified">;
     onTogglePinFilter?: (col: string) => void;
     onRevertFilter?: (col: string) => void;
     onClearFilter?: (col: string) => void;
-    // Optional: persisted column widths (px). Drives initial layout; emits
-    // back via `onResizeColumn` once the user finishes a drag.
-    initialColumnWidths?: Record<string, number>;
-    onResizeColumn?: (col: string, width: number) => void;
-    // Optional: reset all column widths to auto-fit
-    onResetColumnWidths?: () => void;
-    // Optional: export selected cells. Owners provide the app-level backend
-    // call so this grid remains a presentational leaf.
+  }
+
+  interface Props {
+    columns: string[];
+    mode: GridMode;
+    // Core (both modes): column colors + sort state/callback.
+    columnColors?: Record<string, string>;
+    sortColumn?: string | null;
+    sortAsc?: boolean;
+    onSort?: (col: string) => void;
+    // Feature groups (virtual mode only; see the note above).
+    filtering?: FilteringProps;
+    columnOps?: ColumnOpsProps;
+    pinning?: PinningProps;
+    // Core (both modes): export selected cells + notice/error reporting. Owners
+    // provide the app-level backend call so this grid stays a presentational leaf.
     onExport?: (data: SelectionData) => Promise<void>;
     onNotice?: (message: string) => void;
     onError?: (message: string) => void;
-    // Optional: locate-column signal. Bumping `n` re-triggers the effect for
-    // the same column (e.g. user invokes Find on the same column twice).
+    // Locate-column signal. Bumping `n` re-triggers the effect for the same
+    // column (e.g. user invokes Find on the same column twice).
     locateRequest?: { col: string; n: number } | null;
   }
 
   let {
     columns,
     mode,
+    columnColors = {},
     sortColumn = null,
     sortAsc = true,
     onSort = undefined,
-    columnColors = {},
-    columnFilters = undefined,
-    onFilterInput = undefined,
-    onToggleRegex = undefined,
-    onHideColumn = undefined,
-    onSetColumnColor = undefined,
-    onReorderColumn = undefined,
-    colorPresets = undefined,
-    pinStates = undefined,
-    onTogglePinFilter = undefined,
-    onRevertFilter = undefined,
-    onClearFilter = undefined,
-    initialColumnWidths = undefined,
-    onResizeColumn = undefined,
-    onResetColumnWidths = undefined,
+    filtering = undefined,
+    columnOps = undefined,
+    pinning = undefined,
     onExport = undefined,
     onNotice = undefined,
     onError = undefined,
     locateRequest = null,
   }: Props = $props();
+
+  // Flatten the grouped props back to the local names the markup and logic
+  // below already use, so W10's regrouping is confined to the prop surface.
+  let columnFilters = $derived(filtering?.columnFilters);
+  let onFilterInput = $derived(filtering?.onFilterInput);
+  let onToggleRegex = $derived(filtering?.onToggleRegex);
+
+  let onHideColumn = $derived(columnOps?.onHideColumn);
+  let onSetColumnColor = $derived(columnOps?.onSetColumnColor);
+  let onReorderColumn = $derived(columnOps?.onReorderColumn);
+  let colorPresets = $derived(columnOps?.colorPresets);
+  let initialColumnWidths = $derived(columnOps?.initialColumnWidths);
+  let onResizeColumn = $derived(columnOps?.onResizeColumn);
+  let onResetColumnWidths = $derived(columnOps?.onResetColumnWidths);
+
+  let pinStates = $derived(pinning?.pinStates);
+  let onTogglePinFilter = $derived(pinning?.onTogglePinFilter);
+  let onRevertFilter = $derived(pinning?.onRevertFilter);
+  let onClearFilter = $derived(pinning?.onClearFilter);
 
   function pinStateOf(col: string): "none" | "pinned" | "modified" {
     return pinStates?.[col] ?? "none";
@@ -525,27 +553,21 @@
 {/if}
 
 {#if ctxMenu}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div class="ctx-backdrop" onclick={closeContextMenu} oncontextmenu={(e) => { e.preventDefault(); closeContextMenu(); }}></div>
-  <div class="ctx-menu" style="left: {ctxMenu.x}px; top: {ctxMenu.y}px;">
+  <ContextMenu x={ctxMenu.x} y={ctxMenu.y} onClose={closeContextMenu}>
     <button class="ctx-item" disabled={materializingSelection} onclick={() => copySelection(false)}>Copy</button>
     <button class="ctx-item" disabled={materializingSelection} onclick={() => copySelection(true)}>Copy with headers</button>
     <div class="ctx-sep"></div>
     {#if onExport}
       <button class="ctx-item" disabled={materializingSelection} onclick={exportSelection}>Open in Excel</button>
     {/if}
-  </div>
+  </ContextMenu>
 {/if}
 
 {#if pinCtx}
-  {@const ctxState = pinStateOf(pinCtx.col)}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div class="ctx-backdrop" onclick={closePinCtx} oncontextmenu={(e) => { e.preventDefault(); closePinCtx(); }}></div>
-  <div class="ctx-menu" style="left: {pinCtx.x}px; top: {pinCtx.y}px;">
+  <ContextMenu x={pinCtx.x} y={pinCtx.y} onClose={closePinCtx}>
+    {@const ctxState = pinStateOf(pinCtx.col)}
     <button class="ctx-item" onclick={() => { onTogglePinFilter?.(pinCtx!.col); closePinCtx(); }}>
-      {ctxState === "pinned" ? "Unpin filter" : ctxState === "modified" ? "Re-pin filter (save current value)" : "Pin filter (save as default)"}
+      {pinToggleLabel(ctxState, "filter")}
     </button>
     {#if ctxState === "modified" && onRevertFilter}
       <button class="ctx-item" onclick={() => { onRevertFilter!(pinCtx!.col); closePinCtx(); }}>Revert to pinned value</button>
@@ -554,14 +576,11 @@
       <div class="ctx-sep"></div>
       <button class="ctx-item" onclick={() => { onClearFilter!(pinCtx!.col); closePinCtx(); }}>Clear filter</button>
     {/if}
-  </div>
+  </ContextMenu>
 {/if}
 
 {#if headerCtx}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div class="ctx-backdrop" onclick={closeHeaderCtx} oncontextmenu={(e) => { e.preventDefault(); closeHeaderCtx(); }}></div>
-  <div class="ctx-menu" style="left: {headerCtx.x}px; top: {headerCtx.y}px;">
+  <ContextMenu x={headerCtx.x} y={headerCtx.y} onClose={closeHeaderCtx}>
     {#if onResetColumnWidths}
       <button class="ctx-item" onclick={() => { onResetColumnWidths!(); closeHeaderCtx(); }}>Auto-fit column widths</button>
     {/if}
@@ -580,7 +599,7 @@
         {/each}
       </div>
     {/if}
-  </div>
+  </ContextMenu>
 {/if}
 
 <style>

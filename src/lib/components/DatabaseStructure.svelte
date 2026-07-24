@@ -1,14 +1,19 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
-  import { appState, type ColumnInfo, type SchemaEntry } from "$lib/store.svelte";
-  import { createAutoSelectFirstTable, didDbPathChange } from "./autoSelectFirstTable.svelte";
+  import { getSchema, getColumns, type ColumnInfo, type SchemaEntry } from "$lib/ipc";
+  import { appState } from "$lib/store.svelte";
+  import { createAutoSelectFirstTable } from "./autoSelectFirstTable.svelte";
 
   let selectedTable = $state<string | null>(null);
   let columns = $state<ColumnInfo[]>([]);
   let schema = $state<SchemaEntry[]>([]);
   let schemaView = $state(false);
 
+  // Re-fetch the schema on every open, same-path reopen included. Reading
+  // dbOpenGeneration registers it as a dependency so reopening the already-open
+  // file (which reopens the backend connection) re-runs loadSchema instead of
+  // leaving the previous connection's schema on screen.
   $effect(() => {
+    appState.dbOpenGeneration;
     if (appState.dbPath) {
       loadSchema();
     }
@@ -23,16 +28,17 @@
   );
 
   // Same stale-state class as BrowseData: selectedTable/columns used to
-  // survive a direct A -> B database switch (the onReset above only fires on
-  // the close-to-null transition), leaving the previous database's table
-  // "selected" with its stale column list. Reset runs BEFORE checkAutoSelect
-  // in one effect so a single-table DB's auto-selection is never clobbered.
-  // `prevDbPath` is a plain `let` — only this effect reads/writes it.
-  let prevDbPath: string | null = null;
+  // survive a direct A -> B database switch (and a same-path reopen), leaving
+  // the previous database's table "selected" with its stale column list. Gated
+  // on dbOpenGeneration so a same-path reopen resets too; the close-to-null
+  // case is covered by checkAutoSelect's onReset. Reset runs BEFORE
+  // checkAutoSelect in one effect so a single-table DB's auto-selection is
+  // never clobbered. `prevDbGen` is a plain `let` — only this effect uses it.
+  let prevDbGen = 0;
   $effect(() => {
-    const path = appState.dbPath;
-    if (didDbPathChange(prevDbPath, path)) {
-      prevDbPath = path;
+    const gen = appState.dbOpenGeneration;
+    if (gen !== prevDbGen) {
+      prevDbGen = gen;
       resetForNewDatabase();
     }
     checkAutoSelect();
@@ -46,7 +52,7 @@
 
   async function loadSchema() {
     try {
-      schema = await invoke<SchemaEntry[]>("get_schema");
+      schema = await getSchema();
     } catch (e) {
       appState.error = String(e);
     }
@@ -55,7 +61,7 @@
   async function selectTable(name: string) {
     selectedTable = name;
     try {
-      columns = await invoke<ColumnInfo[]>("get_columns", { table: name });
+      columns = await getColumns(name);
     } catch (e) {
       appState.error = String(e);
     }
