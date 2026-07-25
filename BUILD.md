@@ -221,9 +221,9 @@ date.
 
 **Status: enabled 2026-07-25, ships from 26.7.6.** macOS release builds are
 signed with a Developer ID identity and notarized by Apple, so the `.dmg` opens
-and the app launches with no Gatekeeper bypass — replacing the tap cask's
-`postflight` quarantine strip, which only ever helped Homebrew users and did
-nothing for a direct `.dmg` download.
+and the app launches with no Gatekeeper bypass. This replaced the tap cask's
+`postflight` quarantine strip (removed 2026-07-25), which only ever helped
+Homebrew users and did nothing for a direct `.dmg` download.
 
 This is **independent of the updater's minisign key** — different key, different
 purpose, different failure mode. Apple's signature authenticates the bundle to
@@ -240,6 +240,7 @@ App Store Connect notarization key as `screenpick`:
 | Signing identity | `Developer ID Application: Timo Stein (NVX72G8SJ8)` |
 | Team ID | `NVX72G8SJ8`, G2 sub-CA, valid to 2031-07-26 |
 | Notarization Key ID | `T87S5KZQ4J` |
+| Certificate backup | `apple-developer-id-NVX72G8SJ8.p12` — team-scoped on purpose, since it signs both apps |
 
 That is the normal model, not a shortcut: a Developer ID Application certificate
 certifies a *team*, never an app — nothing in it names a bundle — and Apple caps
