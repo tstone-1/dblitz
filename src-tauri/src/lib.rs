@@ -1,5 +1,6 @@
 mod config;
 mod db;
+mod updates;
 
 use config::FileConfig;
 #[cfg(debug_assertions)]
@@ -10,8 +11,8 @@ use db::{
 };
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
-#[cfg(target_os = "macos")]
 use tracing::warn;
+use updates::UpdateStatus;
 
 /// Compute a 64-bit hash of the lowercased path for cross-process duplicate
 /// detection via Win32 window properties.
@@ -187,6 +188,27 @@ fn set_export_dir(dir: Option<String>) -> Result<(), String> {
 #[tauri::command]
 fn get_initial_file() -> Option<String> {
     std::env::args().nth(1)
+}
+
+/// This launch's version transition plus whether this install can replace
+/// itself. Resolved once during `setup` and handed out unchanged — see
+/// [`updates::UpdateStatus`] and the `setup` hook below for why it cannot be
+/// recomputed on demand.
+#[tauri::command]
+fn update_status(status: State<'_, UpdateStatus>) -> UpdateStatus {
+    status.inner().clone()
+}
+
+/// Whether the automatic post-launch update check is enabled.
+#[tauri::command(async)]
+fn get_check_for_updates_on_startup() -> bool {
+    config::get_check_for_updates_on_startup()
+}
+
+/// Persist the automatic-update-check opt-out.
+#[tauri::command(async)]
+fn set_check_for_updates_on_startup(enabled: bool) -> Result<(), String> {
+    config::set_check_for_updates_on_startup(enabled)
 }
 
 #[tauri::command(async)]
@@ -381,6 +403,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // The updater does its HTTP work in Rust (reqwest), not the webview, so
+        // the `connect-src` CSP in tauri.conf.json deliberately says nothing
+        // about GitHub — adding it there would be cargo-culting.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(db_state)
         .invoke_handler(tauri::generate_handler![
             close_database,
@@ -405,9 +432,34 @@ pub fn run() {
             clear_recent_files,
             get_export_dir,
             set_export_dir,
+            update_status,
+            get_check_for_updates_on_startup,
+            set_check_for_updates_on_startup,
         ])
         .setup(|app| {
             update_window_title(app.handle(), None);
+
+            // Resolve the version transition once, here, and stash it as app
+            // state. `record_run_version` is destructive by design: it returns
+            // the previous version and immediately overwrites it, so the
+            // "did we just update?" answer only exists at this moment.
+            let current_version = app.package_info().version.to_string();
+            let previous_version =
+                config::record_run_version(&current_version).unwrap_or_else(|e| {
+                    // A failed write is not worth blocking startup over. The
+                    // only consequence is the "updated to vX" notice appearing
+                    // again on the next launch.
+                    warn!(error = %e, "Failed to record run version");
+                    None
+                });
+            app.manage(UpdateStatus::new(
+                previous_version,
+                current_version,
+                cfg!(target_os = "linux"),
+                // AppImage exports this; a .deb/.rpm install does not, and the
+                // Tauri updater cannot replace those in place.
+                std::env::var("APPIMAGE").ok().as_deref(),
+            ));
             #[cfg(debug_assertions)]
             if let Some(window) = app.get_webview_window("main") {
                 window.open_devtools();

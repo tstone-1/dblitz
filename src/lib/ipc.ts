@@ -98,6 +98,26 @@ export interface FileConfig {
   label: string | null;
 }
 
+/**
+ * Mirrors the Rust `UpdateStatus` (`src-tauri/src/updates.rs`), which is
+ * `#[serde(rename_all = "camelCase")]` — unlike the DTOs above, whose fields
+ * keep their Rust snake_case names.
+ */
+export interface UpdateStatus {
+  /** Build that ran last, or null on a first run. */
+  previousVersion: string | null;
+  /** Build running now. */
+  currentVersion: string;
+  /** True only when a *different* version ran before this one. */
+  updated: boolean;
+  /**
+   * False for a Linux `.deb`/`.rpm` install: the Tauri updater can only replace
+   * an AppImage. The UI still reports an available version but must not offer
+   * to install it.
+   */
+  selfUpdateSupported: boolean;
+}
+
 // ---- Command argument shapes ---------------------------------------------
 
 export interface QueryTableArgs {
@@ -209,4 +229,24 @@ export function getRecentFiles(): Promise<RecentFile[]> {
 /** Clear the recent-files list. */
 export function clearRecentFiles(): Promise<void> {
   return invoke("clear_recent_files");
+}
+
+/**
+ * This launch's version transition and whether this install can self-update.
+ * Resolved once by Rust during setup — calling it repeatedly returns the same
+ * answer, because reading it is destructive on the Rust side (see
+ * `ConfigStore::record_run_version`).
+ */
+export function updateStatus(): Promise<UpdateStatus> {
+  return invoke<UpdateStatus>("update_status");
+}
+
+/** Whether the automatic post-launch update check is enabled. */
+export function getCheckForUpdatesOnStartup(): Promise<boolean> {
+  return invoke<boolean>("get_check_for_updates_on_startup");
+}
+
+/** Persist the automatic-update-check opt-out. */
+export function setCheckForUpdatesOnStartup(enabled: boolean): Promise<void> {
+  return invoke("set_check_for_updates_on_startup", { enabled });
 }

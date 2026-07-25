@@ -74,6 +74,15 @@ jobs:
     needs: create-release
     strategy:
       fail-fast: false
+      # SERIAL, deliberately. tauri-action builds the updater's `latest.json` by
+      # read-modify-write against the release asset: download the existing one,
+      # merge this platform's entries, delete it, re-upload. That is not atomic.
+      # With four legs running at once — two of them macOS — several can read the
+      # same pre-merge state, and the last upload wins, silently dropping the
+      # other platforms' entries. Nothing fails; the published release just
+      # quietly updates one platform. Serializing costs wall-clock and nothing
+      # else. `src/lib/updaterConfig.test.ts` asserts this stays in place.
+      max-parallel: 1
       matrix:
         include:
           - os: windows-latest
@@ -133,10 +142,24 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Minisign key for the updater. Every update payload is signed with it
+          # and verified against `plugins.updater.pubkey` in tauri.conf.json
+          # before install — the only cryptographic control on the update path,
+          # since dblitz builds are ad-hoc signed at best. Losing this key
+          # permanently orphans the installed base (a new key cannot sign for
+          # clients holding the old pubkey), so it is backed up outside CI.
+          # NOTE: this takes the key file's *contents*, not a path.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           # Upload to the draft by numeric id, not tag — a draft is invisible to
           # the get-release-by-tag endpoint tauri-action uses for `tagName`.
           releaseId: ${{ needs.create-release.outputs.release_id }}
+          # The action defaults this to false, which would put the MSI in
+          # latest.json while README.md points users at the NSIS setup.exe. An
+          # MSI update on top of an NSIS install produces a second, parallel
+          # installation instead of an upgrade.
+          updaterJsonPreferNsis: true
           args: ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }}
 
       - name: Upload portable exe

@@ -5,6 +5,34 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.7.6] - Unreleased
+
+### Added
+- **dblitz updates itself.** About ten seconds after launch it checks the GitHub
+  releases page; when a newer version exists a bar offers **Install and restart**,
+  and dblitz downloads, verifies, installs and relaunches into the new build. A
+  one-time notice on the next launch confirms the update landed. Every payload is
+  signed with a minisign key and verified against the public key built into the
+  app before anything is installed — the only cryptographic control on the update
+  path, since dblitz builds are ad-hoc signed at best.
+- **Settings → Updates**, with the running version, a manual **Check for
+  updates** button, and a **Check at startup** opt-out (stored in `app.json`).
+  The startup check is silent when it fails — an offline user is not nagged about
+  something they didn't ask for and can't act on. A manual check always reports
+  an outcome, including "dblitz is up to date".
+- **Installs that can't self-update say so** rather than offering a button that
+  cannot work: a Linux `.deb`/`.rpm` (the Tauri updater can only replace an
+  AppImage) still gets told a new version exists, with a link to the release
+  instead of an Install button.
+
+### Changed
+- **The release build matrix now runs serially.** `tauri-action` assembles the
+  updater's `latest.json` by read-modify-write against the release asset, and
+  that is not atomic — with four legs running at once, two of them macOS, several
+  could read the same pre-merge state and the last upload would silently drop the
+  others' platform entries. Nothing failed; the release just quietly updated one
+  platform. Serializing costs wall-clock time and nothing else.
+
 ## [26.7.5] - 2026-07-24
 
 Fixes and refactors from a full-codebase deep review (0 blockers, 12 warnings, 10 nitpicks — all addressed).

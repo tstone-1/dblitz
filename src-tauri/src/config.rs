@@ -162,7 +162,16 @@ fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
 // <config_dir>/app.json.
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+/// Every field is `#[serde(default)]` because [`ConfigStore::load_app_config`]
+/// falls back to `AppConfig::default()` on *any* parse error — a field added
+/// without a default would make every older `app.json` unparseable and silently
+/// wipe the user's recent-files list.
+///
+/// `Default` is written by hand rather than derived: `check_for_updates_on_startup`
+/// defaults to `true`, and a derived `Default` would give `false`. That would
+/// diverge from the serde default, so a corrupt `app.json` would silently opt
+/// the user out of update checks instead of leaving them on.
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppConfig {
     /// Most-recently-opened databases, most recent first. Capped at RECENT_FILES_MAX.
     #[serde(default)]
@@ -171,6 +180,32 @@ pub struct AppConfig {
     /// use the OS temp directory (the historical default).
     #[serde(default)]
     pub export_dir: Option<String>,
+    /// Whether to check GitHub for a new release shortly after launch. On by
+    /// default: an updater nobody opts into never reaches the users who most
+    /// need it. The manual check in the toolbar's Settings dropdown works
+    /// regardless of this flag.
+    #[serde(default = "default_check_for_updates_on_startup")]
+    pub check_for_updates_on_startup: bool,
+    /// Version of the last build that ran. Written by Rust at startup, not by
+    /// the frontend, so the UI can tell "we just updated" from "same build as
+    /// before" and confirm the update landed. `None` on a first run.
+    #[serde(default)]
+    pub last_run_version: Option<String>,
+}
+
+fn default_check_for_updates_on_startup() -> bool {
+    true
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            recent_files: Vec::new(),
+            export_dir: None,
+            check_for_updates_on_startup: default_check_for_updates_on_startup(),
+            last_run_version: None,
+        }
+    }
 }
 
 /// Public struct for the enriched recents list (path + window marker).
@@ -352,6 +387,42 @@ impl ConfigStore {
         }
     }
 
+    /// Whether the startup update check is enabled (default `true`).
+    pub fn get_check_for_updates_on_startup(&self) -> bool {
+        self.load_app_config().check_for_updates_on_startup
+    }
+
+    /// Persist the startup-update-check opt-out.
+    pub fn set_check_for_updates_on_startup(&self, enabled: bool) -> Result<(), String> {
+        let mut config = self.load_app_config();
+        config.check_for_updates_on_startup = enabled;
+        self.save_app_config(&config)
+    }
+
+    /// Records `version` as the build that ran, returning the version it
+    /// replaced. A `Some(previous)` differing from `version` means the app was
+    /// updated since the last launch, which is what drives the one-time
+    /// "updated to vX" notice. A first run returns `None`, so callers can tell
+    /// a fresh install from an upgrade and stay quiet on the former.
+    ///
+    /// Must be called exactly once per launch, before anything else can read
+    /// the value back — the write is what makes the *next* launch's answer
+    /// correct, and it destroys this launch's answer in the process. That is
+    /// why the result is cached in app state (see `lib.rs`) instead of being
+    /// re-read on demand.
+    pub fn record_run_version(&self, version: &str) -> Result<Option<String>, String> {
+        let mut config = self.load_app_config();
+        let previous = config.last_run_version.clone();
+        if previous.as_deref() == Some(version) {
+            // Unchanged: skip the write so an ordinary relaunch doesn't rewrite
+            // app.json for nothing.
+            return Ok(previous);
+        }
+        config.last_run_version = Some(version.to_string());
+        self.save_app_config(&config)?;
+        Ok(previous)
+    }
+
     /// Same as [`ConfigStore::get_recent_files`], but also reads each file's
     /// per-DB config to attach the window marker (tint + label) so the recents
     /// dropdown can render them. Missing/corrupt per-DB configs silently yield
@@ -406,6 +477,18 @@ pub fn resolve_export_dir() -> PathBuf {
 
 pub fn get_recent_files_enriched() -> Vec<RecentFile> {
     ConfigStore::os_default().get_recent_files_enriched()
+}
+
+pub fn get_check_for_updates_on_startup() -> bool {
+    ConfigStore::os_default().get_check_for_updates_on_startup()
+}
+
+pub fn set_check_for_updates_on_startup(enabled: bool) -> Result<(), String> {
+    ConfigStore::os_default().set_check_for_updates_on_startup(enabled)
+}
+
+pub fn record_run_version(version: &str) -> Result<Option<String>, String> {
+    ConfigStore::os_default().record_run_version(version)
 }
 
 #[cfg(test)]
@@ -545,6 +628,113 @@ mod tests {
         let config = store.load_app_config();
         assert_eq!(config.recent_files, vec!["/tmp/a.db".to_string()]);
         assert_eq!(config.export_dir, Some("/tmp/exports".to_string()));
+    }
+
+    #[test]
+    fn startup_update_check_defaults_on_and_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let store = ConfigStore::new(dir.path().to_path_buf());
+        // Default is on — an updater nobody opts into never reaches anyone.
+        assert!(store.get_check_for_updates_on_startup());
+        store.set_check_for_updates_on_startup(false).unwrap();
+        assert!(!store.get_check_for_updates_on_startup());
+        store.set_check_for_updates_on_startup(true).unwrap();
+        assert!(store.get_check_for_updates_on_startup());
+    }
+
+    #[test]
+    fn app_config_default_matches_its_serde_default() {
+        // The load path falls back to `AppConfig::default()` on a parse error
+        // while a *successful* parse of an older file uses the serde defaults.
+        // If those two disagreed, a corrupt app.json would silently flip the
+        // user's update-check preference. This is what a derived `Default`
+        // would have broken.
+        let from_empty_json: AppConfig = serde_json::from_str("{}").unwrap();
+        let from_default = AppConfig::default();
+        assert_eq!(
+            from_empty_json.check_for_updates_on_startup,
+            from_default.check_for_updates_on_startup
+        );
+        assert!(from_default.check_for_updates_on_startup);
+    }
+
+    #[test]
+    fn pre_updater_app_config_still_parses_and_keeps_recents() {
+        // Exactly what an app.json written before the updater shipped looks
+        // like. Parsing must succeed: the fallback path would wipe recents.
+        let legacy = r#"{"recent_files":["/tmp/a.db"],"export_dir":null}"#;
+        let config: AppConfig = serde_json::from_str(legacy).unwrap();
+        assert_eq!(config.recent_files, vec!["/tmp/a.db".to_string()]);
+        assert!(config.check_for_updates_on_startup);
+        assert_eq!(config.last_run_version, None);
+    }
+
+    #[test]
+    fn record_run_version_reports_none_on_first_run() {
+        let dir = TempDir::new().unwrap();
+        let store = ConfigStore::new(dir.path().to_path_buf());
+        assert_eq!(store.record_run_version("26.7.6").unwrap(), None);
+        // ...and persists it for the next launch to compare against.
+        assert_eq!(
+            store.load_app_config().last_run_version.as_deref(),
+            Some("26.7.6")
+        );
+    }
+
+    #[test]
+    fn record_run_version_reports_the_version_it_replaced() {
+        let dir = TempDir::new().unwrap();
+        let store = ConfigStore::new(dir.path().to_path_buf());
+        store.record_run_version("26.7.5").unwrap();
+        assert_eq!(
+            store.record_run_version("26.7.6").unwrap().as_deref(),
+            Some("26.7.5")
+        );
+    }
+
+    #[test]
+    fn record_run_version_is_a_no_op_on_an_unchanged_relaunch() {
+        let dir = TempDir::new().unwrap();
+        let store = ConfigStore::new(dir.path().to_path_buf());
+        store.record_run_version("26.7.6").unwrap();
+
+        // Detect a rewrite by content rather than mtime: filesystem timestamp
+        // resolution is coarse enough that two writes microseconds apart can
+        // compare equal. Serde drops unknown keys on deserialize and does not
+        // re-emit them, so this marker survives if and only if nothing saved.
+        let path = store.app_config_path();
+        let marked =
+            fs::read_to_string(&path)
+                .unwrap()
+                .replacen('{', "{\n  \"__marker\": true,", 1);
+        fs::write(&path, &marked).unwrap();
+
+        // Same version again: reports itself, and must not rewrite the file.
+        assert_eq!(
+            store.record_run_version("26.7.6").unwrap().as_deref(),
+            Some("26.7.6")
+        );
+        assert!(
+            fs::read_to_string(&path).unwrap().contains("__marker"),
+            "an unchanged relaunch must not rewrite app.json"
+        );
+    }
+
+    #[test]
+    fn record_run_version_does_not_disturb_other_app_config() {
+        let dir = TempDir::new().unwrap();
+        let store = ConfigStore::new(dir.path().to_path_buf());
+        store.push_recent_file("/tmp/a.db");
+        store
+            .set_export_dir(Some("/tmp/exports".to_string()))
+            .unwrap();
+        store.set_check_for_updates_on_startup(false).unwrap();
+        store.record_run_version("26.7.6").unwrap();
+
+        let config = store.load_app_config();
+        assert_eq!(config.recent_files, vec!["/tmp/a.db".to_string()]);
+        assert_eq!(config.export_dir, Some("/tmp/exports".to_string()));
+        assert!(!config.check_for_updates_on_startup);
     }
 
     #[test]

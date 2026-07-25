@@ -4,6 +4,7 @@
   import { onMount } from "svelte";
   import { getInitialFile, toggleDevtools } from "$lib/ipc";
   import { appState, initTheme, openDatabase, closeDatabase } from "$lib/store.svelte";
+  import { update } from "$lib/updateState.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import DatabaseStructure from "$lib/components/DatabaseStructure.svelte";
   import BrowseData from "$lib/components/BrowseData.svelte";
@@ -22,6 +23,15 @@
     getInitialFile().then((path) => {
       if (path) handleOpenFile(path);
     });
+
+    // Resolves the running version, whether this launch follows an update, and
+    // whether this install can replace itself at all.
+    void update.loadStatus();
+    void update.loadStartupPreference();
+    // Fires ~10s from now and re-reads the opt-out at that point, not here: the
+    // preference load above is asynchronous, so a snapshot taken now would still
+    // see the default and check for a user who had turned that off.
+    const teardownUpdateCheck = update.scheduleStartupCheck();
 
     function onKeyDown(e: KeyboardEvent) {
       if (dev && e.key === "F12") {
@@ -46,6 +56,7 @@
     return () => {
       document.removeEventListener("keydown", onKeyDown);
       document.removeEventListener("contextmenu", onContextMenu);
+      teardownUpdateCheck();
     };
   });
 </script>

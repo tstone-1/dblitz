@@ -27,6 +27,15 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rust_xlsxwriter = "0.96.0"
 tauri-plugin-opener = "2.5.4"
+# In-app updater. Fetches the `latest.json` manifest published by release.yml,
+# verifies the payload against `plugins.updater.pubkey` in tauri.conf.json
+# (minisign — the ONLY cryptographic control on the update path, since dblitz
+# builds are ad-hoc signed at best), then installs. `process` supplies
+# `relaunch()`: macOS swaps the .app in place and restarts, Windows hands off to
+# the NSIS installer and exits. On Linux only AppImage installs can self-update,
+# which `updates.rs` gates.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

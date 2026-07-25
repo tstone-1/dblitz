@@ -59,6 +59,157 @@ cd src-tauri && cargo fmt --check
 - `nsis/dblitz_x.y.z_x64-setup.exe` - NSIS installer (registers file associations)
 - `msi/dblitz_x.y.z_x64_en-US.msi` - MSI installer
 
+## Updater
+
+### Updater signing key
+
+Every update payload is signed with a **minisign** keypair (Tauri's updater
+format). Clients verify it against `plugins.updater.pubkey` in
+`tauri.conf.json` before installing anything. This is independent of Apple/
+Windows code signing and is *not* fixed by adding a Developer ID.
+
+- **Private key + password: KeePass**, and mirrored into the repo secrets
+  `TAURI_SIGNING_PRIVATE_KEY` (the key file's **contents**) and
+  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+- **Public key: committed** in `tauri.conf.json`. Public by design.
+- **This is a dblitz-only key.** Do not reuse screenpick's, or any other app's —
+  one compromised or lost key would then orphan two installed bases.
+- **Losing the private key permanently orphans the installed base.** A new key
+  cannot sign for clients that already hold the old public key, so every existing
+  user would have to find and reinstall dblitz by hand. There is no recovery
+  path. Keep the KeePass database backed up.
+
+Generating it (only ever for a *new* app, never to "fix" a lost key). Create the
+KeePass entry and generate the password there **first**, then copy it to the
+clipboard — the commands below read it from there so it never lands in shell
+history, a transcript, or an agent's tool log:
+
+```sh
+npx tauri signer generate -w ~/.tauri/dblitz.key -p "$(pbpaste)" --ci
+gh auth switch --user tstone-1
+gh secret set TAURI_SIGNING_PRIVATE_KEY --repo tstone-1/dblitz < ~/.tauri/dblitz.key
+printf '%s' "$(pbpaste)" | gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --repo tstone-1/dblitz
+```
+
+> **The interactive form needs a real TTY.** Plain
+> `npx tauri signer generate -w ~/.tauri/dblitz.key` prompts for the password,
+> and in any non-interactive shell — an agent tool call, a CI step, a piped
+> command — that prompt **panics** rather than falling back:
+> `called Result::unwrap() on an Err value: PError { kind: Io, ... message: "Device not configured" }`.
+> That is a missing terminal, not a broken install. Use the `-p "$(pbpaste)" --ci`
+> form above, or run the interactive command in a real terminal.
+>
+> On Windows, `Get-Clipboard` replaces `pbpaste`; note PowerShell's `$(...)` has
+> the same "expanded before exec" property, so the password still stays out of
+> the command text you typed.
+
+Then paste the contents of `~/.tauri/dblitz.key.pub` into `plugins.updater.pubkey`
+in `tauri.conf.json`. `src/lib/updaterConfig.test.ts` fails until you do — a build
+with the committed placeholder produces artifacts no client can verify.
+
+> Use `printf '%s'`, not `echo` — a trailing newline becomes part of the secret
+> and surfaces later as a bogus "wrong password" signing failure in CI. And note
+> `gh secret set` has **no** `--body-file` flag (that's `gh release`); it takes
+> `-b`, `-f`, or stdin.
+
+**Gotchas that cost time once already:**
+
+- **The bundler reads `TAURI_SIGNING_PRIVATE_KEY` (contents), not
+  `TAURI_SIGNING_PRIVATE_KEY_PATH`.** The `_PATH` form works only for the
+  `tauri signer sign` CLI. With just `_PATH` set, the build runs all the way to
+  the end and *then* fails with "A public key has been found, but no private
+  key".
+- **A release with no `latest.json` updates nobody, and looks completely green.**
+  When the signing secret is missing or empty, `tauri-action` logs "Signature not
+  found for the updater JSON. Skipping upload..." and **succeeds**. The release
+  ships with installers and no manifest, and the failure only surfaces as users
+  silently never updating. Always `curl` the manifest after publishing and check
+  that *every* platform key is present (see post-release verification below).
+- **Updater endpoints must be `https`.** Tauri validates this while
+  deserializing the config, so a plain-`http` endpoint makes the packaged app
+  **panic on startup** rather than merely warn.
+  `dangerousInsecureTransportProtocol: true` is the documented escape hatch, and
+  is only ever acceptable in a throwaway local test build.
+  `src/lib/updaterConfig.test.ts` asserts both the https endpoint and the absence
+  of that flag.
+- **The release matrix must stay `max-parallel: 1`.** `tauri-action` builds
+  `latest.json` by read-modify-write against the release asset, so parallel legs
+  clobber each other's platform entries. Nothing fails; the manifest is just
+  incomplete. Also asserted by `updaterConfig.test.ts`.
+
+### Verifying the updater locally
+
+Do this after any change to the updater wiring, and before trusting a release to
+reach real users. It exercises signature verification, download, in-place bundle
+replacement and relaunch without publishing anything or burning a tag.
+
+Use a **throwaway keypair** so the real private key never leaves KeePass/CI:
+
+```sh
+SCRATCH=$(mktemp -d)
+npx tauri signer generate -w "$SCRATCH/test.key" -p "" --ci -f
+
+# In tauri.conf.json, TEMPORARILY: swap in "$SCRATCH/test.key.pub"'s contents as
+# `pubkey`, point `endpoints` at http://localhost:8787/latest.json, and add
+# "dangerousInsecureTransportProtocol": true
+
+# Export the key BEFORE the first build, not just the second: with
+# `createUpdaterArtifacts: true`, every build tries to sign, so an unexported
+# key makes even the throwaway "old" build fail with "A public key has been
+# found, but no private key" and exit 1 — after it has already written the
+# bundle, which makes it look like a real failure when it is only the signing
+# step. Exporting up front avoids the confusion entirely.
+export TAURI_SIGNING_PRIVATE_KEY="$(cat "$SCRATCH/test.key")"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+
+# 1. Build the "old" app at the current version and keep it aside.
+npx tauri build --bundles app
+cp -R src-tauri/target/release/bundle/macos/dblitz.app "$SCRATCH/installed/"
+
+# 2. Bump the version everywhere, rebuild -> this is the update payload.
+#    Both builds need the same temporary config, or the updated app panics on
+#    relaunch against a config it cannot deserialize.
+npx tauri build --bundles app
+
+# 3. Serve dblitz.app.tar.gz plus a hand-written latest.json whose `signature`
+#    is the contents of dblitz.app.tar.gz.sig, with darwin-aarch64 and
+#    darwin-x86_64 entries.
+python3 -m http.server 8787
+
+# 4. Launch "$SCRATCH/installed/dblitz.app"; the bar appears ~10 s later.
+```
+
+`--bundles app` is enough to produce updater artifacts on macOS (`.app.tar.gz` +
+`.sig`); no DMG build required, which turns a re-test into a ~20 s incremental
+build.
+
+The server log alone proves most of the chain, and is more reliable than
+eyeballing the window title:
+
+| Signal | What it proves |
+|---|---|
+| `GET /latest.json` ~10 s after launch | the startup check fired |
+| `GET /dblitz.app.tar.gz` after you click **Install and restart** | download ran, and the signature verified — a bad signature aborts *before* the download completes |
+| a *second* `GET /latest.json` seconds later | the app relaunched and re-checked as the new version |
+| `defaults read "$SCRATCH/installed/dblitz.app/Contents/Info.plist" CFBundleShortVersionString` now reads the NEW version | the in-place bundle swap succeeded |
+| `last_run_version` in the real `app.json` is the new version | the post-update transition was recorded |
+
+In the UI: the update bar offers the new version, the "dblitz was updated to vX"
+bar appears once after the relaunch, and a follow-up manual check reports up to
+date.
+
+> **Clicking the button is manual.** The bar is inside the webview and resists
+> scripting — synthetic clicks are blocked without Accessibility trust, and the
+> button does not respond to `AXPress` despite appearing in the accessibility
+> tree. Do not sink time into automating it.
+
+> **Afterwards, revert `tauri.conf.json` and every version file**, re-run
+> `cargo check` to refresh `Cargo.lock`, and clear `last_run_version` from
+> `~/Library/Application Support/dblitz/app.json` — the test build shares the real
+> app's bundle identifier (`com.tstone.dblitz`), so it writes its version into the
+> *real* config file and would otherwise make the next real launch believe it had
+> just been updated.
+
 ## Release Procedure
 
 ### 1. Pre-release Checklist
@@ -106,8 +257,15 @@ ls -lh src-tauri/target/release/dblitz.exe
 git add -A
 git commit -m "Release vYY.M.MICRO: Brief description"
 git tag vYY.M.MICRO
-git push origin main --tags
+git push origin main
+git push origin vYY.M.MICRO
 ```
+
+> **Push the tag by name, never `--tags`.** `--tags` pushes *every* local tag,
+> including any left over from an experiment or a throwaway updater test build.
+> Each `v*` tag that reaches the remote starts its own release workflow, so one
+> stray tag publishes a release for a version that was never meant to ship.
+> Pushing the one tag by name cannot do that.
 
 Pushing the `vYY.M.MICRO` tag triggers `.github/workflows/release.yml`, which
 runs the quality gate, creates a draft release, builds and uploads every
@@ -156,6 +314,16 @@ To overwrite a pre-existing non-brew install, use `brew install --cask --force d
 
 - [ ] Confirm GitHub shows the new release as latest: `gh release list --limit 5`
 - [ ] Confirm the tap cask bumped to the new version (both `sha256` lines updated)
+- [ ] **The updater manifest exists and covers every platform.** A release with no
+      `latest.json` looks entirely green (see the Updater section above), so check
+      it explicitly — expect `darwin-aarch64`, `darwin-x86_64`, `windows-x86_64`
+      and `linux-x86_64` keys, and a non-empty `signature` on each:
+      ```sh
+      curl -sL https://github.com/tstone-1/dblitz/releases/latest/download/latest.json \
+        | python3 -m json.tool
+      ```
+- [ ] An older install actually offers the update (the point of all of the above):
+      launch a previous build and confirm the bar appears within ~10 s
 - **Windows:**
   - [ ] Run exe from build output to verify it works
   - [ ] Open a .sqlite file via double-click (file association test)
@@ -184,7 +352,7 @@ rg -n '"version"|^version =' package.json src-tauri/Cargo.toml src-tauri/tauri.c
 npx tauri build
 cp src-tauri/target/release/dblitz.exe /path/to/shared/tools/dblitz.exe
 git add -A && git commit -m "Release vYY.M.MICRO: Description"
-git tag vYY.M.MICRO && git push origin main --tags
+git tag vYY.M.MICRO && git push origin main && git push origin vYY.M.MICRO
 git describe --tags --exact-match
 git ls-remote --tags origin vYY.M.MICRO
 gh release view vYY.M.MICRO

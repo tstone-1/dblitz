@@ -23,9 +23,21 @@
       "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost"
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlBOTA1NUQ0NTlCRTkxQzAKUldUQWtiNVoxRldRbXVMZEFhVGl0cnBHWUV2T3dxSmREQ3BLcTFwVDhPci84VWsyRmRTZ1RNVnUK",
+      "endpoints": [
+        "https://github.com/tstone-1/dblitz/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
