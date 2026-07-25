@@ -1,5 +1,15 @@
 name: Release
 
+# Builds installers and publishes them to a GitHub Release.
+#
+# macOS is signed with a Developer ID identity and notarized by Apple, so it
+# installs without a Gatekeeper bypass. Windows has no Authenticode cert and is
+# still unsigned — users bypass SmartScreen on first launch; see the "Install"
+# section of README.md.
+#
+# Signing is conditional on the Apple secrets being present, so a fork without
+# them still builds (ad-hoc signed, unnotarized).
+
 on:
   push:
     tags:
@@ -138,14 +148,69 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # macOS Developer ID signing + notarization.
+      #
+      # The vars are exported through $GITHUB_ENV rather than listed in the
+      # build step's `env:` block, and that is load-bearing. A fork has none of
+      # these secrets; `env:` would then hand the Tauri CLI an EMPTY
+      # APPLE_SIGNING_IDENTITY, which it treats as "sign with this identity"
+      # and fails on. Exporting conditionally leaves them genuinely unset, so
+      # the CLI falls back to the ad-hoc "-" in tauri.conf.json and the fork
+      # still builds.
+      #
+      # The CLI does the keychain import itself from APPLE_CERTIFICATE /
+      # APPLE_CERTIFICATE_PASSWORD - no manual `security create-keychain` step
+      # is needed, and it sets the key partition list so codesign never blocks
+      # on an interactive prompt.
+      - name: Prepare Apple signing and notarization
+        if: matrix.os == 'macos-latest'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$APPLE_CERTIFICATE" ] || [ -z "$APPLE_API_KEY_P8" ]; then
+            echo "::warning::Apple signing secrets absent - building ad-hoc signed and UNNOTARIZED."
+            exit 0
+          fi
+
+          # notarytool wants the key as a file on disk. RUNNER_TEMP is wiped
+          # with the runner, so the key does not outlive the job.
+          KEYS="$RUNNER_TEMP/private_keys"
+          mkdir -p "$KEYS"
+          KEYFILE="$KEYS/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s\n' "$APPLE_API_KEY_P8" > "$KEYFILE"
+          chmod 600 "$KEYFILE"
+
+          # Heredoc form for the certificate: base64 may arrive wrapped, and a
+          # multi-line value breaks the plain KEY=VALUE form.
+          {
+            echo "APPLE_CERTIFICATE<<__TAURI_EOF__"
+            printf '%s\n' "$APPLE_CERTIFICATE"
+            echo "__TAURI_EOF__"
+            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
+            echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY"
+            echo "APPLE_API_KEY=$APPLE_API_KEY"
+            echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"
+            echo "APPLE_API_KEY_PATH=$KEYFILE"
+          } >> "$GITHUB_ENV"
+          echo "Apple signing enabled for this build."
+
       - name: Build and upload artifacts
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Minisign key for the updater. Every update payload is signed with it
           # and verified against `plugins.updater.pubkey` in tauri.conf.json
-          # before install — the only cryptographic control on the update path,
-          # since dblitz builds are ad-hoc signed at best. Losing this key
+          # before install. Independent of the Apple Developer ID signing above:
+          # different key, different purpose. Apple's signature authenticates the
+          # bundle to Gatekeeper; this one authenticates the update payload to an
+          # already-installed dblitz, and it is the only control on that path on
+          # Windows and Linux, which are unsigned. Losing this key
           # permanently orphans the installed base (a new key cannot sign for
           # clients holding the old pubkey), so it is backed up outside CI.
           # NOTE: this takes the key file's *contents*, not a path.
@@ -161,6 +226,62 @@ jobs:
           # installation instead of an upgrade.
           updaterJsonPreferNsis: true
           args: ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }}
+
+      # Tauri's bundler notarizes and staples the .app, then builds the DMG and
+      # only SIGNS it — the DMG itself is left unnotarized, and
+      # `spctl -a -t open` rejects it as "Unnotarized Developer ID". Since the
+      # DMG is what users download (directly, and via the Homebrew cask),
+      # opening it would still produce "Apple cannot check it for malicious
+      # software". So notarize and staple the DMG too, then replace the asset
+      # tauri-action already uploaded. The app inside is unaffected — it is
+      # already stapled, and so is the updater tarball.
+      #
+      # This runs before the `publish` job flips the release out of draft, and
+      # `gh release upload` resolves a draft by tag fine (same as the portable
+      # exe step below). The `update-tap` job hashes the DMG only after
+      # publish, so the cask picks up the stapled bytes, not the pre-staple
+      # ones.
+      - name: Notarize and staple the macOS DMG
+        if: matrix.os == 'macos-latest' && env.APPLE_SIGNING_IDENTITY != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          DMG=$(ls src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg)
+          echo "Notarizing $DMG"
+          xcrun notarytool submit "$DMG" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
+          xcrun stapler staple "$DMG"
+          spctl -a -vvv -t open --context context:primary-signature "$DMG" 2>&1 \
+            | grep -q "source=Notarized Developer ID" \
+            || { echo "::error::DMG is still not notarized after stapling"; exit 1; }
+          echo "Replacing the uploaded DMG with the stapled one"
+          gh release upload "${{ github.ref_name }}" "$DMG" --clobber \
+            --repo "$GITHUB_REPOSITORY"
+
+      # A skipped notarization does NOT fail the build: when the credentials
+      # are missing or malformed the bundler logs "skipping app notarization"
+      # and exits 0, producing a signed-but-unnotarized app that Gatekeeper
+      # rejects on any machine that has never seen it. Same looks-green shape
+      # as a release with no latest.json. Gate on the artifact itself so that
+      # cannot ship silently.
+      - name: Verify the macOS build is signed, notarized and stapled
+        if: matrix.os == 'macos-latest' && env.APPLE_SIGNING_IDENTITY != ''
+        run: |
+          set -euo pipefail
+          APP=src-tauri/target/${{ matrix.target }}/release/bundle/macos/dblitz.app
+          codesign -dv --verbose=4 "$APP"
+          codesign -dv --verbose=4 "$APP" 2>&1 | grep -q "Authority=Developer ID Application" \
+            || { echo "::error::not signed with a Developer ID identity"; exit 1; }
+          codesign -dv --verbose=4 "$APP" 2>&1 | grep -q "flags=.*runtime" \
+            || { echo "::error::hardened runtime missing - notarization cannot succeed"; exit 1; }
+          xcrun stapler validate "$APP"
+          spctl -a -vvv -t exec "$APP" 2>&1 | grep -q "source=Notarized Developer ID" \
+            || { echo "::error::Gatekeeper does not see this as notarized"; exit 1; }
+          echo "macOS build verified: Developer ID signed, notarized, stapled."
 
       - name: Upload portable exe
         if: matrix.os == 'windows-latest'

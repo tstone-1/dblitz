@@ -189,11 +189,7 @@ mod tests {
     use rusqlite::Connection;
 
     fn setup_temp_db_with_table() -> (DbState, std::path::PathBuf) {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("dblitz_test_{}.sqlite", nanos));
+        let path = crate::db::util::unique_temp_path("dblitz_test", ".sqlite");
 
         {
             let conn = Connection::open(&path).unwrap();
@@ -575,11 +571,7 @@ mod tests {
         // The README and module docs promise that opening a database with
         // ?immutable=1 leaves no `-wal` / `-shm` files next to the file.
         // This is the load-bearing test for that promise.
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("dblitz_sidecar_test_{nanos}"));
+        let dir = crate::db::util::unique_temp_path("dblitz_sidecar_test", "");
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("test.sqlite");
 
