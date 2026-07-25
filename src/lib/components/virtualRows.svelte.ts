@@ -263,6 +263,13 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
    * bumps `epoch` so any fetch still in flight from the old database is
    * ignored (via `isCurrent`) when it eventually resolves, instead of
    * repopulating the cache with the wrong database's rows.
+   *
+   * NOT safe to call unconditionally from a Svelte `$effect`: `captureSnapshot()`
+   * reads the caller's table/filter/sort state, so an effect that also *writes*
+   * that state (as a database-switch reset does) invalidates itself and loops.
+   * Call it only on an actual transition — see `resetFired` in
+   * `autoSelectFirstTable.svelte.ts`, where doing otherwise produced
+   * `effect_update_depth_exceeded` on every launch.
    */
   function reset(): void {
     epoch++;

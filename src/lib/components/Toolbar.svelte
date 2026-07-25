@@ -2,6 +2,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { getExportDir, setExportDir, getRecentFiles, clearRecentFiles, type RecentFile } from "$lib/ipc";
   import { appState, openDatabase, closeDatabase, setTheme, saveViewConfig } from "$lib/store.svelte";
+  import { update } from "$lib/updateState.svelte";
   import { fileName, parentDir, TINT_PRESETS, tintPillStyle, toolbarTintStyle } from "./toolbarUtils";
 
   function setTint(value: string | null) {
@@ -33,6 +34,9 @@
       showSettings = false;
       return;
     }
+    // Clear a stale "up to date"/error line from a previous visit so the panel
+    // doesn't report the result of a check the user has long forgotten making.
+    update.reset();
     showSettings = true;
     try {
       exportDir = (await getExportDir()) ?? "";
@@ -228,6 +232,34 @@
           </div>
         </div>
 
+        <div class="settings-section">
+          <div class="settings-label">Updates</div>
+          <div class="update-version">
+            <!-- Blank rather than "v null" until the backend answers; a missing
+                 version line is not worth an error. -->
+            {update.currentVersion ? `dblitz v${update.currentVersion}` : "dblitz"}
+          </div>
+          <label class="update-startup-toggle">
+            <input
+              type="checkbox"
+              checked={update.checkAtStartup}
+              onchange={(e) =>
+                void update.setCheckAtStartup((e.currentTarget as HTMLInputElement).checked)}
+            />
+            Check at startup
+          </label>
+          <button
+            class="export-dir-btn update-check-btn"
+            disabled={update.busy}
+            onclick={() => void update.check("manual")}
+          >{update.busy ? "Checking…" : "Check for updates"}</button>
+          {#if update.phase.kind === "upToDate"}
+            <div class="update-result">dblitz is up to date.</div>
+          {:else if update.phase.kind === "error"}
+            <div class="update-result">{update.phase.message}</div>
+          {/if}
+        </div>
+
         {#if appState.dbPath}
           <div class="settings-section">
             <div class="settings-label">Window Marker</div>
@@ -273,6 +305,53 @@
   <div class="notice-bar">
     {appState.notice}
     <button onclick={() => (appState.notice = null)}>dismiss</button>
+  </div>
+{/if}
+
+<!-- One-time confirmation that a self-update actually landed. Without it the
+     update is completely invisible: the app downloads, restarts, and looks
+     identical apart from the version in the title bar. -->
+{#if update.showUpdatedNotice}
+  <div class="update-bar">
+    <span>dblitz was updated to v{update.currentVersion}.</span>
+    <button onclick={() => void update.openReleasesPage()}>What's new</button>
+    <button onclick={() => update.dismissUpdatedNotice()}>dismiss</button>
+  </div>
+{/if}
+
+{#if update.showBar}
+  <div class="update-bar" role="status">
+    {#if update.phase.kind === "available"}
+      <span>Version {update.phase.version} is available.</span>
+      {#if update.canInstall}
+        <button class="update-install" onclick={() => void update.installAndRestart()}>
+          Install and restart
+        </button>
+      {:else}
+        <!-- A .deb/.rpm install: the Tauri updater can only replace an AppImage,
+             so offering an Install button here would promise something that
+             cannot work. Tell the user why and hand them the download. -->
+        <span class="update-detail">This installation can't update itself.</span>
+      {/if}
+      <button onclick={() => void update.openReleasesPage()}>Open GitHub</button>
+      <button onclick={() => update.dismiss()}>dismiss</button>
+    {:else if update.phase.kind === "downloading"}
+      <span>Downloading {update.phase.version}…</span>
+      <!-- `total` is null until the Started event lands, and some servers omit
+           the content length entirely — fall back to an indeterminate bar rather
+           than showing a bogus 0%. -->
+      <progress
+        class="update-progress"
+        max={update.phase.total ?? undefined}
+        value={update.phase.total === null ? undefined : update.phase.downloaded}
+      ></progress>
+    {:else if update.phase.kind === "installing"}
+      <span>Installing {update.phase.version}… dblitz will restart.</span>
+    {:else if update.phase.kind === "error"}
+      <span>{update.phase.message}</span>
+      <button onclick={() => void update.openReleasesPage()}>Open GitHub</button>
+      <button onclick={() => update.dismiss()}>dismiss</button>
+    {/if}
   </div>
 {/if}
 
@@ -637,5 +716,77 @@
     color: var(--text-primary);
     padding: 1px 8px;
     font-size: 11px;
+  }
+
+  /* Same bar family as .error-bar/.notice-bar, but informational: an available
+     update is good news, so it borrows the accent rather than the warning color. */
+  .update-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 12px;
+    background: color-mix(in srgb, var(--accent) 14%, var(--bg-secondary));
+    color: var(--text-primary);
+    border-bottom: 1px solid var(--accent);
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  .update-bar button {
+    background: transparent;
+    border: 1px solid var(--text-muted);
+    color: var(--text-primary);
+    padding: 1px 8px;
+    font-size: 11px;
+  }
+  .update-bar button.update-install {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: white;
+    font-weight: 600;
+  }
+  .update-bar button.update-install:hover {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+  }
+
+  .update-detail {
+    color: var(--text-secondary);
+    font-size: 11px;
+  }
+
+  .update-progress {
+    width: 160px;
+    height: 6px;
+  }
+
+  .update-version {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+  }
+
+  .update-startup-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+    font-size: 12px;
+    color: var(--text-primary);
+    cursor: pointer;
+  }
+  .update-startup-toggle input {
+    margin: 0;
+    cursor: pointer;
+  }
+
+  .update-check-btn {
+    width: 100%;
+  }
+
+  .update-result {
+    margin-top: 6px;
+    font-size: 11px;
+    line-height: 15px;
+    color: var(--text-secondary);
   }
 </style>

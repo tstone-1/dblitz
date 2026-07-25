@@ -172,6 +172,31 @@ normally:
 xattr -dr com.apple.quarantine /Applications/dblitz.app
 ```
 
+## Updates
+
+dblitz updates itself. About ten seconds after launch it checks the GitHub
+releases page; when a newer version exists, a bar appears offering **Install and
+restart**. The download is signed and its signature verified before anything is
+installed. A check that fails — no network, GitHub unreachable — is silent by
+design; only checks you asked for report back.
+
+Under **Settings → Updates** you get the running version, a **Check for updates**
+button, and a **Check at startup** switch to turn the automatic check off. The
+manual button works regardless of that setting.
+
+Two install methods can't self-update, and dblitz will say so instead of offering
+a broken button:
+
+- **The portable `dblitz.exe`** — there is no installer to hand off to. Download
+  the new exe and replace it.
+- **Linux `.deb` / `.rpm`** — those files are owned by your package manager. Only
+  the `.AppImage` can replace itself. Use your package manager, or switch to the
+  AppImage.
+
+On macOS the Homebrew cask is marked `auto_updates true`, so `brew` knows dblitz
+manages its own version and won't report the cask as permanently outdated after
+an in-app update.
+
 ## Usage
 
 1. Start `dblitz`.
@@ -192,7 +217,9 @@ dblitz stores its config under the OS-standard config directory in a `dblitz` fo
 
 Inside:
 
-- `app.json` — the recent-files list (capped at 10)
+- `app.json` — the recent-files list (capped at 10), the Excel-export folder, the
+  "check for updates at startup" preference, and the version that last ran (used
+  to show the one-time "dblitz was updated" confirmation)
 - `<sha256-prefix>.json` — one file per database, holding the per-database view
   config (sort, widths, order, hidden columns, colors, pinned filters, tint,
   label). The filename is a 16-character prefix of `SHA-256(absolute_path)`.

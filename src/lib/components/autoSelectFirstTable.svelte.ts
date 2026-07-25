@@ -43,12 +43,30 @@ export function createAutoSelectFirstTable(
   // opened yet" sentinel matching appState.dbOpenGeneration's initial value.
   let autoSelectedGen = 0;
 
+  // `onReset` fires on the close TRANSITION, not on every check while closed.
+  // Both consumers call `check()` from a `$effect`, and BrowseData's onReset
+  // (`resetForNewDatabase`) writes selectedTable/filters/sort and then calls
+  // `virtualRows.reset()`, which reads those same values back through
+  // `makeSnapshot()`. An effect that writes state it also reads re-triggers
+  // itself, so firing unconditionally looped until Svelte gave up with
+  // `effect_update_depth_exceeded` — 9 console errors on every launch with no
+  // database open, and the effect never settling.
+  //
+  // Starts `true` because a freshly mounted component is already in the closed
+  // state with nothing to clear; the flag only unlatches once a database has
+  // actually been open.
+  let resetFired = true;
+
   return function check() {
     if (!appState.dbPath) {
       autoSelectedGen = 0;
-      onReset?.();
+      if (!resetFired) {
+        resetFired = true;
+        onReset?.();
+      }
       return;
     }
+    resetFired = false;
     const gen = appState.dbOpenGeneration;
     if (appState.tables.length === 1 && autoSelectedGen !== gen) {
       autoSelectedGen = gen;

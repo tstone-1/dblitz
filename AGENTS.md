@@ -56,11 +56,58 @@
 - Keep review-fix release batches scoped to the fixes. Do not fold strategic refactors (file splits, major extractions) into the same release even when they touch the same files — defer them to separate, single-purpose releases unless the refactor is a genuine prerequisite for a fix.
 - Expected `cargo audit` noise is the established allowed Tauri/Linux WebView transitive set (legacy GTK/glib/unic advisories). Treat any new advisory or materially different output as actionable; historical npm `cookie` findings applied only to the unreachable SvelteKit SSR path and must be re-evaluated if they reappear.
 
+### In-app updater
+
+- **The updater's minisign private key is the most safety-critical secret in this
+  repo.** It lives in KeePass and in the `TAURI_SIGNING_PRIVATE_KEY` /
+  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repo secrets; the public key is committed in
+  `tauri.conf.json`. It is a **dblitz-only** key — deliberately not shared with
+  `screenpick`. Losing it permanently orphans every installed copy: a new key cannot
+  sign for clients holding the old public key, so each user would have to reinstall
+  by hand. It is unrelated to OS code signing and is not fixed by adding an Apple
+  Developer ID. Never print, echo, or paste the private key into a tool call;
+  custody and regeneration live in [BUILD.md](BUILD.md#updater-signing-key).
+- **A release with no `latest.json` updates nobody, and looks green.** When the
+  signing secret is missing or empty, `tauri-action` logs "Signature not found for
+  the updater JSON. Skipping upload..." and still succeeds. The release ships with
+  installers and no manifest, and the failure only surfaces as users silently never
+  updating. BUILD.md's post-release checks exist for this.
+- **The release matrix must stay `max-parallel: 1`.** `tauri-action` builds
+  `latest.json` by read-modify-write against the release asset, so parallel legs
+  clobber each other's platform entries and produce a manifest that updates only
+  some platforms. dblitz has four legs (two of them macOS), so this bites harder
+  here than in a two-leg repo. Nothing fails; the manifest is just incomplete.
+- **Not every install can self-update, and the UI must not pretend otherwise.** The
+  Tauri updater supports **AppImage only** on Linux — `.deb`/`.rpm` installs are
+  package-manager-owned and cannot be replaced in place. `src-tauri/src/updates.rs`
+  gates this on `$APPIMAGE` and the frontend hides the Install button accordingly.
+  The portable `dblitz.exe` likewise has no installer to hand off to. Do not "fix"
+  the gate by always offering the install.
+- **`updates.rs` is deliberately pure** — no `tauri::` imports, no env reads, no
+  `cfg!`. The OS and `$APPIMAGE` are passed in from `lib.rs`, which is what lets the
+  Linux gate be unit-tested from macOS and Windows. Keep it that way.
+- **`ConfigStore::record_run_version` is destructive by design.** It returns the
+  previous version and immediately overwrites it, so "did we just update?" is only
+  answerable at the moment it is called. `lib.rs` calls it once in `setup` and caches
+  the result as `UpdateStatus` app state; a command that re-derived it on demand
+  would always answer "no".
+- **New `AppConfig` fields need `#[serde(default)]` and a matching manual `Default`.**
+  `load_app_config` falls back to `AppConfig::default()` on any parse error, so a
+  field without a serde default makes every older `app.json` unparseable and silently
+  wipes the user's recent-files list. And because `check_for_updates_on_startup`
+  defaults to `true`, `Default` is hand-written — a derived one would give `false` and
+  diverge from the serde default, silently opting users out. A test pins the two
+  together.
+- **A local updater test build shares the real app's bundle identifier**
+  (`com.tstone.dblitz`), so it writes into the real `app.json`. Clear
+  `last_run_version` afterwards or the next real launch believes it just updated.
+
 ### Distribution / Homebrew tap
 
 - Pushing a `v*` tag triggers `.github/workflows/release.yml`: it runs the quality gate, creates the GitHub release, builds/uploads artifacts (macOS `.dmg` for `aarch64` + `x64`, Windows, Linux), then the `update-tap` job auto-bumps the Homebrew cask.
 - The macOS app is distributed via the Homebrew cask `dblitz` in the tap repo **`tstone-1/homebrew-dblitz`** (`Casks/dblitz.rb`). The cask URL pattern is `dblitz_<version>_<arch>.dmg` with `arch arm: "aarch64", intel: "x64"`.
 - `update-tap` downloads the two macOS DMGs from the release, computes their `sha256`, and `sed`-edits `version` + both `sha256` lines in the tap's `Casks/dblitz.rb`, then commits/pushes `Bump dblitz cask to v<version>` as `tstone-1`. It pushes to a *different* repo, so it uses the **`TAP_GITHUB_TOKEN`** secret (a fine-grained PAT with Contents:read/write on `tstone-1/homebrew-dblitz`) — the default `GITHUB_TOKEN` cannot. If that secret is missing/unauthorized the `update-tap` job fails (but the build/release still succeed); re-set it with `gh secret set TAP_GITHUB_TOKEN --repo tstone-1/dblitz --body-file <file>` (interactive prompt does NOT work through a non-interactive shell — it silently stores an empty value).
+- `Casks/dblitz.rb` carries **`auto_updates true`** (added with the in-app updater). Without it Homebrew and the updater fight: `brew upgrade` reinstalls over a self-updated app, and `brew` reports the cask as outdated forever. Like the `postflight` quarantine strip, this must survive the `update-tap` job — that job only `sed`-edits the `version`/`arm:`/`intel:` lines, so it does.
 - The tap is a personal/untrusted tap: first use on a machine needs `brew trust --cask tstone-1/dblitz/dblitz`. Install/upgrade the local app with `brew install --cask dblitz` / `brew upgrade --cask dblitz`. To overwrite a pre-existing non-brew install, use `brew install --cask --force dblitz` (`--adopt` only works when the on-disk version already matches).
 
 ### macOS signing / Gatekeeper "damaged" error
