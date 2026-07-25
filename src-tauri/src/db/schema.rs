@@ -233,11 +233,7 @@ mod tests {
     /// real `open_database` path so tests exercise the same authorizer-bearing,
     /// read-only connection production uses.
     fn open_temp_db(setup_sql: &str) -> (DbState, std::path::PathBuf) {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("dblitz_schema_test_{nanos}.sqlite"));
+        let path = crate::db::util::unique_temp_path("dblitz_schema_test", ".sqlite");
         {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(setup_sql).unwrap();

@@ -1,6 +1,6 @@
 [package]
 name = "dblitz"
-version = "26.7.5"
+version = "26.7.6"
 description = "Read-only SQLite browser"
 authors = ["tstone-1"]
 edition = "2021"

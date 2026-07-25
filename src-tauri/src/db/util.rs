@@ -109,9 +109,38 @@ pub(super) fn collect_rows(
     Ok(rows)
 }
 
+/// Build a collision-free path under the OS temp dir for a test fixture.
+///
+/// The obvious `SystemTime::now().as_nanos()` is *not* collision-free here, and
+/// three fixtures used it. `cargo test` runs tests on parallel threads, and two
+/// of them can read the same nanosecond — the clock is not re-read fast enough
+/// to separate them — so both land on the same filename, and the second
+/// `CREATE TABLE` fails with "table users already exists". That produced an
+/// intermittent red `execute_sql_rejects_writes_with_friendly_message` that
+/// passed on every re-run (seen 2026-07-25, during a release). A process id plus
+/// a monotonic counter is unique by construction, across both concurrent threads
+/// and concurrently running test binaries.
+#[cfg(test)]
+pub(super) fn unique_temp_path(prefix: &str, suffix: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("{prefix}_{}_{id}{suffix}", std::process::id()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unique_temp_path_never_repeats_within_a_process() {
+        // The regression this guards: the previous nanosecond-timestamp scheme
+        // could return the same path twice in a tight loop.
+        let paths: std::collections::HashSet<_> = (0..1000)
+            .map(|_| unique_temp_path("t", ".sqlite"))
+            .collect();
+        assert_eq!(paths.len(), 1000, "unique_temp_path handed out a duplicate");
+    }
 
     #[test]
     fn err_ctx_prefixes_context_onto_error() {

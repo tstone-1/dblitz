@@ -1,6 +1,6 @@
 {
   "name": "dblitz",
-  "version": "26.7.5",
+  "version": "26.7.6",
   "description": "Read-only SQLite browser",
   "type": "module",
   "scripts": {

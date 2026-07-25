@@ -5,16 +5,24 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
-## [26.7.6] - Unreleased
+## [26.7.6] - 2026-07-25
 
 ### Added
+- **macOS builds are signed with a Developer ID identity and notarized by
+  Apple.** Downloading the `.dmg` from the releases page and opening it now just
+  works — no more "dblitz is damaged and can't be opened", and no
+  `xattr -dr com.apple.quarantine` incantation. Installing through the Homebrew
+  cask was already free of that error, because the cask stripped the quarantine
+  flag itself; this fixes the direct download, which the cask could never help.
+  Windows builds remain unsigned and still raise a SmartScreen warning on first
+  launch.
 - **dblitz updates itself.** About ten seconds after launch it checks the GitHub
   releases page; when a newer version exists a bar offers **Install and restart**,
   and dblitz downloads, verifies, installs and relaunches into the new build. A
   one-time notice on the next launch confirms the update landed. Every payload is
   signed with a minisign key and verified against the public key built into the
-  app before anything is installed — the only cryptographic control on the update
-  path, since dblitz builds are ad-hoc signed at best.
+  app before anything is installed — a control independent of the macOS code
+  signature above, and the only one on the update path for Windows and Linux.
 - **Settings → Updates**, with the running version, a manual **Check for
   updates** button, and a **Check at startup** opt-out (stored in `app.json`).
   The startup check is silent when it fails — an offline user is not nagged about
@@ -32,6 +40,12 @@ Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
   could read the same pre-merge state and the last upload would silently drop the
   others' platform entries. Nothing failed; the release just quietly updated one
   platform. Serializing costs wall-clock time and nothing else.
+- **An intermittently failing test no longer reddens release builds.** Three test
+  fixtures named their temp database from the current time in nanoseconds, which
+  is not unique when `cargo test` runs them on parallel threads — two could land
+  on the same filename and the second would fail with "table users already
+  exists", then pass on re-run. They now share one helper that derives the name
+  from the process id and a counter, so it is unique by construction.
 
 ## [26.7.5] - 2026-07-24
 

@@ -1,5 +1,12 @@
 # dblitz - Build Instructions
 
+> **Distribution model:** **macOS release builds are signed with a Developer ID
+> identity and notarized by Apple** (since 26.7.6) — users open them normally.
+> **Windows builds are unsigned**; SmartScreen warns on first launch. Local and
+> fork builds stay ad-hoc signed (`"signingIdentity": "-"` in `tauri.conf.json`)
+> unless you export `APPLE_SIGNING_IDENTITY` yourself — see
+> [macOS code signing and notarization](#macos-code-signing-and-notarization).
+
 ## Prerequisites
 
 - **Node.js** 18+ (for frontend tooling)
@@ -210,6 +217,159 @@ date.
 > *real* config file and would otherwise make the next real launch believe it had
 > just been updated.
 
+## macOS code signing and notarization
+
+**Status: enabled 2026-07-25, ships from 26.7.6.** macOS release builds are
+signed with a Developer ID identity and notarized by Apple, so the `.dmg` opens
+and the app launches with no Gatekeeper bypass — replacing the tap cask's
+`postflight` quarantine strip, which only ever helped Homebrew users and did
+nothing for a direct `.dmg` download.
+
+This is **independent of the updater's minisign key** — different key, different
+purpose, different failure mode. Apple's signature authenticates the bundle to
+Gatekeeper; the minisign key authenticates an update payload to an already
+installed dblitz. See [Updater signing key](#updater-signing-key).
+
+### The identity is shared with screenpick, and that has a consequence
+
+dblitz signs with the **same** Developer ID Application certificate and the same
+App Store Connect notarization key as `screenpick`:
+
+| Thing | Value |
+|---|---|
+| Signing identity | `Developer ID Application: Timo Stein (NVX72G8SJ8)` |
+| Team ID | `NVX72G8SJ8`, G2 sub-CA, valid to 2031-07-26 |
+| Notarization Key ID | `T87S5KZQ4J` |
+
+That is the normal model, not a shortcut: a Developer ID Application certificate
+certifies a *team*, never an app — nothing in it names a bundle — and Apple caps
+an account at five of them precisely because they are not meant to be minted
+per-app. What is per-app is the bundle identifier (`com.tstone.dblitz`), not the
+signing material.
+
+The consequence to remember: **certificate rotation is a two-repo event.** On
+expiry, revocation, or compromise, reissue once and then update
+`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD` and `APPLE_SIGNING_IDENTITY`
+in **both** `tstone-1/dblitz` and `tstone-1/screenpick`. A repo left behind does
+not fail loudly at rotation time — it fails at its next release, and only if the
+CI verification gate below is intact.
+
+Already-published releases survive a rotation: notarization tickets stay valid
+after the signing certificate expires.
+
+Where the credentials live, how the certificate was issued, and the import traps
+hit while setting it up (`errSecNoSuchKeychain` on a GUI `.cer` import, the
+missing G2 intermediate, `errSecInternalComponent` from the private key's ACL)
+are documented once, in
+[`screenpick/BUILD.md` → macOS code signing and notarization](https://github.com/tstone-1/screenpick/blob/main/BUILD.md#macos-code-signing-and-notarization).
+They are properties of the machine and the Apple account, not of either app, so
+they are not duplicated here.
+
+### Building signed locally
+
+`APPLE_SIGNING_IDENTITY` (env) **overrides** `bundle.macOS.signingIdentity` in
+`tauri.conf.json`, so the committed `"-"` can stay: plain dev builds remain
+ad-hoc, and exporting the identity switches a build to signed. Hardened runtime
+is on by default and is required for notarization — do not turn it off.
+
+```sh
+export APPLE_SIGNING_IDENTITY="Developer ID Application: Timo Stein (NVX72G8SJ8)"
+export APPLE_API_KEY=T87S5KZQ4J
+export APPLE_API_ISSUER=<ISSUER-UUID>
+export APPLE_API_KEY_PATH="$HOME/.appstoreconnect/private_keys/AuthKey_T87S5KZQ4J.p8"
+npx tauri build --target aarch64-apple-darwin   # and/or x86_64-apple-darwin
+```
+
+Note dblitz builds **two separate per-arch bundles**, not one universal binary
+like screenpick — so a local signed build notarizes whichever target you named,
+and CI submits `aarch64` and `x64` independently.
+
+**Budget real time, and keep the machine awake.** Apple's notary service is not
+fast or predictable — minutes on a good day, the better part of an hour on a bad
+one. `notarytool --wait` holds an open poll for the whole duration, and idle
+sleep drops it (on a laptop, default battery idle sleep can be 1 minute):
+
+```sh
+npx tauri build --target aarch64-apple-darwin &
+caffeinate -dimsu -w $!     # releases itself when the build exits
+```
+
+Once the payload has uploaded, the submission survives on Apple's side
+regardless — a lost poll costs a `stapler staple`, not a rebuild.
+
+### Verify — the build does NOT fail if notarization is skipped
+
+When the credentials are missing or malformed the bundler logs `skipping app
+notarization` and **exits 0**. The result is a signed, un-notarized app that
+Gatekeeper still rejects on any machine that has never seen it: the same
+looks-green failure shape as a release with no `latest.json`. Always check the
+artifact:
+
+```sh
+APP=src-tauri/target/aarch64-apple-darwin/release/bundle/macos/dblitz.app
+codesign -dv --verbose=4 "$APP" 2>&1 | grep -E 'Authority|TeamIdentifier|flags'
+xcrun stapler validate "$APP"   # "The validate action worked!"
+spctl -a -vvv -t exec "$APP"    # "source=Notarized Developer ID"
+```
+
+Expect `Authority=Developer ID Application: …` and `flags=…(runtime)`.
+
+> **The bundler notarizes the `.app`, not the `.dmg`.** After a signed build the
+> DMG carries a Developer ID signature but no ticket, and
+> `spctl -a -t open --context context:primary-signature <dmg>` rejects it as
+> `Unnotarized Developer ID`. Since the DMG is what users download — directly
+> and through the Homebrew cask — opening it would still raise "Apple cannot
+> check it for malicious software": most of the benefit lost, on an artifact
+> that verifies clean if you only ever check the `.app`. `release.yml`
+> therefore notarizes and staples the DMG in a separate step, **per matrix
+> leg**, and re-uploads it over the asset `tauri-action` published
+> (`gh release upload --clobber`, which resolves the still-draft release by
+> tag). Verify a release DMG with the `-t open` form above, not just `-t exec`
+> on the app.
+
+Ordering that has to hold: the staple happens in the `build` job, and
+`update-tap` hashes the DMG only after `publish` — so the cask's `sha256` is of
+the stapled bytes. Move the staple later, or the hash earlier, and the cask ends
+up with a checksum that never matches the published asset.
+
+**Updates inherit the signature.** The app bundler signs → notarizes → staples
+the `.app`, and the updater bundler tars *that* already-stapled bundle without
+re-signing. The staple ticket lives at `Contents/CodeResources`, an ordinary file
+rather than an extended attribute, which is why it survives being tarred.
+
+### CI
+
+Six repo secrets, consumed by the two macOS legs only:
+
+| Secret | Value |
+|---|---|
+| `APPLE_CERTIFICATE` | base64 of the `.p12` (`openssl base64 -A -in …`) |
+| `APPLE_CERTIFICATE_PASSWORD` | the `.p12` export password |
+| `APPLE_SIGNING_IDENTITY` | `Developer ID Application: Timo Stein (NVX72G8SJ8)` |
+| `APPLE_API_KEY` | the Key ID, `T87S5KZQ4J` |
+| `APPLE_API_ISSUER` | the Issuer UUID |
+| `APPLE_API_KEY_P8` | the `.p8` contents; the workflow writes it to `$RUNNER_TEMP` and points `APPLE_API_KEY_PATH` at it |
+
+Set them with `printf '%s' … | gh secret set …` — `echo` appends a newline, and a
+trailing newline in `APPLE_CERTIFICATE_PASSWORD` surfaces at the *end* of a
+release build as a wrong-password error that reads like a corrupt certificate.
+
+The Tauri CLI imports the certificate itself from `APPLE_CERTIFICATE` /
+`APPLE_CERTIFICATE_PASSWORD` — no manual `security create-keychain` step, and it
+sets the key partition list so `codesign` never blocks on a prompt.
+
+> **The signing vars must be exported via `$GITHUB_ENV`, never listed in the
+> build step's `env:` block.** A fork has none of these secrets; `env:` would
+> then pass an **empty** `APPLE_SIGNING_IDENTITY`, which the CLI reads as "sign
+> with this identity" and fails on. A conditional export step leaves them
+> genuinely unset, so the CLI falls back to the ad-hoc `"-"` and the fork builds.
+
+Each macOS leg ends with a verification step that greps for
+`Authority=Developer ID Application`, the `runtime` flag, a successful
+`stapler validate`, and `source=Notarized Developer ID` — because a skipped
+notarization exits 0 (see above), and without that gate an unnotarized release
+ships looking green.
+
 ## Release Procedure
 
 ### 1. Pre-release Checklist
@@ -297,9 +457,8 @@ cp src-tauri/target/release/dblitz.exe /path/to/shared/tools/dblitz.exe
 ```
 
 **macOS** — there is no shared-exe step; deploy the just-released build to this
-machine through the Homebrew cask (which also strips the Gatekeeper quarantine
-via its `postflight`, avoiding the "damaged" error). Run `brew update` first so
-brew's tap clone picks up the `update-tap` commit CI just pushed:
+machine through the Homebrew cask. Run `brew update` first so brew's tap clone
+picks up the `update-tap` commit CI just pushed:
 
 ```bash
 osascript -e 'quit app "dblitz"'      # if running, so the app bundle can be replaced
@@ -330,8 +489,17 @@ To overwrite a pre-existing non-brew install, use `brew install --cask --force d
   - [ ] Check that the jump list populates after opening files
 - **macOS:**
   - [ ] Installed version matches: `defaults read /Applications/dblitz.app/Contents/Info.plist CFBundleShortVersionString`
-  - [ ] No quarantine flag: `xattr -p com.apple.quarantine /Applications/dblitz.app` (expect "No such xattr")
-  - [ ] App launches without the "damaged" error: `open -a dblitz`
+  - [ ] **The published DMG is notarized, not just the app inside it** — CI gates
+        this, but verify the artifact users actually download, for both arches:
+        ```sh
+        gh release download "v${VERSION}" --pattern "dblitz_${VERSION}_*.dmg" -D /tmp/dmgcheck
+        for d in /tmp/dmgcheck/*.dmg; do
+          spctl -a -vvv -t open --context context:primary-signature "$d"
+        done   # expect "source=Notarized Developer ID" for each
+        ```
+  - [ ] App launches from a *quarantined* copy without the "damaged" error —
+        the notarization payoff. Mount the downloaded DMG and open it, rather
+        than testing the brew-installed copy: `open -a dblitz`
   - [ ] After opening a database, it appears in the Dock icon's right-click **Recent** menu and **File → Open Recent** (`NSDocumentController`, added 26.7.1)
 
 ## Quick Reference
