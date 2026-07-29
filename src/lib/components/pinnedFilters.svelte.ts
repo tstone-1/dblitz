@@ -10,8 +10,7 @@
  */
 
 import type { ColumnFilterValue, ViewConfig } from "$lib/ipc";
-
-type PinState = "none" | "pinned" | "modified";
+import type { PinState } from "./pinLabel";
 
 export interface PinnedFiltersDeps {
   /** Currently selected table name (or null if none). */

@@ -2,10 +2,12 @@
   import "../app.css";
   import { dev } from "$app/environment";
   import { onMount } from "svelte";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getInitialFile, toggleDevtools } from "$lib/ipc";
   import { appState, initTheme, openDatabase, closeDatabase } from "$lib/store.svelte";
   import { update } from "$lib/updateState.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
+  import AppBanners from "$lib/components/AppBanners.svelte";
   import DatabaseStructure from "$lib/components/DatabaseStructure.svelte";
   import BrowseData from "$lib/components/BrowseData.svelte";
   import ExecuteSQL from "$lib/components/ExecuteSQL.svelte";
@@ -19,10 +21,32 @@
   onMount(() => {
     initTheme();
 
-    // Open file passed via CLI args (file association / jump list launch)
-    getInitialFile().then((path) => {
-      if (path) handleOpenFile(path);
-    });
+    // macOS delivers a document open (Finder double-click, Dock "Open Recent",
+    // `open -a dblitz file.db`) as an Apple event that reaches the backend as
+    // RunEvent::Opened -- never as a CLI arg. Two things have to be true for
+    // none of those to get lost, and they are why this is one awaited sequence
+    // rather than two independent calls:
+    //   1. the listener is registered BEFORE get_initial_file, because that
+    //      call is what tells the backend an emit would now be heard;
+    //   2. get_initial_file drains a path the backend stashed because it
+    //      arrived before this webview existed at all (the cold-launch case,
+    //      and also the plain CLI-arg / jump-list launch on Windows).
+    // The backend picks exactly one of the two routes per request, so a path
+    // arriving mid-mount is opened once, not twice.
+    let unlistenOpenFile: UnlistenFn | undefined;
+    let disposed = false;
+    void (async () => {
+      const unlisten = await listen<string>("open-file", (event) => {
+        void handleOpenFile(event.payload);
+      });
+      if (disposed) {
+        unlisten();
+        return;
+      }
+      unlistenOpenFile = unlisten;
+      const path = await getInitialFile();
+      if (path) await handleOpenFile(path);
+    })();
 
     // Resolves the running version, whether this launch follows an update, and
     // whether this install can replace itself at all.
@@ -54,6 +78,8 @@
     document.addEventListener("contextmenu", onContextMenu);
 
     return () => {
+      disposed = true;
+      unlistenOpenFile?.();
       document.removeEventListener("keydown", onKeyDown);
       document.removeEventListener("contextmenu", onContextMenu);
       teardownUpdateCheck();
@@ -63,6 +89,9 @@
 
 <div class="app-shell">
   <Toolbar />
+  <!-- App-global error/notice/update bars: they sit between the toolbar and the
+       tab content, so the order is decided here rather than inside Toolbar. -->
+  <AppBanners />
   <div class="content">
     <div class="tab-panel" class:hidden={appState.activeTab !== "structure"}>
       <DatabaseStructure />

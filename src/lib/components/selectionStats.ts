@@ -23,7 +23,10 @@ interface BuildSelectionStatsOptions {
    *  `selection` is the union bounding box and only cells inside the union are
    *  counted; row/column totals report the distinct selected rows/columns. */
   isSelected?: (row: number, col: number) => boolean;
-  /** Exact distinct row/column counts from the selection rectangles. */
+  /** Exact distinct row/column counts from the selection rectangles. Supplying
+   *  both also skips the per-cell geometry scan entirely — see `trackGeometry`
+   *  below — so the loop only does the numeric aggregation, which stops at the
+   *  first unloaded row. */
   selectedRowCount?: number;
   selectedColumnCount?: number;
   hasMultipleSelectedCells?: boolean;
@@ -48,6 +51,25 @@ export function buildSelectionStats({
   const selectedCols = new Set<number>();
   let selectedCells = 0;
 
+  // Whether the per-cell geometry tally above has to be accumulated at all.
+  // It is only ever read when the caller did NOT supply exact counts, and
+  // DataGrid always does (cellSelection derives them from the selection
+  // rectangles, which costs O(rectangles), not O(cells)). Accumulating it
+  // there is pure redundancy, and expensive redundancy: after Ctrl+A on a wide
+  // table it walks maxRows x columns cells synchronously inside a `$derived`,
+  // on every render pass, long after the numeric scan has given up.
+  // With exact counts the loop keeps exactly one job besides the aggregates:
+  // "does this row contain a selected cell?", so an unloaded row holding no
+  // selected cell can't fake a pending aggregate. That answer breaks at the
+  // first hit, and the whole loop can stop once numeric scanning has stopped.
+  // Exact row+column counts also settle the multiple-cells question on their
+  // own -- a selection built from rectangles covers exactly one cell iff it
+  // covers exactly one row and one column -- so `selectedCells` is redundant
+  // too. See `cellTotal` below.
+  const trackGeometry =
+    isSelected != null
+    && (selectedRowCount === undefined || selectedColumnCount === undefined);
+
   const capRow = Math.min(selection.r1, selection.r0 + maxRows - 1);
   const capped = capRow < selection.r1;
   let allNumeric = true;
@@ -66,17 +88,16 @@ export function buildSelectionStats({
     for (let c = selection.c0; c <= selection.c1; c++) {
       if (isSelected && !isSelected(r, c)) continue;
       rowHasCell = true;
-      if (isSelected) {
-        selectedCols.add(c);
-        selectedCells++;
-      }
+      if (!trackGeometry) break; // membership is the only answer needed
+      selectedCols.add(c);
+      selectedCells++;
     }
     if (!rowHasCell) continue;
-    if (isSelected) selectedRows.add(r);
+    if (trackGeometry) selectedRows.add(r);
     // Geometry is fully counted above; once numeric scanning has stopped, keep
-    // looping (for a disjoint selection's row/col totals) but skip the cell math.
+    // looping only while the row/col totals still have to be tallied here.
     if (numericStopped) {
-      if (!isSelected) break;
+      if (!trackGeometry) break;
       continue;
     }
 
@@ -85,7 +106,7 @@ export function buildSelectionStats({
       allNumeric = false;
       numericPending = true;
       numericStopped = true;
-      if (!isSelected) break;
+      if (!trackGeometry) break;
       continue;
     }
 
@@ -107,14 +128,18 @@ export function buildSelectionStats({
       count++;
     }
 
-    if (numericStopped && !isSelected) break;
+    if (numericStopped && !trackGeometry) break;
   }
 
   const boxCols = selection.c1 - selection.c0 + 1;
   const nRows = selectedRowCount
     ?? (isSelected ? selectedRows.size : selection.r1 - selection.r0 + 1);
   const nCols = selectedColumnCount ?? (isSelected ? selectedCols.size : boxCols);
-  const cellTotal = isSelected ? selectedCells : nRows * nCols;
+  // Only the scanned tally can answer this for a disjoint selection whose
+  // geometry was measured here; with exact counts `nRows * nCols > 1` is an
+  // equivalent test (see `trackGeometry`), and for a plain rectangle it has
+  // always been the definition.
+  const cellTotal = trackGeometry ? selectedCells : nRows * nCols;
   if (!(hasMultipleSelectedCells ?? cellTotal > 1)) return null;
 
   // A capped scan only ever aggregates the first `maxRows` rows, so the

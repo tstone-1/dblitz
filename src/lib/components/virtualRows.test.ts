@@ -134,6 +134,33 @@ describe("createVirtualRows", () => {
     expect(errors[0]).toContain("load failed");
   });
 
+  it("does not surface a cancellation by a newer request as an error", async () => {
+    // cancel_queries bumps a backend generation shared by the browse and SQL
+    // tabs, so cancelling a SQL query rejects an in-flight browse chunk fetch
+    // whose epoch is still current. That must not raise the error bar.
+    const errors: string[] = [];
+    const rows = createVirtualRows({
+      chunkSize: 2,
+      getSelectedTable: () => "items",
+      loadChunk: async () => {
+        // Shaped like the real IPC rejection: err_ctx prefixes the query
+        // context onto the backend message.
+        throw new Error('querying table "items": Query cancelled by a newer request');
+      },
+      cancelQueries: async () => {},
+      getVisibleColumns: () => ["id"],
+      getColumnIndex: () => 0,
+      hasColumns: () => true,
+      setColumns: () => {},
+      setTotalRows: () => {},
+      setError: (message) => errors.push(message),
+    });
+
+    expect(rows.getVisibleRow(0)).toBeNull();
+    await loadsSettled();
+    expect(errors).toEqual([]);
+  });
+
   // chunkSize: 1 makes chunk index == row index, so the cap/eviction math
   // below is easy to reason about: chunk N is row N.
   function makeChunkCountingRows() {
@@ -166,6 +193,28 @@ describe("createVirtualRows", () => {
     expect(materialized).toHaveLength(MAX_CACHED_CHUNKS + 1);
     expect(materialized[0]).toEqual(["0"]);
     expect(materialized.at(-1)).toEqual([String(MAX_CACHED_CHUNKS)]);
+  });
+
+  it("assembles a cache-sized range whose loads evict in-range chunks mid-flight", async () => {
+    const { rows } = makeChunkCountingRows();
+
+    // Chunks 0..99 are in-range AND the least-recently-used entries; chunks
+    // 200..299 top the cache up to exactly the cap, so the first load below
+    // pushes it over and eviction starts at chunk 0 and walks forward.
+    for (let i = 0; i < 100; i++) await rows.getVisibleRows(i, i);
+    for (let i = 200; i < 300; i++) await rows.getVisibleRows(i, i);
+
+    // Exactly MAX_CACHED_CHUNKS wide, so this is NOT the wider-than-the-cache
+    // case: chunks 100..199 have to load, and each load evicts one of the
+    // already-cached 0..99 before assembly would have read it back. Reading
+    // the shared cache back at assembly time therefore failed with
+    // "Selection contains rows that could not be loaded." (W2).
+    const materialized = await rows.getVisibleRows(0, MAX_CACHED_CHUNKS - 1);
+
+    expect(materialized).toHaveLength(MAX_CACHED_CHUNKS);
+    expect(materialized[0]).toEqual(["0"]);
+    expect(materialized[99]).toEqual(["99"]);
+    expect(materialized.at(-1)).toEqual([String(MAX_CACHED_CHUNKS - 1)]);
   });
 
   it("evicts the least-recently-used chunk once the cache exceeds its cap", async () => {

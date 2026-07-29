@@ -38,6 +38,12 @@ import type { QueryResult } from "$lib/ipc";
 
 type Row = (string | null)[];
 
+// Backend message for a query the generation/cancellation token stopped (see
+// `db/query.rs` and `db/sql.rs`). It arrives wrapped in query context by
+// `err_ctx` -- `querying table "x": Query cancelled by a newer request` -- so
+// callers must substring-match it rather than compare.
+const CANCELLED_QUERY_MESSAGE = "Query cancelled by a newer request";
+
 // `S` is an opaque per-reload query snapshot (table + filters + sort) captured
 // by the caller. virtualRows never inspects it; it only pins the value taken at
 // beginReload/reset time and hands it back to loadChunk so background fetches
@@ -142,7 +148,17 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
       if (!isCurrent(myEpoch)) return;
       applyResult(chunkIdx, result, "if-empty");
     })().catch((e) => {
-      if (isCurrent(myEpoch)) deps.setError(String(e));
+      const message = String(e);
+      // `cancel_queries` bumps a backend generation shared by BOTH tabs, so
+      // cancelling a SQL-tab query rejects any browse chunk fetch that happens
+      // to be in flight -- with this epoch still current, so the isCurrent
+      // guard alone does not filter it. That is a successful user action, not
+      // a failure: the chunk simply isn't cached, and the next render calls
+      // getRow() again and refetches it. Reporting it would put a red error
+      // bar up for pressing Cancel.
+      if (isCurrent(myEpoch) && !message.includes(CANCELLED_QUERY_MESSAGE)) {
+        deps.setError(message);
+      }
     }).finally(() => {
       if (pendingChunks.get(chunkIdx) === task) pendingChunks.delete(chunkIdx);
     });
@@ -174,15 +190,43 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
     const snapshot = currentSnapshot;
     const firstChunk = Math.floor(start / deps.chunkSize);
     const lastChunk = Math.floor(end / deps.chunkSize);
+    const chunkCount = lastChunk - firstChunk + 1;
 
-    // Bulk operations can span more chunks than the viewport cache is allowed
-    // to retain. Materialize those ranges independently so LRU eviction cannot
-    // remove an early chunk before the result is assembled.
-    if (lastChunk - firstChunk + 1 > MAX_CACHED_CHUNKS) {
-      const chunks = new Map<number, Row[]>();
+    // Every multi-chunk range is assembled out of `chunks` -- a map local to
+    // this call -- and never by reading `rowCache` back once the loads have
+    // finished. Reading it back is what W2 broke on: each load runs
+    // applyResult -> evictIfOverCap, and an in-range chunk that was ALREADY
+    // cached is only recency-touched at assembly time, i.e. after the
+    // evictions have had their chance to drop it. A Ctrl+A copy over a full
+    // cache then failed with "Selection contains rows that could not be
+    // loaded." for chunks that had been fetched perfectly well. A local map is
+    // immune to that regardless of how wide the range is.
+    const chunks = new Map<number, Row[]>();
+
+    if (chunkCount === 1) {
+      // Single chunk: nothing can evict it between the load and the read (the
+      // load puts it at the most-recent end of the LRU order), so take the
+      // cheap path -- it dedupes against an in-flight viewport fetch through
+      // `pendingChunks` and leaves the chunk cached for the grid to reuse.
+      if (!rowCache.has(firstChunk)) await fetchChunk(firstChunk);
+      const cached = rowCache.get(firstChunk);
+      if (cached) {
+        touchRecency(firstChunk);
+        chunks.set(firstChunk, cached);
+      }
+    } else {
+      // Ranges that still fit in the cache publish what they fetch, so a copy
+      // also warms the viewport for subsequent scrolling (and keeps
+      // applyResult's total-rows/columns side effects). Ranges wider than the
+      // cap deliberately do not: they cannot all stay resident anyway, so
+      // publishing them would only evict the user's actual viewport chunks.
+      const publishFetched = chunkCount <= MAX_CACHED_CHUNKS;
       await Promise.all(
-        Array.from({ length: lastChunk - firstChunk + 1 }, async (_, index) => {
+        Array.from({ length: chunkCount }, async (_, index) => {
           const chunkIdx = firstChunk + index;
+          // Read the cache before the first await, so every task in this batch
+          // sees the same pre-load contents and a later eviction cannot unsee
+          // a hit that was there when the range started.
           const cached = rowCache.get(chunkIdx);
           if (cached) {
             touchRecency(chunkIdx);
@@ -190,29 +234,13 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
             return;
           }
           const result = await deps.loadChunk(chunkIdx * deps.chunkSize, deps.chunkSize, snapshot);
-          if (isCurrent(myEpoch)) chunks.set(chunkIdx, result.rows);
+          if (!isCurrent(myEpoch)) return;
+          chunks.set(chunkIdx, result.rows);
+          if (publishFetched) applyResult(chunkIdx, result, "if-empty");
         }),
       );
-      if (!isCurrent(myEpoch)) {
-        throw new Error("Selection changed while rows were loading. Try again.");
-      }
-
-      const out: Row[] = [];
-      for (let idx = start; idx <= end; idx++) {
-        const chunkIdx = Math.floor(idx / deps.chunkSize);
-        const fullRow = chunks.get(chunkIdx)?.[idx - chunkIdx * deps.chunkSize];
-        if (!fullRow) throw new Error("Selection contains rows that could not be loaded.");
-        out.push(projectVisible(fullRow));
-      }
-      return out;
     }
 
-    const loads: Promise<void>[] = [];
-    for (let chunkIdx = firstChunk; chunkIdx <= lastChunk; chunkIdx++) {
-      if (!rowCache.has(chunkIdx)) loads.push(fetchChunk(chunkIdx));
-    }
-
-    await Promise.all(loads);
     if (!isCurrent(myEpoch)) {
       throw new Error("Selection changed while rows were loading. Try again.");
     }
@@ -220,12 +248,8 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
     const out: Row[] = [];
     for (let idx = start; idx <= end; idx++) {
       const chunkIdx = Math.floor(idx / deps.chunkSize);
-      const chunk = rowCache.get(chunkIdx);
-      if (chunk) touchRecency(chunkIdx);
-      const fullRow = chunk?.[idx - chunkIdx * deps.chunkSize];
-      if (!fullRow) {
-        throw new Error("Selection contains rows that could not be loaded.");
-      }
+      const fullRow = chunks.get(chunkIdx)?.[idx - chunkIdx * deps.chunkSize];
+      if (!fullRow) throw new Error("Selection contains rows that could not be loaded.");
       out.push(projectVisible(fullRow));
     }
     return out;

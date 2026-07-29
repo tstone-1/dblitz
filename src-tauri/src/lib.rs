@@ -152,7 +152,7 @@ fn open_database(
     state: State<'_, Arc<DbState>>,
     path: String,
 ) -> Result<Vec<TableInfo>, String> {
-    let result = db::open_database(&state, &path);
+    let result = db::open_database(&state, &path).err_ctx(&format!("opening {path}"));
     if result.is_ok() {
         #[cfg(windows)]
         add_to_recent_docs(&path);
@@ -192,9 +192,162 @@ fn set_export_dir(dir: Option<String>) -> Result<(), String> {
     config::set_export_dir(dir)
 }
 
+/// Slot for a database path the OS asked us to open before the webview was in
+/// any position to hear about it.
+///
+/// macOS never puts a document open in argv: Finder double-clicks, Dock "Open
+/// Recent" entries and `open -a dblitz file.db` all arrive as Apple events,
+/// surfaced by Tauri as `RunEvent::Opened`. Those can land at any point in the
+/// process lifetime, including before the webview has loaded — and an emitted
+/// event with no listener is not queued, it is dropped, which reads to the user
+/// as "double-clicking a database opens an empty dblitz".
+///
+/// So the handler picks exactly one of two delivery routes, and `webview_ready`
+/// decides which:
+///   - not ready yet: stash the path here; [`get_initial_file`] hands it over
+///     when the page mounts.
+///   - ready: emit `open-file`, which the page is listening for by then.
+///
+/// Choosing one route rather than doing both is what stops a path that arrives
+/// mid-mount from being opened twice.
+#[derive(Default)]
+struct PendingOpen(parking_lot::Mutex<PendingOpenState>);
+
+#[derive(Default)]
+struct PendingOpenState {
+    path: Option<String>,
+    /// Set by [`get_initial_file`], which the page calls *after* registering its
+    /// `open-file` listener — so this is a proxy for "an emit would be heard".
+    webview_ready: bool,
+}
+
+impl PendingOpen {
+    /// Record an OS open request. Returns `Some(path)` when the caller should
+    /// emit it to the webview, `None` when it has been stashed instead.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn deliver(&self, path: String) -> Option<String> {
+        let mut state = self.0.lock();
+        if state.webview_ready {
+            Some(path)
+        } else {
+            state.path = Some(path);
+            None
+        }
+    }
+
+    /// Drain the stash and mark the webview ready, falling back to the launch
+    /// argument. `argv_path` is passed in rather than read here so the decision
+    /// is testable without touching the process environment.
+    fn take_initial(&self, argv_path: Option<String>) -> Option<String> {
+        let mut state = self.0.lock();
+        state.webview_ready = true;
+        state.path.take().or(argv_path)
+    }
+}
+
+/// Convert a `file://` URL as delivered by the OS into a plain filesystem path.
+///
+/// `RunEvent::Opened` carries URLs, not paths, so a database in
+/// `~/My Databases/` arrives as `file:///Users/x/My%20Databases/db.sqlite`.
+/// Handing that string to SQLite would look for a file whose name literally
+/// contains "%20". Returns `None` for anything that is not a local file URL (a
+/// custom scheme, a remote authority) or that is malformed, so the caller can
+/// log and skip instead of opening something unintended.
+///
+/// Compiled on every platform even though only the macOS arm of the run-event
+/// handler calls it: that keeps it under `cargo test` on the machines this is
+/// actually developed on.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn file_url_to_path(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("file") {
+        return None;
+    }
+    // "file:///path" leaves the authority empty; "file://localhost/path" is the
+    // one non-empty authority RFC 8089 still defines as meaning this machine.
+    // Anything else names a remote host and is not ours to open.
+    let slash = rest.find('/')?;
+    let (authority, path) = rest.split_at(slash);
+    if !(authority.is_empty() || authority.eq_ignore_ascii_case("localhost")) {
+        return None;
+    }
+    // An unencoded '?' or '#' is a URL delimiter, not part of the path — a real
+    // one in a filename would have arrived percent-encoded.
+    let path = path.split(['?', '#']).next()?;
+    let decoded = percent_decode(path)?;
+    // An embedded NUL would be silently truncated by the C APIs downstream,
+    // turning "open A\0B" into "open A".
+    if decoded.is_empty() || decoded.contains('\0') {
+        return None;
+    }
+    Some(decoded)
+}
+
+/// Percent-decode a URL path. `None` on a malformed escape or on bytes that do
+/// not form valid UTF-8 — both mean we cannot tell which file was meant, which
+/// is worth reporting rather than guessing at.
+///
+/// Deliberately does *not* treat '+' as a space: that is form encoding, and a
+/// filename may legitimately contain a plus.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn percent_decode(input: &str) -> Option<String> {
+    fn hex(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hi = hex(*bytes.get(i + 1)?)?;
+            let lo = hex(*bytes.get(i + 2)?)?;
+            out.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Route one OS document-open request to whichever half of [`PendingOpen`] can
+/// actually reach the user: emit it if the webview is listening, stash it if it
+/// is not. A URL that is not a local file is logged and dropped.
+///
+/// Split out of the `RunEvent::Opened` arm rather than written inline so that it
+/// compiles on Windows and Linux too: the `cfg` gate up there is unavoidable
+/// (Tauri gates the variant itself), and everything left inside it is one
+/// destructuring line. This is the part with types to get wrong, and it is
+/// type-checked by every platform's build instead of only by the one nobody
+/// develops on.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn handle_open_request(app: &AppHandle, url: &str) {
+    use tauri::Emitter;
+    let Some(path) = file_url_to_path(url) else {
+        warn!(url, "Ignoring an open request that is not a local file URL");
+        return;
+    };
+    let Some(path) = app.state::<PendingOpen>().deliver(path) else {
+        return;
+    };
+    if let Err(e) = app.emit("open-file", path) {
+        warn!(error = %e, "Failed to hand an open request to the webview");
+    }
+}
+
+/// The database to open at startup: an OS document-open request that arrived
+/// before the webview subscribed (see [`PendingOpen`]), else the launch
+/// argument. The page calls this once on mount, *after* registering its
+/// `open-file` listener — which is what makes the ready flag mean what it says.
 #[tauri::command]
-fn get_initial_file() -> Option<String> {
-    std::env::args().nth(1)
+fn get_initial_file(pending: State<'_, PendingOpen>) -> Option<String> {
+    pending.take_initial(std::env::args().nth(1))
 }
 
 /// This launch's version transition plus whether this install can replace
@@ -220,17 +373,17 @@ fn set_check_for_updates_on_startup(enabled: bool) -> Result<(), String> {
 
 #[tauri::command(async)]
 fn get_tables(state: State<'_, Arc<DbState>>) -> Result<Vec<TableInfo>, String> {
-    db::get_tables(&state)
+    db::get_tables(&state).err_ctx("loading the table list")
 }
 
 #[tauri::command(async)]
 fn get_columns(state: State<'_, Arc<DbState>>, table: String) -> Result<Vec<ColumnInfo>, String> {
-    db::get_columns(&state, &table)
+    db::get_columns(&state, &table).err_ctx(&format!("loading columns for table \"{table}\""))
 }
 
 #[tauri::command(async)]
 fn get_schema(state: State<'_, Arc<DbState>>) -> Result<Vec<SchemaEntry>, String> {
-    db::get_schema(&state)
+    db::get_schema(&state).err_ctx("loading the database schema")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -265,6 +418,7 @@ fn count_rows(
     global_filter: String,
 ) -> Result<i64, String> {
     db::count_rows(&state, &table, &filters, &global_filter)
+        .err_ctx(&format!("counting rows in table \"{table}\""))
 }
 
 #[tauri::command(async)]
@@ -281,10 +435,14 @@ fn export_to_xlsx(
 ) -> Result<String, String> {
     let types = column_types.unwrap_or_default();
     let dest_dir = config::resolve_export_dir();
-    let path = db::export_to_xlsx(&headers, &rows, &types, &dest_dir)?;
+    let path =
+        db::export_to_xlsx(&headers, &rows, &types, &dest_dir).err_ctx("exporting to Excel")?;
     // Open with default application via opener plugin (safe, cross-platform)
     use tauri_plugin_opener::OpenerExt;
-    app.opener().open_path(&path, None::<&str>).str_err()?;
+    app.opener()
+        .open_path(&path, None::<&str>)
+        .str_err()
+        .err_ctx(&format!("opening the exported file {path}"))?;
     Ok(path)
 }
 
@@ -434,7 +592,7 @@ pub fn run() {
         )
         .try_init();
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         // The updater does its HTTP work in Rust (reqwest), not the webview, so
@@ -443,6 +601,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(db_state)
+        .manage(PendingOpen::default())
         .invoke_handler(tauri::generate_handler![
             close_database,
             cancel_queries,
@@ -500,8 +659,181 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    // `build` + `run(callback)` rather than `run(context)` purely so there is a
+    // run-event callback to hang the macOS document-open handling off; the two
+    // are otherwise the same call.
+    app.run(|_app_handle, _event| {
+        // macOS delivers document opens as Apple events, never as argv: Finder
+        // double-clicks, the Dock's "Open Recent" list (which
+        // `add_to_recent_docs` populates) and `open -a dblitz file.db` all land
+        // here. Without this arm every one of those launches shows an empty
+        // window and no error at all. Tauri cfg-gates the `Opened` variant
+        // itself to macOS/iOS, so the match arm has to be gated too or the
+        // Windows and Linux builds stop compiling.
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Opened { urls } = &_event {
+            for url in urls {
+                handle_open_request(_app_handle, url.as_str());
+            }
+        }
+    });
+}
+
+/// Everything about the OS "open this document" path that can be checked
+/// without an OS: the URL-to-path conversion and the two-route delivery
+/// decision. The event plumbing itself (`RunEvent::Opened` firing at all, the
+/// webview receiving `open-file`) is macOS-only and is NOT covered here — see
+/// the comments in [`PendingOpen`] and the run-event handler.
+#[cfg(test)]
+mod open_request_tests {
+    use super::{file_url_to_path, PendingOpen};
+
+    #[test]
+    fn file_url_percent_escapes_are_decoded() {
+        // The case that actually bites: a space in a folder name. Left encoded,
+        // SQLite looks for a file whose name contains a literal "%20".
+        assert_eq!(
+            file_url_to_path("file:///Users/alice/My%20Databases/db.sqlite").as_deref(),
+            Some("/Users/alice/My Databases/db.sqlite")
+        );
+        // Multi-byte UTF-8 arrives as one escape per byte.
+        assert_eq!(
+            file_url_to_path("file:///Users/alice/Gr%C3%B6%C3%9Fe.sqlite").as_deref(),
+            Some("/Users/alice/Größe.sqlite")
+        );
+        // Uppercase hex digits are equally legal.
+        assert_eq!(
+            file_url_to_path("file:///tmp/a%2Db.sqlite").as_deref(),
+            Some("/tmp/a-b.sqlite")
+        );
+    }
+
+    #[test]
+    fn file_url_without_escapes_passes_through() {
+        assert_eq!(
+            file_url_to_path("file:///Users/alice/db.sqlite").as_deref(),
+            Some("/Users/alice/db.sqlite")
+        );
+    }
+
+    #[test]
+    fn plus_is_not_decoded_as_a_space() {
+        // '+' means space in form encoding only. A filename may contain one,
+        // and rewriting it produces a path that does not exist.
+        assert_eq!(
+            file_url_to_path("file:///tmp/c++notes.sqlite").as_deref(),
+            Some("/tmp/c++notes.sqlite")
+        );
+    }
+
+    #[test]
+    fn localhost_authority_is_local_but_a_remote_host_is_not() {
+        assert_eq!(
+            file_url_to_path("file://localhost/Users/alice/db.sqlite").as_deref(),
+            Some("/Users/alice/db.sqlite")
+        );
+        assert_eq!(file_url_to_path("file://server/share/db.sqlite"), None);
+    }
+
+    #[test]
+    fn non_file_urls_are_rejected() {
+        // The handler skips these rather than opening something unintended;
+        // returning a path here would mean handing SQLite an https URL.
+        assert_eq!(file_url_to_path("https://example.com/db.sqlite"), None);
+        assert_eq!(file_url_to_path("dblitz://open/db.sqlite"), None);
+        assert_eq!(file_url_to_path("/Users/alice/db.sqlite"), None);
+    }
+
+    #[test]
+    fn scheme_matching_is_case_insensitive() {
+        assert_eq!(
+            file_url_to_path("FILE:///Users/alice/db.sqlite").as_deref(),
+            Some("/Users/alice/db.sqlite")
+        );
+    }
+
+    #[test]
+    fn malformed_or_unopenable_urls_are_rejected() {
+        // A truncated escape and a non-hex escape: we cannot tell what file was
+        // meant, so say so instead of guessing.
+        assert_eq!(file_url_to_path("file:///tmp/a%2"), None);
+        assert_eq!(file_url_to_path("file:///tmp/a%zz.sqlite"), None);
+        // Invalid UTF-8 (a lone continuation byte).
+        assert_eq!(file_url_to_path("file:///tmp/%FF.sqlite"), None);
+        // An embedded NUL would be truncated silently downstream.
+        assert_eq!(file_url_to_path("file:///tmp/a%00b.sqlite"), None);
+        // No path component at all.
+        assert_eq!(file_url_to_path("file://localhost"), None);
+    }
+
+    #[test]
+    fn query_and_fragment_are_not_part_of_the_path() {
+        assert_eq!(
+            file_url_to_path("file:///tmp/db.sqlite?x=1").as_deref(),
+            Some("/tmp/db.sqlite")
+        );
+        assert_eq!(
+            file_url_to_path("file:///tmp/db.sqlite#frag").as_deref(),
+            Some("/tmp/db.sqlite")
+        );
+    }
+
+    #[test]
+    fn an_open_before_the_webview_is_ready_is_stashed_not_emitted() {
+        // The cold-launch case. Emitting here would reach nobody and the launch
+        // would show an empty window.
+        let pending = PendingOpen::default();
+        assert_eq!(pending.deliver("/tmp/db.sqlite".to_string()), None);
+        assert_eq!(
+            pending.take_initial(None).as_deref(),
+            Some("/tmp/db.sqlite")
+        );
+    }
+
+    #[test]
+    fn an_open_after_the_webview_is_ready_is_emitted_not_stashed() {
+        // The app-already-running case: the page is listening, so the path goes
+        // out as an event. It must NOT also be stashed - a later
+        // `get_initial_file` would then open the same file a second time.
+        let pending = PendingOpen::default();
+        pending.take_initial(None);
+        assert_eq!(
+            pending.deliver("/tmp/db.sqlite".to_string()),
+            Some("/tmp/db.sqlite".to_string())
+        );
+        assert_eq!(pending.take_initial(None), None);
+    }
+
+    #[test]
+    fn a_stashed_path_wins_over_the_launch_argument() {
+        // Both can be present on a cold launch. The OS event names the document
+        // the user actually double-clicked; argv on macOS is the bundle's own
+        // arguments and can be stale or irrelevant.
+        let pending = PendingOpen::default();
+        pending.deliver("/tmp/opened.sqlite".to_string());
+        assert_eq!(
+            pending
+                .take_initial(Some("/tmp/argv.sqlite".to_string()))
+                .as_deref(),
+            Some("/tmp/opened.sqlite")
+        );
+    }
+
+    #[test]
+    fn the_launch_argument_is_used_when_nothing_was_stashed() {
+        // Windows and Linux only ever take this route.
+        let pending = PendingOpen::default();
+        assert_eq!(
+            pending
+                .take_initial(Some("/tmp/argv.sqlite".to_string()))
+                .as_deref(),
+            Some("/tmp/argv.sqlite")
+        );
+        assert_eq!(pending.take_initial(None), None);
+    }
 }
 
 #[cfg(all(test, windows))]

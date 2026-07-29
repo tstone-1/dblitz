@@ -12,6 +12,7 @@
   } from "$lib/store.svelte";
   import DataGrid from "./DataGrid.svelte";
   import type { SelectionData } from "./selectionData";
+  import { createDbGenerationReset } from "./dbGenerationReset.svelte";
   import SqlEditor from "./SqlEditor.svelte";
   import { resolveResultColumnColors } from "./sqlTable";
 
@@ -41,21 +42,21 @@
       : {},
   );
 
-  // Clear results on a database-session change (dbOpenGeneration bumps on every
-  // successful open, same-path reopen included). Without this the SQL tab keeps
+  // Clear results on a database-session change. Without this the SQL tab keeps
   // showing the previous database's rows under the new DB's context, and
   // resultColumnColors re-resolves the stale executedSql against the new DB's
   // tables. The typed `sql` text is deliberately KEPT -- re-running the same
   // query against the just-opened database is a natural next step; only the
   // executed result and the query it was resolved against are dropped.
-  let prevDbGen = 0;
-  $effect(() => {
-    const gen = appState.dbOpenGeneration;
-    if (gen !== prevDbGen) {
-      prevDbGen = gen;
+  const checkDbReset = createDbGenerationReset({
+    getGeneration: () => appState.dbOpenGeneration,
+    onReset: () => {
       result = null;
       executedSql = "";
-    }
+    },
+  });
+  $effect(() => {
+    checkDbReset();
   });
 
   async function executeSql() {

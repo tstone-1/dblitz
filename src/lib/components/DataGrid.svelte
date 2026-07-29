@@ -14,7 +14,7 @@
   import { shouldHandleWindowCopy } from "./copyGate";
   import { pinGlyphPath } from "./pinGlyph";
   import ContextMenu from "./ContextMenu.svelte";
-  import { pinToggleLabel } from "./pinLabel";
+  import { pinToggleLabel, type PinState } from "./pinLabel";
 
   const ROW_HEIGHT = 26;
   const HEADER_HEIGHT = 26;
@@ -61,7 +61,7 @@
   }
   /** Pinned (persistent) filter state + its three toggle/revert/clear actions. */
   interface PinningProps {
-    pinStates?: Record<string, "none" | "pinned" | "modified">;
+    pinStates?: Record<string, PinState>;
     onTogglePinFilter?: (col: string) => void;
     onRevertFilter?: (col: string) => void;
     onClearFilter?: (col: string) => void;
@@ -105,30 +105,11 @@
     locateRequest = null,
   }: Props = $props();
 
-  // Flatten the grouped props back to the local names the markup and logic
-  // below already use, so W10's regrouping is confined to the prop surface.
-  let columnFilters = $derived(filtering?.columnFilters);
-  let onFilterInput = $derived(filtering?.onFilterInput);
-  let onToggleRegex = $derived(filtering?.onToggleRegex);
-
-  let onHideColumn = $derived(columnOps?.onHideColumn);
-  let onSetColumnColor = $derived(columnOps?.onSetColumnColor);
-  let onReorderColumn = $derived(columnOps?.onReorderColumn);
-  let colorPresets = $derived(columnOps?.colorPresets);
-  let initialColumnWidths = $derived(columnOps?.initialColumnWidths);
-  let onResizeColumn = $derived(columnOps?.onResizeColumn);
-  let onResetColumnWidths = $derived(columnOps?.onResetColumnWidths);
-
-  let pinStates = $derived(pinning?.pinStates);
-  let onTogglePinFilter = $derived(pinning?.onTogglePinFilter);
-  let onRevertFilter = $derived(pinning?.onRevertFilter);
-  let onClearFilter = $derived(pinning?.onClearFilter);
-
-  function pinStateOf(col: string): "none" | "pinned" | "modified" {
-    return pinStates?.[col] ?? "none";
+  function pinStateOf(col: string): PinState {
+    return pinning?.pinStates?.[col] ?? "none";
   }
 
-  let showFilters = $derived(columnFilters != null);
+  let showFilters = $derived(filtering?.columnFilters != null);
   // Approximate sticky-header height used only for virtual-scroll row culling
   // (firstVisible/lastVisible). Actual rendered height may drift by a px or two
   // under display scaling — OVERSCAN absorbs the slack. Do NOT reuse this for
@@ -204,9 +185,9 @@
   function onResizeEnd() {
     // Persist the final width once the drag ends (avoids thrashing
     // saveViewConfig on every mousemove).
-    if (resizeCol && onResizeColumn) {
+    if (resizeCol) {
       const w = columnWidths[resizeCol];
-      if (w) onResizeColumn(resizeCol, Math.round(w));
+      if (w) columnOps?.onResizeColumn?.(resizeCol, Math.round(w));
     }
     resizeCol = null;
     document.removeEventListener('mousemove', onResizeMove);
@@ -301,7 +282,7 @@
   // for letting auto-size updates propagate without an extra signalling prop.
   $effect(() => {
     void columns;
-    columnWidths = { ...(initialColumnWidths ?? {}) };
+    columnWidths = { ...(columnOps?.initialColumnWidths ?? {}) };
     tick().then(syncGridTplToDOM);
   });
 
@@ -363,7 +344,7 @@
   function closeHeaderCtx() { headerCtx = null; }
 
   // Header mouse-based reorder (extracted to dragReorder.ts)
-  const reorder = createDragReorder(() => columns, () => onReorderColumn);
+  const reorder = createDragReorder(() => columns, () => columnOps?.onReorderColumn);
 
   function handleGridKeydown(e: KeyboardEvent) {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
@@ -436,14 +417,14 @@
             tabindex={onSort ? 0 : -1}
             aria-sort={sortColumn === col ? (sortAsc ? 'ascending' : 'descending') : 'none'}
             class:sortable={onSort != null}
-            class:has-active-filter={(columnFilters?.[col]?.value ?? '').trim() !== ''}
+            class:has-active-filter={(filtering?.columnFilters?.[col]?.value ?? '').trim() !== ''}
             class:drag-over-header={reorder.reorderOverCol === col && reorder.reorderCol !== col}
             class:dragging={reorder.reorderCol === col}
             data-colidx={columns.indexOf(col)}
             onclick={() => { if (reorder.consumeReorder()) return; onSort?.(col); }}
             onkeydown={(e) => handleHeaderKeydown(e, col)}
             oncontextmenu={(e) => handleHeaderContextMenu(e, col)}
-            onmousedown={(e) => onReorderColumn ? reorder.onMouseDown(e, col) : undefined}
+            onmousedown={(e) => columnOps?.onReorderColumn ? reorder.onMouseDown(e, col) : undefined}
             style={getColor(col) ? `background: ${getColor(col)};` : ''}>
             {col}{#if pinStateOf(col) !== "none"}<span class="header-pin-glyph" class:modified={pinStateOf(col) === "modified"} title={pinStateOf(col) === "modified" ? "Pinned filter (modified)" : "Pinned filter"}>
               <svg viewBox="0 0 16 16" width="9" height="9" aria-hidden="true"><path d={pinGlyphPath} fill="currentColor" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
@@ -459,7 +440,7 @@
         <div class="grid-row filter-row" role="row" tabindex="-1">
           <div class="grid-cell row-num-header" role="gridcell" tabindex="-1"></div>
           {#each columns as col}
-            {@const f = columnFilters?.[col]}
+            {@const f = filtering?.columnFilters?.[col]}
             {@const ps = pinStateOf(col)}
             <div class="grid-cell filter-cell" role="gridcell" tabindex="-1" data-pin-state={ps}>
               <input
@@ -467,15 +448,15 @@
                 class="col-filter-input"
                 placeholder="Filter..."
                 value={f?.value ?? ''}
-                oninput={(e) => onFilterInput?.(col, (e.target as HTMLInputElement).value)}
+                oninput={(e) => filtering?.onFilterInput?.(col, (e.target as HTMLInputElement).value)}
               />
               <button
                 class="regex-toggle"
                 class:active={f?.is_regex ?? false}
                 title={f?.is_regex ? 'Regex mode (e.g. foo|bar matches either)' : 'Text mode — use ; for OR (foo;bar). Toggle for regex (foo|bar).'}
-                onclick={() => onToggleRegex?.(col)}
+                onclick={() => filtering?.onToggleRegex?.(col)}
               >.*</button>
-              {#if onTogglePinFilter}
+              {#if pinning?.onTogglePinFilter}
                 <button
                   class="pin-btn filter-pin-btn"
                   data-pin-state={ps}
@@ -486,7 +467,7 @@
                         ? "Saved filter exists — click to update, right-click to revert"
                         : "Save filter as default for this column"
                   }
-                  onclick={() => onTogglePinFilter?.(col)}
+                  onclick={() => pinning?.onTogglePinFilter?.(col)}
                   oncontextmenu={(e) => handlePinContextMenu(e, col)}
                   aria-label="Pin column filter"
                 >
@@ -566,35 +547,35 @@
 {#if pinCtx}
   <ContextMenu x={pinCtx.x} y={pinCtx.y} onClose={closePinCtx}>
     {@const ctxState = pinStateOf(pinCtx.col)}
-    <button class="ctx-item" onclick={() => { onTogglePinFilter?.(pinCtx!.col); closePinCtx(); }}>
+    <button class="ctx-item" onclick={() => { pinning?.onTogglePinFilter?.(pinCtx!.col); closePinCtx(); }}>
       {pinToggleLabel(ctxState, "filter")}
     </button>
-    {#if ctxState === "modified" && onRevertFilter}
-      <button class="ctx-item" onclick={() => { onRevertFilter!(pinCtx!.col); closePinCtx(); }}>Revert to pinned value</button>
+    {#if ctxState === "modified" && pinning?.onRevertFilter}
+      <button class="ctx-item" onclick={() => { pinning?.onRevertFilter?.(pinCtx!.col); closePinCtx(); }}>Revert to pinned value</button>
     {/if}
-    {#if onClearFilter}
+    {#if pinning?.onClearFilter}
       <div class="ctx-sep"></div>
-      <button class="ctx-item" onclick={() => { onClearFilter!(pinCtx!.col); closePinCtx(); }}>Clear filter</button>
+      <button class="ctx-item" onclick={() => { pinning?.onClearFilter?.(pinCtx!.col); closePinCtx(); }}>Clear filter</button>
     {/if}
   </ContextMenu>
 {/if}
 
 {#if headerCtx}
   <ContextMenu x={headerCtx.x} y={headerCtx.y} onClose={closeHeaderCtx}>
-    {#if onResetColumnWidths}
-      <button class="ctx-item" onclick={() => { onResetColumnWidths!(); closeHeaderCtx(); }}>Auto-fit column widths</button>
+    {#if columnOps?.onResetColumnWidths}
+      <button class="ctx-item" onclick={() => { columnOps?.onResetColumnWidths?.(); closeHeaderCtx(); }}>Auto-fit column widths</button>
     {/if}
-    {#if onHideColumn}
-      <button class="ctx-item" onclick={() => { onHideColumn!(headerCtx!.col); closeHeaderCtx(); }}>Hide column</button>
+    {#if columnOps?.onHideColumn}
+      <button class="ctx-item" onclick={() => { columnOps?.onHideColumn?.(headerCtx!.col); closeHeaderCtx(); }}>Hide column</button>
     {/if}
-    {#if onSetColumnColor && colorPresets}
+    {#if columnOps?.onSetColumnColor && columnOps.colorPresets}
       <div class="ctx-sep"></div>
       <div class="ctx-color-label">Color</div>
       <div class="ctx-color-row">
-        {#each colorPresets as color}
+        {#each columnOps.colorPresets ?? [] as color}
           <button class="ctx-swatch" class:active={getColor(headerCtx.col) === color}
             style="background: {color || 'transparent'}; {!color ? 'border: 1px dashed var(--text-muted);' : ''}"
-            onclick={() => { onSetColumnColor!(headerCtx!.col, color); closeHeaderCtx(); }}
+            onclick={() => { columnOps?.onSetColumnColor?.(headerCtx!.col, color); closeHeaderCtx(); }}
             title={color || "No color"}></button>
         {/each}
       </div>
