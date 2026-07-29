@@ -416,6 +416,14 @@ ships looking green.
 npx tauri build
 ```
 
+> **This exits 1 even when it succeeds.** With `createUpdaterArtifacts` enabled
+> the bundler ends by signing the updater artifacts, and locally
+> `TAURI_SIGNING_PRIVATE_KEY` is deliberately unset (the key lives only in
+> KeePass and the repo secrets) — so the build writes the exe and both
+> installers, *then* fails with "A public key has been found, but no private
+> key". Judge this step by the artifact check below, not the exit code; signed
+> updater artifacts only ever come from CI.
+
 **Verify build:**
 ```bash
 ls -lh src-tauri/target/release/dblitz.exe
