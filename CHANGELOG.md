@@ -5,6 +5,19 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.7.7] - Unreleased
+
+### Fixed
+- **Opening a database that is already open no longer does nothing (Windows).**
+  dblitz keeps one window per database file, so launching it again on a file it
+  already has open brings that window forward instead of opening a duplicate.
+  When Windows' foreground lock denied that — which it does whenever another app
+  owns the foreground, i.e. every double-click from Explorer and every launch
+  while a full-screen app has focus — the second launch exited silently: no
+  window, no message, nothing. It read as dblitz refusing to open the file, with
+  the real window sitting buried behind other windows the whole time. The
+  existing window's taskbar button now flashes until you bring it up.
+
 ## [26.7.6] - 2026-07-25
 
 ### Added

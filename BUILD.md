@@ -9,7 +9,11 @@
 
 ## Prerequisites
 
-- **Node.js** 18+ (for frontend tooling)
+- **Node.js** 24 (for frontend tooling). Pinned in `.nvmrc`; every CI
+  `setup-node` step reads that file via `node-version-file`, so there is one
+  source of truth. `@types/node` is held on the matching major deliberately —
+  type-checking against a newer API surface than the runtime CI ships on passes
+  locally and fails at runtime. Bump `.nvmrc` and `@types/node` together.
 - **Rust** (latest stable via [rustup](https://rustup.rs/))
 - **ripgrep** (`rg`) for release checklist verification commands
 - **Windows**: Visual Studio Build Tools with "Desktop development with C++" workload
@@ -391,13 +395,18 @@ ships looking green.
 - [ ] All changes tested and working: `npm run tauri dev`
 
 **Version & documentation:**
-- [ ] Update version in all three files:
+- [ ] Update version in all four files:
   - `src-tauri/Cargo.toml` (line 3)
   - `src-tauri/tauri.conf.json` (line 4)
   - `package.json` (line 3)
+  - `package-lock.json` — **both** the top-level `"version"` and the one under
+    `packages[""]`. Use `npm version <v> --no-git-tag-version`, which edits
+    `package.json` and both lockfile entries in one go; hand-editing
+    `package.json` alone leaves the lockfile behind on the previous version
+    (26.7.6 shipped that way).
 - [ ] Verify all version files agree:
   ```bash
-  rg -n '"version"|^version =' package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json
+  rg -n '"version"|^version =' package.json package-lock.json src-tauri/Cargo.toml src-tauri/tauri.conf.json | head
   ```
 - [ ] Update `CHANGELOG.md` with new version entry and date
 
@@ -514,9 +523,10 @@ npm audit
 cd src-tauri && cargo audit && cd ..
 npm run check
 cd src-tauri && cargo clippy --all-targets --all-features -- -D warnings && cd ..
-# Update version in Cargo.toml, tauri.conf.json, package.json
-# Verify all three version files match
-rg -n '"version"|^version =' package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json
+# Update version: npm version <v> --no-git-tag-version covers package.json +
+# package-lock.json; edit Cargo.toml and tauri.conf.json by hand
+# Verify all four version files match
+rg -n '"version"|^version =' package.json package-lock.json src-tauri/Cargo.toml src-tauri/tauri.conf.json | head
 # Update CHANGELOG.md
 npx tauri build
 cp src-tauri/target/release/dblitz.exe /path/to/shared/tools/dblitz.exe
@@ -540,12 +550,16 @@ Versions follow [CalVer](https://calver.org/) using the `YY.M.MICRO` format:
 
 Examples: `26.4.0` (first April 2026 release), `26.4.1` (second), `26.5.0` (first May release).
 
-Version must be updated in three files:
+Version must be updated in four files:
 - `src-tauri/Cargo.toml` - Rust package version
 - `src-tauri/tauri.conf.json` - Tauri app version
 - `package.json` - npm package version
+- `package-lock.json` - npm lockfile, in **two** places (top-level `"version"`
+  and `packages[""].version`). Nothing fails when this drifts, which is why it
+  drifted: `npm install` silently rewrites it, so a stale lockfile version
+  surfaces as an unrelated dirty file in some later session's diff.
 
-Before publishing, the exact same `YY.M.MICRO` value must appear in all three
+Before publishing, the exact same `YY.M.MICRO` value must appear in all four
 files, the local tag must be `vYY.M.MICRO`, and the GitHub release must point to
 that tag. Do not leave a tag, release, or version file behind on an older patch.
 
