@@ -20,6 +20,7 @@
   import ColumnFinder from "./ColumnFinder.svelte";
   import { createPinnedFilters } from "./pinnedFilters.svelte";
   import { createAutoSelectFirstTable } from "./autoSelectFirstTable.svelte";
+  import { createDbGenerationReset } from "./dbGenerationReset.svelte";
   import { createVirtualRows } from "./virtualRows.svelte";
   import {
     buildActiveFilters,
@@ -55,11 +56,10 @@
   let sidebarCollapsed = $state(false);
 
   // Auto-select the lone table when opening a single-table DB. The helper
-  // owns the "did we already auto-select for this db path?" bookkeeping.
-  // `onReset` is belt-and-braces for the close-to-null path: the merged
-  // effect below already resets on every dbPath change (including to
-  // null), but wiring this too means the reset also fires if this helper's
-  // own internal bookkeeping (autoSelectedDb) is ever reused standalone.
+  // owns the "did we already auto-select for this open?" bookkeeping.
+  // `onReset` is not belt-and-braces: closing a database does not bump
+  // dbOpenGeneration, so this is the ONLY thing that clears the view when
+  // dbPath goes null.
   const checkAutoSelect = createAutoSelectFirstTable(
     (name) => {
       sidebarCollapsed = true;
@@ -72,32 +72,22 @@
   // cache alive across a Toolbar-driven openDatabase() call (Open DB /
   // recents), so switching to a different database left the grid showing
   // (and querying) the PREVIOUS database's table. Reset every per-database
-  // local state whenever a new backend session is published.
-  //
-  // Gated on appState.dbOpenGeneration, not dbPath: reopening the ALREADY-open
-  // file reopens the backend connection (clearing its caches) without changing
-  // dbPath, so a dbPath-only gate would keep serving the previous connection's
-  // stale rows. The generation bumps on every successful open, same-path
-  // included; the close-to-null case is still covered because checkAutoSelect()
-  // fires onReset (-> resetForNewDatabase) whenever dbPath becomes null.
-  //
-  // `prevDbGen` is a plain `let`, not `$state` -- it's only ever read and
-  // written from inside this effect, so wrapping it reactively would just be
-  // redundant bookkeeping (and risks the effect depending on its own write).
-  //
+  // local state whenever a new backend session is published. The close-to-null
+  // case is covered separately: checkAutoSelect() fires onReset (->
+  // resetForNewDatabase) whenever dbPath becomes null.
+  const checkDbReset = createDbGenerationReset({
+    getGeneration: () => appState.dbOpenGeneration,
+    onReset: () => resetForNewDatabase(),
+  });
+
   // The reset and the single-table auto-select deliberately live in ONE
   // effect (not two separate ones) so their ordering is guaranteed rather
   // than left to Svelte's effect-scheduling order: resetForNewDatabase()
   // always runs BEFORE checkAutoSelect() for the same open, so a single-table
   // DB's auto-selected table is never clobbered by the reset that opening it
   // triggered.
-  let prevDbGen = 0;
   $effect(() => {
-    const gen = appState.dbOpenGeneration;
-    if (gen !== prevDbGen) {
-      prevDbGen = gen;
-      resetForNewDatabase();
-    }
+    checkDbReset();
     checkAutoSelect();
   });
 
@@ -159,8 +149,19 @@
     limit: number,
     snapshot: QuerySnapshot,
   ): Promise<QueryResult> {
+    // virtualRows also captures a snapshot when it resets with no table
+    // selected, and a render pass in flight at that moment can still ask for a
+    // row. `query_table`'s Rust `table` is a plain `String`, so forwarding the
+    // null would fail Tauri's argument deserialization and surface as an opaque
+    // error toast; an empty page is the honest answer. `total_rows: null` so
+    // the caller's row count is left alone rather than being zeroed by a chunk
+    // fetch belonging to no table.
+    const table = snapshot.table;
+    if (table === null) {
+      return Promise.resolve({ columns: [], rows: [], total_rows: null, offset });
+    }
     return queryTable({
-      table: snapshot.table,
+      table,
       offset,
       limit,
       filters: snapshot.filters,
@@ -253,6 +254,15 @@
     const reload = await virtualRows.beginReload();
     if (reload === null) return;
     const { epoch: myEpoch, snapshot } = reload;
+    // beginReload() captures the snapshot synchronously, before its first
+    // await, so it pins the non-null selectedTable guarded above. This branch
+    // is therefore unreachable; it exists to hand countRows the plain `string`
+    // its Rust signature requires without an assertion (see ipc.ts).
+    const table = snapshot.table;
+    if (table === null) {
+      loading = false;
+      return;
+    }
     try {
       // Use the epoch's pinned snapshot for the first chunk AND the row count
       // so both agree with the background chunk fetches virtualRows will run.
@@ -266,7 +276,7 @@
         totalRows = result.rows.length < CHUNK_SIZE ? result.rows.length : CHUNK_SIZE;
         countPending = true;
         countRows({
-          table: snapshot.table, filters: snapshot.filters, globalFilter: snapshot.globalFilter,
+          table, filters: snapshot.filters, globalFilter: snapshot.globalFilter,
         }).then((count) => {
           if (virtualRows.isCurrent(myEpoch)) {
             totalRows = count;

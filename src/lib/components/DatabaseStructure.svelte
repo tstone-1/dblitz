@@ -2,6 +2,7 @@
   import { getSchema, getColumns, type ColumnInfo, type SchemaEntry } from "$lib/ipc";
   import { appState } from "$lib/store.svelte";
   import { createAutoSelectFirstTable } from "./autoSelectFirstTable.svelte";
+  import { createDbGenerationReset } from "./dbGenerationReset.svelte";
 
   let selectedTable = $state<string | null>(null);
   let columns = $state<ColumnInfo[]>([]);
@@ -29,18 +30,17 @@
 
   // Same stale-state class as BrowseData: selectedTable/columns used to
   // survive a direct A -> B database switch (and a same-path reopen), leaving
-  // the previous database's table "selected" with its stale column list. Gated
-  // on dbOpenGeneration so a same-path reopen resets too; the close-to-null
-  // case is covered by checkAutoSelect's onReset. Reset runs BEFORE
-  // checkAutoSelect in one effect so a single-table DB's auto-selection is
-  // never clobbered. `prevDbGen` is a plain `let` — only this effect uses it.
-  let prevDbGen = 0;
+  // the previous database's table "selected" with its stale column list. The
+  // close-to-null case is covered by checkAutoSelect's onReset.
+  const checkDbReset = createDbGenerationReset({
+    getGeneration: () => appState.dbOpenGeneration,
+    onReset: () => resetForNewDatabase(),
+  });
+
+  // Reset runs BEFORE checkAutoSelect in one effect so a single-table DB's
+  // auto-selection is never clobbered by the reset that opening it triggered.
   $effect(() => {
-    const gen = appState.dbOpenGeneration;
-    if (gen !== prevDbGen) {
-      prevDbGen = gen;
-      resetForNewDatabase();
-    }
+    checkDbReset();
     checkAutoSelect();
   });
 

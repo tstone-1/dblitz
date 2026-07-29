@@ -197,16 +197,38 @@ export async function saveViewConfig() {
   }
 }
 
-const defaultViewConfig: ViewConfig = Object.freeze({
-  hidden_columns: [],
-  column_colors: {},
-  sort_column: null,
-  sort_asc: true,
-  column_order: [],
-  pinned_filters: {},
-  pinned_global_filter: null,
-  column_widths: {},
-});
+/**
+ * A brand-new ViewConfig whose nested containers are owned by exactly one
+ * caller. Every call builds fresh arrays/objects ON PURPOSE — this is the one
+ * thing that must not be "DRY-ed up" into a spread of `defaultViewConfig`.
+ * That default is a single frozen object shared by every unconfigured table
+ * (see `getTableConfig`), and `Object.freeze` is shallow, so spreading it into
+ * a per-table entry would copy the same `hidden_columns` array and the same
+ * `pinned_filters` / `column_colors` / `column_widths` objects into every
+ * table — silently, without ever throwing. Callers mutate those in place
+ * through `updateTableConfig` (`cfg.pinned_filters[col] = ...`), so one
+ * table's pinned filter, column color or width would show up on all of them.
+ */
+function freshViewConfig(): ViewConfig {
+  return {
+    hidden_columns: [],
+    column_colors: {},
+    sort_column: null,
+    sort_asc: true,
+    column_order: [],
+    pinned_filters: {},
+    pinned_global_filter: null,
+    column_widths: {},
+  };
+}
+
+/**
+ * Read-only stand-in handed out for tables that have no saved config. A single
+ * shared instance, so `getTableConfig` returns the identical object for every
+ * unconfigured table; frozen so a stray top-level write is loud rather than
+ * corrupting that shared value.
+ */
+const defaultViewConfig: ViewConfig = Object.freeze(freshViewConfig());
 
 /** Read-only access — safe to call from templates/derived. */
 export function getTableConfig(tableName: string): ViewConfig {
@@ -241,19 +263,16 @@ export function updateTableConfig(
   return cfg;
 }
 
-/** Ensures a mutable config entry exists. Call from event handlers only. */
+/**
+ * Ensures a mutable config entry exists. Call from event handlers only.
+ *
+ * Each new table gets its own `freshViewConfig()` — never a copy of
+ * `defaultViewConfig` — so its nested arrays/maps are unshared. See the
+ * factory's comment for what aliasing them would do.
+ */
 export function ensureTableConfig(tableName: string): ViewConfig {
   if (!appState.fileConfig.tables[tableName]) {
-    appState.fileConfig.tables[tableName] = {
-      hidden_columns: [],
-      column_colors: {},
-      sort_column: null,
-      sort_asc: true,
-      column_order: [],
-      pinned_filters: {},
-      pinned_global_filter: null,
-      column_widths: {},
-    };
+    appState.fileConfig.tables[tableName] = freshViewConfig();
   }
   return appState.fileConfig.tables[tableName];
 }

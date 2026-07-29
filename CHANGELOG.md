@@ -5,7 +5,10 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
-## [26.7.7] - Unreleased
+## [26.7.7] - 2026-07-29
+
+Includes fixes and refactors from a full-codebase deep review (0 blockers,
+7 warnings, 8 nitpicks — all addressed).
 
 ### Fixed
 - **Opening a database that is already open no longer does nothing (Windows).**
@@ -17,6 +20,59 @@ Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
   window, no message, nothing. It read as dblitz refusing to open the file, with
   the real window sitting buried behind other windows the whole time. The
   existing window's taskbar button now flashes until you bring it up.
+- **Double-clicking a database file now opens it (macOS).** File associations
+  were declared, but macOS delivers document opens as Apple events rather than
+  command-line arguments, and dblitz only ever read the latter — so
+  double-clicking an associated file (or picking one from the Dock's
+  "Open Recent" menu, which dblitz itself populates) launched the app with
+  nothing opened and no error. Both routes now open the file, whether dblitz is
+  already running or not, including the cold-launch window where the event
+  arrives before the page is ready to receive it.
+- **Copying a very large selection can no longer spuriously fail.** Copy and
+  export assembled their rows out of the shared scroll cache, and the fetches
+  for not-yet-loaded rows could evict already-cached in-range rows mid-assembly
+  — so a Ctrl+A copy on a 100k-row table after some scrolling could throw
+  "Selection contains rows that could not be loaded" for a copy that should
+  have worked. Multi-chunk selections now assemble from an eviction-proof
+  snapshot, the same mechanism the very largest selections already used.
+- **Cancelling a SQL statement no longer flashes an unrelated error.** The
+  cancel also interrupts an in-flight Browse Data chunk fetch (one engine, one
+  cancel switch), and that interruption surfaced as a red error banner even
+  though the grid refetches the chunk by itself on the next render. It is now
+  silent.
+- **Selecting everything no longer stalls on redundant bookkeeping.** The
+  selection-stats bar scanned every cell of a selection (up to 100k rows times
+  every column) inside the render pass to derive counts it had already been
+  handed precomputed; the scan now stops as soon as it has learned what the
+  counts cannot tell it.
+- **Error messages say what dblitz was doing.** Counting rows, loading columns,
+  the schema and the table list, exporting to Excel, and opening a database now
+  prefix their errors with the operation and the object involved, instead of
+  surfacing a bare SQLite message with no context.
+
+### Changed
+- **The app-global banners (errors, notices, update offers) moved out of the
+  toolbar** into their own component mounted by the page, so their placement is
+  an explicit layout decision instead of an accident of the toolbar's internal
+  markup order. No visual change.
+- **Push/PR CI now runs the production build**, closing the gap where a
+  bundle-time breakage that type-checking cannot see would first surface after
+  a release tag was already pushed. A test parses the workflow file and fails
+  if the push gates ever drift below the release gates again.
+- Internal cleanups with no user-visible change: the "reset this tab when a new
+  database session starts" idiom, hand-copied across three tabs with the same
+  subtle reactivity footgun re-explained at each site, extracted into one
+  tested factory; the frontend/backend filter-operator lists pinned by a
+  source-parsing lockstep test (the same mechanism that already guards the
+  color presets); the IPC argument types for table queries tightened to match
+  the Rust contract exactly; the pin-state type defined once instead of three
+  times; DataGrid's grouped props referenced directly instead of through an
+  alias layer; the deliberately-duplicated default view config made a shared
+  factory with its aliasing rationale written down; the SQLite interrupt handle
+  now swaps inside the same critical section as the connection it belongs to;
+  and AGENTS.md's tap-token recovery command corrected to a flag that exists.
+- Tests: 29 added across both languages (frontend 147 → 162, backend
+  124 → 138), including regression tests for every fix above.
 
 ## [26.7.6] - 2026-07-25
 

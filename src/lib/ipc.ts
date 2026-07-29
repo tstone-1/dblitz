@@ -121,7 +121,10 @@ export interface UpdateStatus {
 // ---- Command argument shapes ---------------------------------------------
 
 export interface QueryTableArgs {
-  table: string | null;
+  // Non-nullable on purpose: the Rust `QueryRequest.table` is a plain `String`,
+  // so a null never reaches the query at all -- it fails Tauri's argument
+  // deserialization with an opaque error. Callers narrow before invoking.
+  table: string;
   offset: number;
   limit: number;
   filters: ColumnFilter[];
@@ -131,7 +134,8 @@ export interface QueryTableArgs {
 }
 
 export interface CountRowsArgs {
-  table: string | null;
+  /** Non-nullable for the same reason as `QueryTableArgs.table`. */
+  table: string;
   filters: ColumnFilter[];
   globalFilter: string;
 }

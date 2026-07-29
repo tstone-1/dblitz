@@ -117,20 +117,31 @@ pub fn open_database(state: &DbState, path: &str) -> Result<Vec<TableInfo>, Stri
     let interrupt_handle = conn.get_interrupt_handle();
     let tables = get_tables_inner(&conn)?;
 
-    // Publish the new connection and drop the previous file's table-keyed
-    // caches as one critical section, both under the `conn` lock. Ordering
-    // invariant: `query_table` holds `conn` for its whole duration and only
-    // ever builds a rowid/ordered-rows cache while holding it, so doing the
-    // swap-and-clear under the same lock guarantees no query can observe the
-    // new connection alongside the old file's cached rowids - which would
-    // serve one page of stale rowids against the new file. Clearing *after*
-    // publishing the connection (as this once did) left exactly that window.
+    // Publish the new connection, its interrupt handle, and the drop of the
+    // previous file's table-keyed caches as one critical section, all under the
+    // `conn` lock. Ordering invariant: `query_table` holds `conn` for its whole
+    // duration and only ever builds a rowid/ordered-rows cache while holding
+    // it, so doing the swap-and-clear under the same lock guarantees no query
+    // can observe the new connection alongside the old file's cached rowids -
+    // which would serve one page of stale rowids against the new file. Clearing
+    // *after* publishing the connection (as this once did) left exactly that
+    // window.
+    //
+    // The interrupt handle belongs inside for the same reason: storing it after
+    // the swap left a window where a query had already started on the new
+    // connection while `cancel_queries` would still interrupt the *old* handle,
+    // so Cancel silently did nothing to the query the user was looking at.
+    //
+    // Taking `interrupt_handle` while holding `conn` is the only place the two
+    // are held together, and nothing acquires them in the opposite order -
+    // `cancel_queries` and `close_database` take `interrupt_handle` alone, never
+    // while holding `conn` - so this cannot deadlock.
     {
         let mut conn_guard = state.conn.lock();
         clear_caches(state);
+        *state.interrupt_handle.lock() = Some(interrupt_handle);
         *conn_guard = Some(conn);
     }
-    *state.interrupt_handle.lock() = Some(interrupt_handle);
     *state.current_path.lock() = Some(path.to_string());
 
     Ok(tables)

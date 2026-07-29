@@ -33,6 +33,13 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      # The release gate (`npm run quality`) builds before tagging, so a build
+      # that only breaks under Vite's production pass -- a bad import, an
+      # adapter-static prerender failure -- would otherwise surface for the
+      # first time at release time, on a commit that is already on main.
+      - name: Build
+        run: npm run build
+
   backend:
     name: Backend (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

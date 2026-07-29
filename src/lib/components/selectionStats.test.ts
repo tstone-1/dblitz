@@ -241,6 +241,71 @@ describe("buildSelectionStats", () => {
     ).toMatchObject({ rows: 4, cols: 1, capped: true });
   });
 
+  it("skips the per-cell geometry scan when exact counts are supplied", () => {
+    // Ctrl+A on a wide table. The caller already knows the exact geometry from
+    // the selection rectangles, so the only work left is the numeric scan --
+    // and that stops at the first unloaded row. Without the skip this walked
+    // every selected cell to maxRows, synchronously inside a `$derived`, on
+    // every render pass.
+    const cols = 40;
+    const totalRows = 5_000;
+    let isSelectedCalls = 0;
+
+    const stats = buildSelectionStats({
+      selection: { r0: 0, r1: totalRows - 1, c0: 0, c1: cols - 1 },
+      // Only row 0 is loaded; the rest is still being fetched.
+      getRow: (index) => (index === 0 ? Array.from({ length: cols }, () => "1") : null),
+      isSelected: () => { isSelectedCalls++; return true; },
+      selectedRowCount: totalRows,
+      selectedColumnCount: cols,
+      hasMultipleSelectedCells: true,
+    });
+
+    expect(stats).toEqual({
+      rows: totalRows,
+      cols,
+      sum: null,
+      avg: null,
+      min: null,
+      max: null,
+      numericPending: true,
+      capped: false,
+    });
+    // Row 0: one membership probe (breaks at the first hit) + its numeric
+    // pass across the columns. Row 1: one membership probe, then the numeric
+    // scan stops on the unloaded row and the loop ends.
+    expect(isSelectedCalls).toBeLessThanOrEqual(cols + 2);
+  });
+
+  it("still counts a row with no selected cells as unscanned rather than pending", () => {
+    // With exact counts the loop keeps only its "does this row contain a
+    // selected cell?" probe. That probe is load-bearing: without it an
+    // unloaded row that holds no selected cell at all would set
+    // numericPending and suppress otherwise-complete aggregates.
+    const selected = new Set(["0,0", "2,0"]);
+    const rows: Array<(string | null)[] | null> = [["4"], null, ["6"]];
+
+    expect(
+      buildSelectionStats({
+        selection: { r0: 0, r1: 2, c0: 0, c1: 0 },
+        getRow: (index) => rows[index] ?? null,
+        isSelected: (r, c) => selected.has(`${r},${c}`),
+        selectedRowCount: 2,
+        selectedColumnCount: 1,
+        hasMultipleSelectedCells: true,
+      }),
+    ).toEqual({
+      rows: 2,
+      cols: 1,
+      sum: 10,
+      avg: 5,
+      min: 4,
+      max: 6,
+      numericPending: false,
+      capped: false,
+    });
+  });
+
   it("exposes the default cap as DEFAULT_MAX_STATS_ROWS for callers to reference in UI copy", () => {
     expect(DEFAULT_MAX_STATS_ROWS).toBe(100_000);
   });

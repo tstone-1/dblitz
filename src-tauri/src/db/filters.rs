@@ -77,6 +77,9 @@ pub(super) fn build_where_clause(
             // "=". The frontend mirrors the operand-requiring subset in
             // src/lib/components/filterOperators.ts (OPERAND_REQUIRED_OPS) to
             // gate half-typed filters — keep the two in sync when adding ops.
+            // `operand_required_ops_match_frontend` below parses that TS file
+            // and pins the two lists together, so an op added on one side only
+            // fails a test rather than shipping.
             for val in &criteria {
                 if let Some(rest) = val.strip_prefix("<>") {
                     if rest.is_empty() {
@@ -143,6 +146,7 @@ pub(super) fn build_where_clause(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn cols(names: &[&str]) -> Vec<String> {
         names.iter().map(|s| s.to_string()).collect()
@@ -314,6 +318,78 @@ mod tests {
             " WHERE (\"name\" LIKE ? ESCAPE '\\' OR \"city\" LIKE ? ESCAPE '\\') AND \"name\" LIKE ? ESCAPE '\\'"
         );
         assert_eq!(r.params, vec!["%x%", "%x%", "%foo%"]);
+    }
+
+    /// The operator prefixes that are meaningless on their own and need an
+    /// operand after them. `"<>"` is deliberately absent: a bare `<>` is a
+    /// *complete* filter in `build_where_clause` (empty rest means IS NOT NULL
+    /// AND != ''), which is why the frontend must not treat it as half-typed.
+    const OPERAND_REQUIRED_OPS: &[&str] = &[">=", "<=", ">", "<", "="];
+
+    #[test]
+    fn operand_required_ops_are_what_the_builder_actually_parses() {
+        // Pins the list above to this file's behaviour rather than to a comment,
+        // so it cannot drift from the code it claims to describe - which is what
+        // makes it a usable reference for the frontend comparison below.
+        let columns = cols(&["c"]);
+        for op in OPERAND_REQUIRED_OPS {
+            let r = build_where_clause(&columns, &[filter("c", &format!("{op}5"))], "").unwrap();
+            assert_eq!(
+                r.clause,
+                format!(" WHERE \"c\" {op} ?"),
+                "'{op}' must be recognized as an operator prefix, not folded into a LIKE"
+            );
+            assert_eq!(r.params, vec!["5"]);
+        }
+
+        // The counterpart the frontend list must NOT contain: bare "<>" needs no
+        // operand and already produces a complete clause.
+        let r = build_where_clause(&columns, &[filter("c", "<>")], "").unwrap();
+        assert_eq!(r.clause, " WHERE \"c\" IS NOT NULL AND \"c\" != ''");
+    }
+
+    #[test]
+    fn operand_required_ops_match_frontend() {
+        // Same lockstep mechanism as `tint_presets_match_frontend_toolbar_utils`
+        // in config.rs: read the TS as data, never edit it from here. The
+        // frontend uses this list to suppress a query while the user is still
+        // typing an operator expression; an op present in only one language
+        // means either a filter that never fires or a spurious "incomplete"
+        // block, neither of which errors anywhere.
+        let frontend = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/lib/components/filterOperators.ts"),
+        )
+        .unwrap();
+        let line = frontend
+            .lines()
+            .find(|l| l.contains("OPERAND_REQUIRED_OPS ="))
+            .expect("filterOperators.ts must declare OPERAND_REQUIRED_OPS");
+        let array = line
+            .split_once('[')
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .map(|(inner, _)| inner)
+            .expect("OPERAND_REQUIRED_OPS must be a single-line array literal");
+        let mut frontend_ops: Vec<&str> = array
+            .split(',')
+            .map(|s| s.trim().trim_matches('"'))
+            .filter(|s| !s.is_empty())
+            .collect();
+        // A parse that finds nothing reads exactly like a list that matches, so
+        // fail on an empty population rather than reporting agreement.
+        assert!(
+            !frontend_ops.is_empty(),
+            "parsed no operators out of OPERAND_REQUIRED_OPS - the declaration's shape changed"
+        );
+
+        let mut expected: Vec<&str> = OPERAND_REQUIRED_OPS.to_vec();
+        frontend_ops.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            expected, frontend_ops,
+            "OPERAND_REQUIRED_OPS in filterOperators.ts must match the operand-requiring \
+             prefixes build_where_clause parses (note: bare \"<>\" is complete on its own \
+             and is correctly absent from the frontend list)"
+        );
     }
 
     #[test]
