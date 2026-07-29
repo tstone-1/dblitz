@@ -8,6 +8,7 @@
 
 ## Development
 
+- Node is pinned to 24 in `.nvmrc`, and every CI `setup-node` step reads it via `node-version-file` so there is a single source of truth. `@types/node` is deliberately held on the matching major — `npm outdated` will keep offering a newer one; taking it means type-checking against an API surface the shipped runtime does not have. Bump `.nvmrc` and `@types/node` together or not at all.
 - Install frontend dependencies with `npm install`.
 - Run the desktop app in development with `npm run tauri dev`.
 - Use these checks as appropriate:
@@ -35,7 +36,7 @@
   2. Plus `?immutable=1` in the URI: the file is treated as a frozen snapshot for the connection's lifetime, and no `-wal`/`-shm` companion files are ever created (important because source files may sit in cloud-synced folders that other tools write to).
   3. `execute_sql` rejects non-readonly prepared statements (`stmt.readonly()`) with a friendly message, and a SQLite authorizer denies ATTACH/DETACH/transactions at the engine level.
   - Accepted trade-off: dblitz does not see live writes from other processes during a session; reopening the file is required to pick up changes. The SQL editor should always advertise read-only in its placeholder/hint text. Backend row/index caches need no invalidation logic because the snapshot is frozen.
-- Windows duplicate-instance detection is keyed by the full database path through the `dblitz_db_path` Win32 window property. Do not replace it with filename-only matching: same-named databases in different directories must open separately.
+- Windows duplicate-instance detection is keyed by the full database path through the `dblitz_db_path` Win32 window property. Do not replace it with filename-only matching: same-named databases in different directories must open separately. The `FlashWindowEx` call that follows `SetForegroundWindow` in `try_activate_existing` is deliberately unconditional and must stay: activation is usually denied by the foreground lock, and without the flash the second launch exits silently and reads as "dblitz refuses to open this file". See the comment there for why the outcome cannot be tested reliably.
 - Keep the window title filename-only; the toolbar owns display of the full database path.
 - Treat DB Browser for SQLite as the primary UX comparison point when evaluating viewer behavior and parity gaps.
 - In `DataGrid.svelte`, compose new per-column state indicators with inset box shadows rather than background tints so user-selected column colors remain visible.
@@ -46,6 +47,7 @@
 - Versions use CalVer `YY.M.MICRO`.
 - Update all version files together:
   - `package.json`
+  - `package-lock.json` — in **two** places (top-level `"version"` and `packages[""].version`). `npm version <v> --no-git-tag-version` does `package.json` and both lockfile entries at once. Nothing fails when this one drifts, which is exactly how 26.7.6 shipped with the lockfile still on 26.7.5.
   - `src-tauri/Cargo.toml`
   - `src-tauri/tauri.conf.json`
 - Update `CHANGELOG.md` before release commits.

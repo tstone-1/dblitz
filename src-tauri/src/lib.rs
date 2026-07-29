@@ -16,6 +16,13 @@ use updates::UpdateStatus;
 
 /// Compute a 64-bit hash of the lowercased path for cross-process duplicate
 /// detection via Win32 window properties.
+///
+/// `DefaultHasher::new` is seeded with fixed keys (unlike `RandomState`), so the
+/// value is stable across processes — which is the whole point, since one
+/// instance writes it and another reads it. Rust does not promise the algorithm
+/// is stable across *compiler* versions, so two dblitz builds from different
+/// toolchains may not recognise each other; that degrades to opening a second
+/// window, never to opening the wrong one.
 #[cfg(windows)]
 fn path_hash(path: &str) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -330,7 +337,7 @@ fn save_view_config(state: State<'_, Arc<DbState>>, config: FileConfig) -> Resul
 /// comparing the `dblitz_db_path` window property (a 64-bit hash of the
 /// full, lowercased path set by [`set_window_db_marker`]).
 ///
-/// If found, restore (un-minimise) and activate it, returning `true` so
+/// If found, restore (un-minimise) and surface it, returning `true` so
 /// the caller can exit early.
 ///
 /// There is a narrow race between when an instance launches and when it
@@ -365,16 +372,43 @@ fn try_activate_existing(path: &str) -> bool {
 
     unsafe {
         let _ = EnumWindows(Some(cb), LPARAM(&mut ctx as *mut _ as isize));
-        if !ctx.found.0.is_null() {
-            if IsIconic(ctx.found).as_bool() {
-                let _ = ShowWindow(ctx.found, SW_RESTORE);
-            }
-            let _ = SetForegroundWindow(ctx.found);
-            eprintln!("dblitz: activated existing window for {path}");
-            return true;
+        if ctx.found.0.is_null() {
+            return false;
         }
+        let hwnd = ctx.found;
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        let _ = SetForegroundWindow(hwnd);
+        // `SetForegroundWindow` is a request, not a command: Windows' foreground
+        // lock denies it whenever the caller doesn't already own the foreground,
+        // which is the normal case here — we were launched by Explorer, or a
+        // full-screen app has focus. Measured on this machine with a full-screen
+        // game focused: the call returned and the foreground never moved, so the
+        // second launch exited 0 with no window, no message, nothing. That reads
+        // as "dblitz refuses to open this file".
+        //
+        // So always follow up with a flash. It is deliberately unconditional:
+        // there is no reliable way to ask whether the activation took.
+        // `SetForegroundWindow`'s return value can be nonzero while it only
+        // flashed the taskbar, and testing `GetForegroundWindow() != hwnd` right
+        // after is racy in the other direction — measured reporting the *old*
+        // foreground immediately after an activation that did succeed, which
+        // would make the failure branch fire on the happy path. FLASHW_TIMERNOFG
+        // makes the unconditional call self-correcting: it flashes only until
+        // the window reaches the foreground, so a successful activation stops it
+        // on its own and a denied one keeps flashing until the user looks.
+        let info = FLASHWINFO {
+            cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
+            hwnd,
+            dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG,
+            uCount: 0,
+            dwTimeout: 0,
+        };
+        let _ = FlashWindowEx(&info);
+        eprintln!("dblitz: {path} is already open; raised the existing window");
+        true
     }
-    false
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -468,4 +502,57 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::path_hash;
+
+    /// Explorer, the recent-files list and the file dialog can all hand back
+    /// the same file with different casing, and NTFS treats those as one file.
+    /// If the hash disagreed, double-clicking a database already open under a
+    /// different casing would open a second window onto the same snapshot.
+    #[test]
+    fn path_hash_ignores_case() {
+        assert_eq!(
+            path_hash(r"C:\Users\alice\Data\inventory.sqlite"),
+            path_hash(r"c:\users\ALICE\data\INVENTORY.SQLITE")
+        );
+    }
+
+    /// The marker is keyed on the *full* path, deliberately: same-named
+    /// databases in different directories are different files and must each get
+    /// their own window. Hashing only the filename would collapse them.
+    #[test]
+    fn path_hash_distinguishes_directories() {
+        assert_ne!(
+            path_hash(r"C:\a\inventory.sqlite"),
+            path_hash(r"C:\b\inventory.sqlite")
+        );
+    }
+
+    /// Two different files must not collide into "already open" — that would
+    /// make the second one silently un-openable.
+    #[test]
+    fn path_hash_distinguishes_filenames() {
+        assert_ne!(path_hash(r"C:\a\one.sqlite"), path_hash(r"C:\a\two.sqlite"));
+    }
+
+    /// A `HANDLE` of 0 is what [`set_window_db_marker`] writes for "no file
+    /// open", and `GetPropW` returns 0 for a window that has no such property
+    /// at all. A path hashing to 0 would therefore match every non-dblitz
+    /// window on the desktop. Not provable in general, but pin the paths this
+    /// app actually sees so a hash swap that lands on 0 for a plausible input
+    /// is caught here rather than in the wild.
+    #[test]
+    fn path_hash_is_nonzero_for_real_paths() {
+        for p in [
+            r"C:\db.sqlite",
+            r"C:\Users\alice\Data\inventory.sqlite",
+            r"\\server\share\db.sqlite",
+            "/Users/alice/db.sqlite",
+        ] {
+            assert_ne!(path_hash(p), 0, "{p} hashed to the 'no file open' marker");
+        }
+    }
 }
