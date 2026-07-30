@@ -40,6 +40,14 @@
 - Keep the window title filename-only; the toolbar owns display of the full database path.
 - Treat DB Browser for SQLite as the primary UX comparison point when evaluating viewer behavior and parity gaps.
 - In `DataGrid.svelte`, compose new per-column state indicators with inset box shadows rather than background tints so user-selected column colors remain visible.
+- Files that use Svelte runes outside a component must use the `.svelte.ts`
+  extension. Keep template and `$derived` reads side-effect-free; create missing
+  state only from event handlers or other explicit mutation paths.
+- Preserve `connect-src ipc: http://ipc.localhost` in the Tauri CSP. Removing it
+  can leave production IPC broken while development still appears healthy.
+- `DataGrid` header reordering deliberately uses mouse events with a movement
+  dead zone and document-level cleanup. Do not replace it with HTML5
+  drag-and-drop without proving the behavior in the Windows WebView2 runtime.
 - Tauri and the direct `windows` dependency can resolve to different `windows-rs` versions. `window.hwnd()` must be rewrapped as `HWND(hwnd.0)` at that boundary; other HWNDs sourced from `EnumWindows` do not need blanket conversion.
 
 ## Release
