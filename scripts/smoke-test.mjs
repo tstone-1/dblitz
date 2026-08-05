@@ -1,15 +1,20 @@
 // Packaged-app smoke test: the one check that crosses the webview <-> IPC seam.
 //
-// Every unit test in this repo (vitest and cargo alike) runs below that seam,
-// so the defect class this exists for -- a CSP or capability regression that
-// breaks production IPC while `tauri dev` stays perfectly healthy (see the
-// `connect-src ipc:` note in AGENTS.md) -- is invisible to all of them. This
-// script launches the real built binary under tauri-driver (WebDriver),
+// Every unit test in this repo (vitest and cargo alike) runs below that seam.
+// This script launches the real built binary under tauri-driver (WebDriver),
 // hands it a generated fixture database as its launch argument, and asserts
 // that a row of that database actually renders in the grid. Passing proves the
-// whole chain: bundled assets load under the production CSP, `get_initial_file`
-// delivers the argv path, `open_database` and `query_table` cross IPC, and the
-// grid renders the result.
+// whole chain: bundled assets load, `get_initial_file` delivers the argv path,
+// `open_database` and `query_table` cross IPC, and the grid renders the result.
+//
+// What it does NOT prove, established by experiment on 2026-08-05 rather than
+// by reasoning: removing `connect-src ipc: http://ipc.localhost` from the CSP
+// does not fail this test on Linux. The directive was deleted on a throwaway
+// branch and every job stayed green, while a probe in the same run showed a
+// cross-origin fetch still blocked -- so the CSP is live, but wry's Linux IPC
+// does not travel over a channel `connect-src` governs. The trap that line
+// exists to prevent is a WebView2/WKWebView one, and catching it in CI would
+// take a Windows leg. Do not cite this script as cover for that directive.
 //
 // Platform: Linux (webkit2gtk-driver) and Windows only -- tauri-driver has no
 // macOS backend, which is why this runs as a Linux CI job and not in

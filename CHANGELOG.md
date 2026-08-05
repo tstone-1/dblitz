@@ -12,13 +12,14 @@ Fixes from a follow-up full-codebase deep review (0 blockers, 2 warnings,
 
 ### Added
 - **CI now smoke-tests the packaged app.** A new Linux job builds the real
-  binary (production frontend assets, production CSP), launches it under
-  WebDriver against a generated fixture database, and asserts a grid row
-  actually renders. This is the only check that crosses the webview↔IPC seam —
-  every unit test runs below it, and the defect class it exists for (a CSP or
-  capability regression that breaks production IPC while dev stays healthy)
-  was previously guarded by nothing but a comment. A workflow-pinning test
-  fails if the job or its steps are ever dropped.
+  binary, launches it under WebDriver against a generated fixture database, and
+  asserts a grid row actually renders — proving bundled assets load, the launch
+  argument reaches the backend, IPC round-trips, and the grid paints. This is
+  the only check that crosses the webview↔IPC seam; every unit test runs below
+  it. A workflow-pinning test fails if the job or its steps are dropped. Its
+  limits were measured, not assumed: the job does not catch removal of the
+  `connect-src` CSP directive on Linux, which would need a Windows leg — the
+  workflow and script say so where someone would otherwise rely on it.
 
 ### Fixed
 - **Switching tables quickly can no longer overwrite saved column widths.**
