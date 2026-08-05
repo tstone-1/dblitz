@@ -9,6 +9,7 @@
 ## Development
 
 - Node is pinned to 24 in `.nvmrc`, and every CI `setup-node` step reads it via `node-version-file` so there is a single source of truth. `@types/node` is deliberately held on the matching major — `npm outdated` will keep offering a newer one; taking it means type-checking against an API surface the shipped runtime does not have. Bump `.nvmrc` and `@types/node` together or not at all.
+- **A green local gate can be measured against the wrong dependency.** `node_modules` drifts out of the declared range without anything failing: on 2026-08-05 it held `@types/node` **26.1.1** while `package.json` said `^24.13.3` and the lockfile said `24.13.3`, so `npm run check` type-checked against an API surface CI never uses — and reported 0 errors either way. `npm update` (or `npm ci`) reconciles it. Before trusting a type-check that a release depends on, confirm what is actually installed: `node -p "require('./node_modules/@types/node/package.json').version"`.
 - Install frontend dependencies with `npm install`.
 - Run the desktop app in development with `npm run tauri dev`.
 - Use these checks as appropriate:
@@ -26,6 +27,7 @@
 - SQLite backend code lives under `src-tauri/src/db/`, with `src-tauri/src/db.rs` as a thin facade that re-exports the submodules:
   - `schema.rs` — table/column introspection and row counts
   - `query.rs` — table paging, the rowid-index fast path, and regex filtering
+    - Every non-trivial view (sorted, filtered, regex-filtered) pages from **one** cached ordered-rowid list per table, built once and sliced per chunk. Its identity is `OrderKey`, and the `regex_signature` field in it is load-bearing rather than decorative: a regex is evaluated in Rust and never reaches the SQL, so two views with different patterns produce an **identical** `where_clause`, `params` and `order_clause`. Without that field one pattern's match set is served as another's, and clearing the regex keeps serving the narrowed set. A regex scan selects `{alias}, *`, which shifts every table column one place right — filter indices must be read at `idx + 1`, the same offset `fetch_rows_by_rowids` undoes. Tables with no addressable rowid (WITHOUT ROWID, or all three aliases shadowed) keep the full-scan fallback.
   - `filters.rs` — the `WHERE` clause builder and column-filter operator parsing
   - `sql.rs` — arbitrary SQL execution plus the read-only / ATTACH-DETACH rejection gate
   - `export.rs` — XLSX export
@@ -49,6 +51,52 @@
   dead zone and document-level cleanup. Do not replace it with HTML5
   drag-and-drop without proving the behavior in the Windows WebView2 runtime.
 - Tauri and the direct `windows` dependency can resolve to different `windows-rs` versions. `window.hwnd()` must be rewrapped as `HWND(hwnd.0)` at that boundary; other HWNDs sourced from `EnumWindows` do not need blanket conversion.
+
+## CI — the packaged-app smoke test, and exactly what it does not cover
+
+`.github/workflows/checks.yml` runs a `smoke` job (Linux) that builds the real
+binary, launches it under `tauri-driver` against a generated fixture database
+(`scripts/smoke-test.mjs`), and asserts a row of that database renders in the
+grid. It is the only check above the webview↔IPC seam — every vitest and cargo
+test runs below it — so it is what proves bundled assets load, the launch
+argument reaches `get_initial_file`, `open_database`/`query_table` cross IPC,
+and the grid paints.
+
+**It does NOT catch removal of `connect-src ipc: http://ipc.localhost` from the
+CSP, and that was measured, not assumed.** The directive was deleted on a
+throwaway branch on 2026-08-05 and **all five jobs stayed green**, while a probe
+in the same run showed a cross-origin fetch still blocked — so the CSP is
+enforced and the `--debug` build is not the reason; wry's Linux IPC simply does
+not travel over a channel `connect-src` governs. That trap is a
+WebView2/WKWebView phenomenon, so closing the gap needs a **Windows leg**
+(`tauri-driver` supports Windows via `msedgedriver`). Until one exists, treat
+the `connect-src` line as guarded by review only, and do not cite this job as
+cover for it.
+
+Two things worth keeping from how that was found. **Falsifying a gate can
+disprove its scope rather than its correctness** — the job worked exactly as
+built; what was wrong was the comment claiming which defect class it stopped,
+and a comment asserting protection that does not exist is worse than none,
+because the next person reads it and stops checking. And **the first
+falsification attempt is cheap**: one throwaway branch, with the branch added to
+`on.push.branches` so no PR ref is created (PR refs are owner-undeletable — see
+the `xlsxturbo` cleanup). Keeping the other jobs enabled during the experiment
+is what turned "smoke went green" into "smoke went green *and* nothing else
+caught it either", which is the more useful result.
+
+## Security
+
+- `SECURITY.md` is the public reporting policy. Reports go through **GitHub
+  private vulnerability reporting**, which is **enabled** on the repo (it was off
+  until 2026-08-05; a policy file pointing at a disabled channel sends reporters
+  to a button that does not exist). Toggle with
+  `gh api -X PUT|DELETE repos/tstone-1/dblitz/private-vulnerability-reporting`.
+- No contact e-mail appears anywhere public, deliberately — the advisory flow is
+  the channel, and it keeps the personal address off a public repo.
+- In scope, and worth knowing when triaging: a bypass of **any** read-only
+  enforcement layer, a crafted database file (the app's one genuinely untrusted
+  input), updater signature verification, and webview escape. The unsigned
+  Windows build is a documented state, not a finding.
 
 ## Release
 
