@@ -88,13 +88,21 @@ jobs:
         run: cargo test
 
   # The one check that crosses the webview <-> IPC seam. Every unit test above
-  # runs below it, so the defect class this job exists for -- a CSP or
-  # capability regression that breaks production IPC while `tauri dev` stays
-  # healthy (the `connect-src ipc:` trap documented in AGENTS.md) -- is
-  # invisible to all of them. Builds the real binary (debug profile, but with
-  # bundled frontend assets and the production CSP applied), launches it under
-  # tauri-driver against a generated fixture database, and asserts a grid row
-  # renders. Linux only: tauri-driver has no macOS backend.
+  # runs below it: this builds the real binary, launches it under tauri-driver
+  # against a generated fixture database, and asserts a row of that database
+  # renders in the grid -- proving bundled assets load, the launch argument
+  # reaches `get_initial_file`, `open_database`/`query_table` cross IPC, and the
+  # grid paints the result. Linux only: tauri-driver has no macOS backend.
+  #
+  # KNOWN GAP, measured rather than assumed (2026-08-05): this job does NOT
+  # catch removal of `connect-src ipc: http://ipc.localhost` from the CSP. That
+  # was tested directly -- the directive was deleted on a throwaway branch and
+  # all five jobs, this one included, stayed green. A same-run probe showed a
+  # cross-origin fetch still blocked, so the CSP is enforced; wry's Linux IPC
+  # simply is not gated by `connect-src`. That trap is a WebView2/WKWebView
+  # phenomenon, so catching it needs a Windows leg (tauri-driver supports
+  # Windows via msedgedriver). Until one exists, treat the `connect-src` line
+  # in tauri.conf.json as guarded by review only -- not by this job.
   smoke:
     name: Smoke (packaged app)
     runs-on: ubuntu-latest
