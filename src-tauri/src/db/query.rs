@@ -152,6 +152,12 @@ pub(super) fn build_rowid_index(
     })
 }
 
+/// Full-scan fallback for regex-filtered views on tables the ordered-rowid
+/// cache can't address (WITHOUT ROWID, or every rowid alias shadowed by a user
+/// column). Walks the WHERE-narrowed set and re-matches every row on every
+/// page, so its cost grows with the offset - which is exactly why rowid-backed
+/// tables go through `query_with_ordered_rows` instead. Kept because a table
+/// with no addressable rowid has nothing to key a cache on.
 #[allow(clippy::too_many_arguments)]
 fn query_with_regex_filter(
     conn: &Connection,
@@ -304,6 +310,54 @@ fn build_ordered_rows(
     Ok(Some(rowids))
 }
 
+/// Materialize the rowids of the rows matching every compiled regex, with one
+/// scan. The regex engine is Rust's, not SQLite's, so the predicate can't be
+/// pushed into the WHERE clause and the scan has to carry each row's values
+/// alongside its rowid - hence `SELECT {alias}, *` rather than the bare
+/// `SELECT {alias}` its non-regex twin `build_ordered_rows` uses. Returns
+/// `Ok(None)` if a newer request bumps the generation mid-scan, matching
+/// `build_ordered_rows` so the caller reports cancellation the same way.
+fn build_regex_matched_rows(
+    conn: &Connection,
+    state: &DbState,
+    generation: u64,
+    sql: &str,
+    params: &[String],
+    regex_filters: &[(usize, Regex)],
+) -> Result<Option<Vec<i64>>, String> {
+    let mut stmt = conn.prepare(sql).str_err()?;
+    let col_count = stmt.column_count();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+        .iter()
+        .map(|param| param as &dyn rusqlite::types::ToSql)
+        .collect();
+    let mut rows_iter = stmt.query(param_refs.as_slice()).str_err()?;
+    let mut rowids: Vec<i64> = Vec::new();
+    while let Some(row) = rows_iter.next().str_err()? {
+        if state.query_generation.load(Ordering::Relaxed) != generation {
+            return Ok(None);
+        }
+        let values = read_row(row, col_count);
+        // `regex_filters` indexes the table's own column list, but the leading
+        // `{alias}` in this scan shifts every table column one place right -
+        // the same offset `fetch_rows_by_rowids` undoes when it drops index 0.
+        // Without the +1 each filter would test its left-hand neighbour, which
+        // silently returns a plausible-looking wrong match set rather than an
+        // error.
+        let matches = regex_filters.iter().all(|(idx, re)| {
+            values
+                .get(idx + 1)
+                .and_then(|v| v.as_ref())
+                .map(|s| re.is_match(s))
+                .unwrap_or(false)
+        });
+        if matches {
+            rowids.push(row.get(0).str_err()?);
+        }
+    }
+    Ok(Some(rowids))
+}
+
 /// Fetch the given rowids and return their rows in the requested order.
 /// `WHERE rowid IN (...)` doesn't preserve order, so we index by rowid and
 /// re-emit by the caller's sequence.
@@ -375,14 +429,16 @@ struct OrderedQueryContext<'a> {
     columns: Vec<String>,
 }
 
-/// Serve any filtered and/or sorted rowid-backed view through one cache path.
-/// The caller must already have confirmed that `alias` addresses the table's
-/// real, unshadowed rowid. Rowid-less tables use the OFFSET fallback instead.
+/// Serve any filtered (including regex-filtered) and/or sorted rowid-backed
+/// view through one cache path. The caller must already have confirmed that
+/// `alias` addresses the table's real, unshadowed rowid. Rowid-less tables use
+/// the OFFSET fallback (or, for regex, `query_with_regex_filter`) instead.
 fn query_with_ordered_rows(
     context: OrderedQueryContext<'_>,
     where_clause: &str,
     order_clause: &str,
     params: &[String],
+    regex_filters: &[(usize, Regex)],
 ) -> Result<QueryResult, String> {
     // A filtered view without an explicit sort still needs deterministic rowid
     // order. Sorted-only views already provide their ORDER BY clause.
@@ -395,10 +451,17 @@ fn query_with_ordered_rows(
         where_clause: where_clause.to_string(),
         params: params.to_vec(),
         order_clause: effective_order,
+        regex_signature: regex_filters
+            .iter()
+            .map(|(idx, re)| (*idx, re.as_str().to_string()))
+            .collect(),
     };
+    // A regex view has to read every column to test the pattern in Rust; a
+    // plain one only ever needs the rowid, so it stays on the narrower scan.
     let sql = format!(
-        "SELECT {alias} FROM {table}{where}{order}",
+        "SELECT {alias}{extra} FROM {table}{where}{order}",
         alias = context.alias,
+        extra = if regex_filters.is_empty() { "" } else { ", *" },
         table = context.quoted_table,
         where = key.where_clause,
         order = key.order_clause,
@@ -409,18 +472,30 @@ fn query_with_ordered_rows(
         .get(context.table)
         .is_some_and(|order| order.key == key);
     if !fresh {
-        let rowids = build_ordered_rows(
-            context.conn,
-            context.state,
-            context.generation,
-            &sql,
-            params,
-        )?
-        .ok_or_else(|| "Query cancelled by a newer request".to_string())?;
+        let built = if regex_filters.is_empty() {
+            build_ordered_rows(
+                context.conn,
+                context.state,
+                context.generation,
+                &sql,
+                params,
+            )?
+        } else {
+            build_regex_matched_rows(
+                context.conn,
+                context.state,
+                context.generation,
+                &sql,
+                params,
+                regex_filters,
+            )?
+        };
+        let rowids = built.ok_or_else(|| "Query cancelled by a newer request".to_string())?;
         tracing::debug!(
             table = context.table,
             rows = rowids.len(),
             filtered = !where_clause.is_empty(),
+            regex = !regex_filters.is_empty(),
             "built ordered rowid cache"
         );
         // The UI browses one table at a time, so retaining only the active
@@ -532,7 +607,40 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
         None => String::new(),
     };
 
+    // Resolve once, up front, which rowid alias (if any) safely addresses
+    // this table's real rowid - every fast path below needs it, and a table
+    // with no usable alias (WITHOUT ROWID, or every alias shadowed by a user
+    // column) must fall through to a scan-based path either way.
+    let alias = rowid_alias(conn, &quoted_table);
+
     if !regex_filters.is_empty() {
+        // Regex is evaluated in Rust and can't be pushed into SQL, but the
+        // *result* of that evaluation - the matched rowids - caches like any
+        // other view. Without this, serving one 500-row chunk re-scanned and
+        // re-matched the entire table, and every further scroll chunk did it
+        // again, so browsing a regex-filtered view got slower the further down
+        // it went. A table with no addressable rowid has nothing to key the
+        // cache on and keeps the full-scan fallback.
+        if let Some(a) = alias {
+            return query_with_ordered_rows(
+                OrderedQueryContext {
+                    conn,
+                    state,
+                    generation,
+                    table,
+                    quoted_table: &quoted_table,
+                    alias: a,
+                    offset,
+                    limit,
+                    columns,
+                },
+                &where_clause,
+                &order_clause,
+                &params,
+                &regex_filters,
+            );
+        }
+
         return query_with_regex_filter(
             conn,
             state,
@@ -547,12 +655,6 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
             columns,
         );
     }
-
-    // Resolve once, up front, which rowid alias (if any) safely addresses
-    // this table's real rowid - both fast paths below need it, and a table
-    // with no usable alias (WITHOUT ROWID, or every alias shadowed by a user
-    // column) must fall through to the OFFSET path either way.
-    let alias = rowid_alias(conn, &quoted_table);
 
     if where_clause.is_empty() {
         // Sorted, unfiltered: serve pages from a cached rowid order so each
@@ -577,6 +679,7 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
                     &where_clause,
                     &order_clause,
                     &params,
+                    &[],
                 );
             }
         } else if offset % limit == 0 {
@@ -640,6 +743,7 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
             &where_clause,
             &order_clause,
             &params,
+            &[],
         );
     }
 
@@ -785,6 +889,226 @@ mod tests {
         assert_eq!(result.rows.len(), 7);
         assert_eq!(result.rows[0][1].as_deref(), Some("match-5"));
         assert_eq!(result.rows[6][1].as_deref(), Some("match-11"));
+    }
+
+    #[test]
+    fn regex_query_pages_deep_from_cached_match_set() {
+        // The regression this guards: serving one chunk of a regex-filtered
+        // view used to re-scan the whole table and re-run the regex over every
+        // row, and every further scroll chunk did it again. Both pages must
+        // now come out of one materialized match set and agree with each other
+        // - same exact total, contiguous non-overlapping slices of the same
+        // ordered match list.
+        let state = state_with_memory_db("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);");
+        {
+            let mut guard = state.conn.lock();
+            let conn = guard.as_mut().unwrap();
+            let tx = conn.transaction().unwrap();
+            // Even i -> "keep", odd -> "drop": 750 of 1500 rows match.
+            for i in 0..1_500 {
+                let name = format!("{}-{}", if i % 2 == 0 { "keep" } else { "drop" }, i);
+                tx.execute("INSERT INTO items (name) VALUES (?)", params![name])
+                    .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        let page = |offset: i64| QueryRequest {
+            table: "items".to_string(),
+            offset,
+            limit: 500,
+            filters: vec![regex_filter("name", "^keep-")],
+            global_filter: String::new(),
+            sort_column: None,
+            sort_asc: true,
+        };
+
+        let first = query_table(&state, &page(0)).unwrap();
+        assert_eq!(first.total_rows, Some(750));
+        assert_eq!(first.rows.len(), 500);
+        assert_eq!(first.rows[0][1].as_deref(), Some("keep-0"));
+        assert_eq!(first.rows[499][1].as_deref(), Some("keep-998"));
+
+        // Deep page: matches 500..750, served from the same cached match set.
+        let deep = query_table(&state, &page(500)).unwrap();
+        assert_eq!(deep.total_rows, Some(750));
+        assert_eq!(deep.rows.len(), 250);
+        assert_eq!(deep.rows[0][1].as_deref(), Some("keep-1000"));
+        assert_eq!(deep.rows[249][1].as_deref(), Some("keep-1498"));
+    }
+
+    #[test]
+    fn regex_order_rebuilds_when_pattern_changes() {
+        // Two regex views of the same table produce an identical WHERE clause
+        // (empty - the pattern never reaches SQL), identical params, and an
+        // identical ORDER BY. Only OrderKey's regex signature separates them,
+        // so without it the second pattern would be served the first one's
+        // cached match set.
+        let state = state_with_memory_db(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);
+             INSERT INTO items (name) VALUES ('apple'), ('apricot'), ('banana'), ('cherry');",
+        );
+        let req = |pattern: &str| QueryRequest {
+            table: "items".to_string(),
+            offset: 0,
+            limit: 10,
+            filters: vec![regex_filter("name", pattern)],
+            global_filter: String::new(),
+            sort_column: None,
+            sort_asc: true,
+        };
+
+        let ap = query_table(&state, &req("^ap")).unwrap();
+        assert_eq!(ap.total_rows, Some(2));
+        let names: Vec<_> = ap.rows.iter().map(|r| r[1].as_deref()).collect();
+        assert_eq!(names, vec![Some("apple"), Some("apricot")]);
+
+        let b = query_table(&state, &req("^b")).unwrap();
+        assert_eq!(b.total_rows, Some(1));
+        assert_eq!(b.rows[0][1].as_deref(), Some("banana"));
+    }
+
+    #[test]
+    fn regex_query_with_sort_pages_in_sort_order() {
+        // A regex filter combined with a sort on a different column: the
+        // cached match set must be materialized in *sort* order, not rowid
+        // order, and both pages must slice that same order.
+        let state = state_with_memory_db(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, n INTEGER);",
+        );
+        {
+            let mut guard = state.conn.lock();
+            let conn = guard.as_mut().unwrap();
+            let tx = conn.transaction().unwrap();
+            // Insert in reverse so rowid order differs from sort order.
+            for n in (0..1_500).rev() {
+                let name = format!("{}-{}", if n % 2 == 0 { "keep" } else { "drop" }, n);
+                tx.execute(
+                    "INSERT INTO items (name, n) VALUES (?, ?)",
+                    params![name, n],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        // Column index: 0=id, 1=name, 2=n.
+        let page = |offset: i64| QueryRequest {
+            table: "items".to_string(),
+            offset,
+            limit: 500,
+            filters: vec![regex_filter("name", "^keep-")],
+            global_filter: String::new(),
+            sort_column: Some("n".to_string()),
+            sort_asc: true,
+        };
+
+        let first = query_table(&state, &page(0)).unwrap();
+        assert_eq!(first.total_rows, Some(750));
+        assert_eq!(first.rows.len(), 500);
+        assert_eq!(first.rows[0][2].as_deref(), Some("0"));
+        assert_eq!(first.rows[499][2].as_deref(), Some("998"));
+
+        let deep = query_table(&state, &page(500)).unwrap();
+        assert_eq!(deep.total_rows, Some(750));
+        assert_eq!(deep.rows.len(), 250);
+        assert_eq!(deep.rows[0][2].as_deref(), Some("1000"));
+        assert_eq!(deep.rows[249][2].as_deref(), Some("1498"));
+    }
+
+    #[test]
+    fn regex_query_falls_back_on_without_rowid_table() {
+        // A WITHOUT ROWID table has no rowid to key the match-set cache on, so
+        // a regex view there must stay on the full-scan path and still return
+        // correctly filtered, correctly sorted rows with an exact total.
+        let state = state_with_memory_db(
+            "CREATE TABLE t (k TEXT PRIMARY KEY, v INTEGER) WITHOUT ROWID;
+             INSERT INTO t (k, v) VALUES ('keep-c', 3), ('keep-a', 1), ('drop-b', 2);",
+        );
+        let req = QueryRequest {
+            table: "t".to_string(),
+            offset: 0,
+            limit: 10,
+            filters: vec![regex_filter("k", "^keep-")],
+            global_filter: String::new(),
+            sort_column: Some("v".to_string()),
+            sort_asc: true,
+        };
+
+        let result = query_table(&state, &req).unwrap();
+
+        assert_eq!(result.total_rows, Some(2));
+        let ks: Vec<_> = result.rows.iter().map(|r| r[0].as_deref()).collect();
+        assert_eq!(ks, vec![Some("keep-a"), Some("keep-c")]);
+        // Nothing may be cached for a table the cache cannot address.
+        assert!(!state.ordered_rows.lock().contains_key("t"));
+    }
+
+    #[test]
+    fn regex_query_with_shadowed_rowid_column_returns_distinct_rows() {
+        // A user column literally named "rowid" shadows the built-in alias, so
+        // the match set must be keyed off "_rowid_" instead. Keying it off the
+        // shadowed (constant-valued) column would collapse all four rows into
+        // one. The scan also selects the rowid ahead of "*", so this pins the
+        // +1 column shift too: testing the wrong column would match "7" rather
+        // than the data values and return the wrong set, not an error.
+        let state = state_with_memory_db(
+            "CREATE TABLE t (rowid INTEGER, data TEXT);
+             INSERT INTO t (rowid, data) VALUES (7, 'a'), (7, 'b'), (7, 'c'), (7, 'd');",
+        );
+        let req = QueryRequest {
+            table: "t".to_string(),
+            offset: 0,
+            limit: 10,
+            filters: vec![regex_filter("data", "^[abc]$")],
+            global_filter: String::new(),
+            sort_column: Some("data".to_string()),
+            sort_asc: true,
+        };
+
+        let result = query_table(&state, &req).unwrap();
+
+        assert_eq!(result.total_rows, Some(3));
+        let data: Vec<_> = result.rows.iter().map(|r| r[1].as_deref()).collect();
+        assert_eq!(data, vec![Some("a"), Some("b"), Some("c")]);
+    }
+
+    #[test]
+    fn ordered_rows_cache_rebuilds_between_regex_and_plain_views() {
+        // The two views here are deliberately indistinguishable in every
+        // OrderKey field except the regex signature: same empty WHERE clause,
+        // same empty params, same ORDER BY. Toggling the regex off must
+        // therefore rebuild rather than keep serving the narrowed match set,
+        // and toggling it back on must re-narrow.
+        let state = state_with_memory_db(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);
+             INSERT INTO items (name) VALUES ('alpha'), ('beta'), ('gamma');",
+        );
+        let sorted = QueryRequest {
+            table: "items".to_string(),
+            offset: 0,
+            limit: 10,
+            filters: vec![],
+            global_filter: String::new(),
+            sort_column: Some("name".to_string()),
+            sort_asc: true,
+        };
+        let with_regex = QueryRequest {
+            filters: vec![regex_filter("name", "^a")],
+            ..sorted.clone()
+        };
+
+        let plain = query_table(&state, &sorted).unwrap();
+        assert_eq!(plain.total_rows, Some(3));
+
+        let narrowed = query_table(&state, &with_regex).unwrap();
+        assert_eq!(narrowed.total_rows, Some(1));
+        assert_eq!(narrowed.rows[0][1].as_deref(), Some("alpha"));
+
+        let restored = query_table(&state, &sorted).unwrap();
+        assert_eq!(restored.total_rows, Some(3));
+        let names: Vec<_> = restored.rows.iter().map(|r| r[1].as_deref()).collect();
+        assert_eq!(names, vec![Some("alpha"), Some("beta"), Some("gamma")]);
     }
 
     #[test]

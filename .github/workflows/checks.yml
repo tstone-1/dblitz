@@ -86,3 +86,62 @@ jobs:
       - name: Tests
         working-directory: src-tauri
         run: cargo test
+
+  # The one check that crosses the webview <-> IPC seam. Every unit test above
+  # runs below it, so the defect class this job exists for -- a CSP or
+  # capability regression that breaks production IPC while `tauri dev` stays
+  # healthy (the `connect-src ipc:` trap documented in AGENTS.md) -- is
+  # invisible to all of them. Builds the real binary (debug profile, but with
+  # bundled frontend assets and the production CSP applied), launches it under
+  # tauri-driver against a generated fixture database, and asserts a grid row
+  # renders. Linux only: tauri-driver has no macOS backend.
+  smoke:
+    name: Smoke (packaged app)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      # Same Tauri build deps as the backend job, plus the WebDriver host for
+      # webkit2gtk and a virtual display for the headless runner.
+      - name: Install Tauri Linux build deps and WebDriver host
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            webkit2gtk-driver \
+            xvfb
+
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --locked
+
+      # --debug keeps the compile fast; --no-bundle skips packaging (and with
+      # it the updater signing step, which needs a secret this workflow does
+      # not have). The frontend still goes through Vite's production build via
+      # beforeBuildCommand, and the webview loads it under the production CSP
+      # -- which is exactly the seam being tested.
+      - name: Build app (debug profile, bundled frontend assets)
+        run: npx tauri build --debug --no-bundle
+
+      - name: Run smoke test
+        run: xvfb-run --auto-servernum node scripts/smoke-test.mjs

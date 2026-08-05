@@ -653,9 +653,18 @@ pub fn run() {
                 // Tauri updater cannot replace those in place.
                 std::env::var("APPIMAGE").ok().as_deref(),
             ));
+            // Skipped under WebDriver: tauri-driver exports TAURI_AUTOMATION
+            // when it launches the app (that's how wry knows to put the
+            // webview into automation mode), and the smoke test drives a
+            // debug-profile build -- an inspector window popping up alongside
+            // the automated one is at best noise and at worst steals the
+            // session's window. The variable is already load-bearing for wry,
+            // so keying on it adds no new configuration surface.
             #[cfg(debug_assertions)]
-            if let Some(window) = app.get_webview_window("main") {
-                window.open_devtools();
+            if std::env::var_os("TAURI_AUTOMATION").is_none() {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.open_devtools();
+                }
             }
             Ok(())
         })

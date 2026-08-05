@@ -201,6 +201,12 @@ export class UpdateState {
   /**
    * Downloads and installs the pending update, then restarts. Windows never
    * reaches the relaunch — the NSIS installer terminates the app first.
+   *
+   * The download call installs too, and only resolves once that is done, so the
+   * `installing` phase has to come from the adapter's own event stream — waiting
+   * for the promise would show "Installing…" for the instant between a finished
+   * install and the relaunch, while the install itself sat behind a progress bar
+   * frozen at 100%.
    */
   async installAndRestart(): Promise<void> {
     const update = this.#pending;
@@ -218,10 +224,26 @@ export class UpdateState {
 
     this.phase = { kind: "downloading", version: update.version, downloaded: 0, total: null };
     try {
-      await update.download((downloaded, total) => {
-        this.phase = { kind: "downloading", version: update.version, downloaded, total };
+      let installing = false;
+      await update.download((event) => {
+        if (event.kind === "installing") {
+          installing = true;
+          this.phase = { kind: "installing", version: update.version };
+          return;
+        }
+        this.phase = {
+          kind: "downloading",
+          version: update.version,
+          downloaded: event.downloaded,
+          total: event.total,
+        };
       });
-      this.phase = { kind: "installing", version: update.version };
+      // Fallback, not the normal path: a download that resolved without ever
+      // reporting the handover must not leave the bar claiming a download is
+      // still running while the app restarts underneath it.
+      if (!installing) {
+        this.phase = { kind: "installing", version: update.version };
+      }
       await relaunch();
     } catch (e) {
       console.error("Update install failed:", e);

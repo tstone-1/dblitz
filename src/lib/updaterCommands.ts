@@ -15,6 +15,20 @@ import { relaunch as relaunchApp } from "@tauri-apps/plugin-process";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 /**
+ * What happens while {@link PendingUpdate.download} is in flight.
+ *
+ * The two are reported separately because the plugin's `downloadAndInstall`
+ * *both* downloads and installs before it resolves: by the time the promise
+ * settles the install is already done. Its `Finished` event is the only moment
+ * the caller can observe the handover, so it is surfaced as its own event kind
+ * rather than as a 100% progress report — otherwise the UI can only ever show
+ * "Installing…" after the fact.
+ */
+export type DownloadEvent =
+  | { kind: "progress"; downloaded: number; total: number | null }
+  | { kind: "installing" };
+
+/**
  * What the UI needs from a pending update. The plugin's own `Update` object owns
  * a live download handle, so it is captured in the `download` closure rather
  * than reconstructed.
@@ -25,7 +39,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
  */
 export type PendingUpdate = {
   version: string;
-  download: (onProgress: (downloaded: number, total: number | null) => void) => Promise<void>;
+  download: (onEvent: (event: DownloadEvent) => void) => Promise<void>;
 };
 
 /**
@@ -39,24 +53,29 @@ export async function checkForUpdates(): Promise<PendingUpdate | null> {
 
   return {
     version: update.version,
-    download: async (onProgress) => {
+    download: async (onEvent) => {
       let downloaded = 0;
       let total: number | null = null;
       // downloadAndInstall streams three event kinds. Only Started carries the
       // content length, and Progress reports per-chunk deltas rather than a
       // running total, so the accumulation has to happen here.
+      //
+      // Finished means the *download* is complete; the install then runs inside
+      // this same call, before the promise resolves. That is the point at which
+      // the UI should stop saying "Downloading", so it is reported as
+      // `installing` rather than as a last progress tick.
       await update.downloadAndInstall((event) => {
         switch (event.event) {
           case "Started":
             total = event.data.contentLength ?? null;
-            onProgress(0, total);
+            onEvent({ kind: "progress", downloaded: 0, total });
             break;
           case "Progress":
             downloaded += event.data.chunkLength;
-            onProgress(downloaded, total);
+            onEvent({ kind: "progress", downloaded, total });
             break;
           case "Finished":
-            onProgress(total ?? downloaded, total);
+            onEvent({ kind: "installing" });
             break;
         }
       });

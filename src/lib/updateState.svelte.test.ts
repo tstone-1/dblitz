@@ -6,7 +6,7 @@ import {
   STARTUP_CHECK_DELAY_MS,
   type UpdatePhase,
 } from "./updateState.svelte";
-import type { PendingUpdate } from "./updaterCommands";
+import type { DownloadEvent, PendingUpdate } from "./updaterCommands";
 
 // The adapter is the seam: it owns every @tauri-apps/plugin-* import, so mocking
 // it here is what lets the state machine be tested without a Tauri runtime.
@@ -132,10 +132,10 @@ describe("UpdateState.installAndRestart", () => {
   it("reports download progress and relaunches", async () => {
     const state = new UpdateState();
     const seen: UpdatePhase[] = [];
-    const download = vi.fn(async (onProgress: (d: number, t: number | null) => void) => {
-      onProgress(0, 100);
+    const download = vi.fn(async (onEvent: (event: DownloadEvent) => void) => {
+      onEvent({ kind: "progress", downloaded: 0, total: 100 });
       seen.push(state.phase);
-      onProgress(40, 100);
+      onEvent({ kind: "progress", downloaded: 40, total: 100 });
       seen.push(state.phase);
     });
     checkMock.mockResolvedValue(pending("26.8.0", download));
@@ -149,6 +149,50 @@ describe("UpdateState.installAndRestart", () => {
     ]);
     expect(relaunchMock).toHaveBeenCalledTimes(1);
     expect(state.phase).toEqual({ kind: "installing", version: "26.8.0" });
+  });
+
+  it("shows the install phase while the install is still running", async () => {
+    // The whole point of the separate event kind: downloadAndInstall installs
+    // before it resolves, so a phase flipped after the promise settles would be
+    // shown once the install is already over.
+    const state = new UpdateState();
+    const seen: UpdatePhase[] = [];
+    let relaunchedDuringInstall = false;
+    const download = vi.fn(async (onEvent: (event: DownloadEvent) => void) => {
+      onEvent({ kind: "progress", downloaded: 100, total: 100 });
+      onEvent({ kind: "installing" });
+      // Observed from inside the still-unresolved call: this is the window the
+      // user actually spends waiting for the install.
+      seen.push(state.phase);
+      relaunchedDuringInstall = relaunchMock.mock.calls.length > 0;
+      await Promise.resolve();
+    });
+    checkMock.mockResolvedValue(pending("26.8.0", download));
+    await state.check("manual");
+
+    await state.installAndRestart();
+
+    expect(seen).toEqual([{ kind: "installing", version: "26.8.0" }]);
+    // Relaunch belongs strictly after the call resolves — restarting mid-install
+    // would abort it.
+    expect(relaunchedDuringInstall).toBe(false);
+    expect(relaunchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("still reaches the install phase when the handover is never reported", async () => {
+    // Fallback path: whatever the plugin does or doesn't emit, the bar must not
+    // claim a download is in progress while the app restarts underneath it.
+    const download = vi.fn(async (onEvent: (event: DownloadEvent) => void) => {
+      onEvent({ kind: "progress", downloaded: 10, total: null });
+    });
+    checkMock.mockResolvedValue(pending("26.8.0", download));
+    const state = new UpdateState();
+    await state.check("manual");
+
+    await state.installAndRestart();
+
+    expect(state.phase).toEqual({ kind: "installing", version: "26.8.0" });
+    expect(relaunchMock).toHaveBeenCalledTimes(1);
   });
 
   it("offers a manual download when the install fails", async () => {

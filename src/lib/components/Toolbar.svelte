@@ -69,7 +69,14 @@
 
   async function handleOpen() {
     const path = await open({
-      filters: [{ name: "SQLite", extensions: ["db", "sqlite", "sqlite3", "db3"] }],
+      // SQLite stays first so it is the default. The All Files fallback is not
+      // optional: a SQLite database is identified by its header, not its name,
+      // and files like data.bin or cache.dat are common in the wild — without
+      // this they cannot be opened through the dialog at all.
+      filters: [
+        { name: "SQLite", extensions: ["db", "sqlite", "sqlite3", "db3"] },
+        { name: "All Files", extensions: ["*"] },
+      ],
       multiple: false,
       directory: false,
     });

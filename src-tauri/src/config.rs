@@ -143,7 +143,16 @@ fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
         nanos
     );
     let tmp_path = dir.join(tmp_name);
-    fs::write(&tmp_path, contents).str_err()?;
+    fs::write(&tmp_path, contents).map_err(|e| {
+        // A failed write can still have created (and partially filled) the
+        // temp file - a disk-full or quota error hits mid-write, not before
+        // it. Returning without this cleanup stranded one uniquely-named
+        // `.tmp` per attempt in the config dir, with nothing that ever
+        // collects them. Same best-effort shape as the rename path below:
+        // ignore a secondary failure so the original error is reported.
+        let _ = fs::remove_file(&tmp_path);
+        e.to_string()
+    })?;
     fs::rename(&tmp_path, path).map_err(|e| {
         // Best-effort cleanup of the orphaned temp file; ignore a secondary
         // failure here so the original rename error is what gets reported.

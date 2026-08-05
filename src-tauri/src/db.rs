@@ -74,6 +74,7 @@ mod tests {
                     where_clause: String::new(),
                     params: Vec::new(),
                     order_clause: " ORDER BY id ASC".to_string(),
+                    regex_signature: Vec::new(),
                 },
                 rowids: vec![1],
             },

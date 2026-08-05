@@ -5,6 +5,57 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.8.0] - 2026-08-05
+
+Fixes from a follow-up full-codebase deep review (0 blockers, 2 warnings,
+5 nitpicks — all addressed).
+
+### Added
+- **CI now smoke-tests the packaged app.** A new Linux job builds the real
+  binary (production frontend assets, production CSP), launches it under
+  WebDriver against a generated fixture database, and asserts a grid row
+  actually renders. This is the only check that crosses the webview↔IPC seam —
+  every unit test runs below it, and the defect class it exists for (a CSP or
+  capability regression that breaks production IPC while dev stays healthy)
+  was previously guarded by nothing but a comment. A workflow-pinning test
+  fails if the job or its steps are ever dropped.
+
+### Fixed
+- **Switching tables quickly can no longer overwrite saved column widths.**
+  Selecting a table with no saved widths and then clicking another table before
+  the first one finished loading could persist auto-fit widths — measured from
+  the second table's grid, or from its bare headers — into the second table's
+  config, silently discarding widths the user had sized by hand. The auto-fit
+  decision now checks that its table is still the selected one.
+- **The update bar now says "Installing…" while the install is actually
+  running.** The download and the install happen inside one plugin call, and
+  the bar previously showed a progress bar frozen at 100% during the install,
+  flashing "Installing…" only for the instant before the restart. The phases
+  now switch when the download hands over to the install.
+- **A failed view-config save no longer strands a temp file.** Config writes go
+  through a write-then-rename so a crash can never tear the file; a write that
+  itself failed (disk full) left its uniquely-named `.tmp` file behind on every
+  attempt, with nothing that ever collected them. The failure path now cleans
+  up after itself.
+- **The loading indicator can no longer stick on after a database switch**
+  interrupts an in-flight table load.
+
+### Changed
+- **Filtering with a regex now scrolls as fast as any other filter.** Serving
+  one chunk of a regex-filtered view used to re-scan the whole table and re-run
+  the pattern over every row — and every further scroll chunk did it again, so
+  browsing got slower the further down it went. The matched rows are now
+  materialized once per view and pages are served from that set, the same
+  mechanism sorted and text-filtered views already used. (Tables without an
+  addressable rowid keep the previous behavior.)
+- **The Open dialog now offers an "All Files" fallback filter.** A SQLite
+  database is identified by its header, not its name — files like `data.bin`
+  or `cache.dat` could previously not be opened through the dialog at all.
+- **Opening a database from the OS (double-click, Dock, CLI) while another is
+  open no longer closes it first.** The open path swaps the connection
+  atomically either way; the extra close only added a second loading cycle and
+  made the OS route behave differently from the toolbar's.
+
 ## [26.7.7] - 2026-07-29
 
 Includes fixes and refactors from a full-codebase deep review (0 blockers,
