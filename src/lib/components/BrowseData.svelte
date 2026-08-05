@@ -29,6 +29,7 @@
     visibleColumns,
   } from "./columnView";
   import { computeAutoWidths } from "./columnWidths";
+  import { shouldAutoFitWidths } from "./autoFitWidths";
   import { hasIncompleteOperator, stripIncompleteSegments } from "./filterOperators";
   import type { SelectionData } from "./selectionData";
   import { pinGlyphPath } from "./pinGlyph";
@@ -188,16 +189,22 @@
   /**
    * Clears every piece of per-database local state BrowseData caches about
    * whichever database was previously open: the selected table, its
-   * columns/row-count, all filter/sort state, the pending filter debounce,
-   * and the virtualRows row cache. Called whenever appState.dbPath changes
-   * (see the merged reset+auto-select effect above) so a database switch
-   * can never leave the grid showing -- or querying -- the wrong database's
-   * table.
+   * columns/row-count, all filter/sort state, the in-flight loading flag, the
+   * pending filter debounce, and the virtualRows row cache. Called whenever
+   * appState.dbPath changes (see the merged reset+auto-select effect above) so
+   * a database switch can never leave the grid showing -- or querying -- the
+   * wrong database's table.
    */
   function resetForNewDatabase() {
     selectedTable = null;
     columns = [];
     totalRows = 0;
+    // A reload superseded by this database switch returns early from
+    // reloadData() -- either at `beginReload()` returning null or at the
+    // isCurrent() check in its `finally` -- and never clears `loading`. The new
+    // session then starts with the spinner stuck on until some later reload
+    // happens to finish.
+    loading = false;
     countPending = false;
     columnFilters = {};
     globalFilter = "";
@@ -241,11 +248,27 @@
 
     await reloadData();
 
-    // Auto-fit column widths on first open (no saved widths for this table)
-    const widthCfg = getTableConfig(name).column_widths;
-    if (!widthCfg || Object.keys(widthCfg).length === 0) {
-      applyAutoWidths();
+    // Auto-fit column widths on first open (no saved widths for this table),
+    // but only while this call is still the current selection. selectTable()
+    // can run again while the await above is in flight -- click table A (no
+    // saved widths, slow first load), then table B before A's first chunk
+    // lands -- and applyAutoWidths() measures and persists through the LIVE
+    // `selectedTable`, not `name`. A's resumed tail therefore wrote auto-fit
+    // widths taken from B's grid (or from B's bare headers, if B's own chunk
+    // had not arrived either) into B's config, silently discarding the widths
+    // the user had hand-tuned there. Every other post-await consumer in this
+    // file is epoch-guarded via virtualRows.isCurrent(); this tail has no
+    // epoch, so it re-reads the selection instead.
+    if (
+      !shouldAutoFitWidths({
+        requestedTable: name,
+        currentTable: selectedTable,
+        savedWidths: getTableConfig(name).column_widths,
+      })
+    ) {
+      return;
     }
+    applyAutoWidths();
   }
 
   async function reloadData() {

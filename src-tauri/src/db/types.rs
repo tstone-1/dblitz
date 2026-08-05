@@ -25,6 +25,14 @@ pub(super) struct OrderKey {
     pub(super) where_clause: String,
     pub(super) params: Vec<String>,
     pub(super) order_clause: String,
+    /// Column index + pattern source for every regex filter applied in Rust,
+    /// in the order they were evaluated. Regex filters never reach the SQL, so
+    /// `where_clause` and `params` are identical for two views that differ
+    /// only by their pattern - without this field the cached rowid list of one
+    /// regex would silently be served as the match set of another, and
+    /// clearing the regex entirely would keep serving the narrowed set.
+    /// Empty for every non-regex view.
+    pub(super) regex_signature: Vec<(usize, String)>,
 }
 
 /// Full rowid order for one filtered and/or sorted view of a table. Sorted-only

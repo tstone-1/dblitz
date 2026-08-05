@@ -54,3 +54,38 @@ describe("checks workflow covers the frontend quality gate", () => {
     expect(workflow).toContain("run: npm run build");
   });
 });
+
+/**
+ * The smoke job is the only check that crosses the webview <-> IPC seam --
+ * every unit test (vitest and cargo alike) runs below it, and the defect class
+ * it exists for (a CSP/capability regression that breaks production IPC while
+ * dev stays healthy) is invisible to all of them. It cannot be part of
+ * `npm run quality` because tauri-driver has no macOS backend, so this pin is
+ * the only thing that notices the job being dropped or its steps drifting.
+ */
+describe("checks workflow runs the packaged-app smoke test", () => {
+  const workflow = readText(".github/workflows/checks.yml");
+
+  it("builds the packaged app rather than reusing the dev server", () => {
+    // --no-bundle alone would be wrong (no frontend assets); a plain build
+    // would be wrong too (bundling needs the updater signing secret). The
+    // exact flag pair is the contract.
+    expect(workflow).toContain("npx tauri build --debug --no-bundle");
+  });
+
+  it("drives the built binary under a virtual display", () => {
+    expect(workflow).toContain(
+      "xvfb-run --auto-servernum node scripts/smoke-test.mjs",
+    );
+  });
+
+  it("ships the smoke script the job invokes", () => {
+    // readText throws on a missing file, so a renamed/deleted script fails
+    // here rather than for the first time inside the CI job.
+    const script = readText("scripts/smoke-test.mjs");
+    // The assertion the whole job exists for: the script must check that real
+    // fixture data crossed IPC into the grid, not merely that a window opened.
+    expect(script).toContain('.data-cell');
+    expect(script).toContain("alice");
+  });
+});

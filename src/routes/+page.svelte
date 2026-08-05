@@ -4,7 +4,7 @@
   import { onMount } from "svelte";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getInitialFile, toggleDevtools } from "$lib/ipc";
-  import { appState, initTheme, openDatabase, closeDatabase } from "$lib/store.svelte";
+  import { appState, initTheme, openDatabase } from "$lib/store.svelte";
   import { update } from "$lib/updateState.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import AppBanners from "$lib/components/AppBanners.svelte";
@@ -12,8 +12,15 @@
   import BrowseData from "$lib/components/BrowseData.svelte";
   import ExecuteSQL from "$lib/components/ExecuteSQL.svelte";
 
+  // Opening a database while another one is open needs no explicit close, and
+  // this path deliberately does not do one: the backend swaps the connection
+  // atomically under the conn lock, and appState.dbOpenGeneration bumps on
+  // every successful open, which is what drives every frontend reset. A
+  // close-first only added a second loading cycle and made the close read as
+  // load-bearing. Toolbar's "Open DB" and the recents list already call
+  // openDatabase() straight; this keeps the OS-open route (Finder
+  // double-click, Dock "Open Recent", CLI arg) identical to them.
   async function handleOpenFile(path: string) {
-    if (appState.dbPath) await closeDatabase();
     await openDatabase(path);
     appState.activeTab = "browse";
   }
