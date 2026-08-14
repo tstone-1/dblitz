@@ -20,6 +20,45 @@
   - `cd src-tauri && cargo clippy --all-targets --all-features -- -D warnings` (matches CI/`npm run quality` — a bare `cargo clippy` can pass locally and still fail CI)
 - Use `npx tauri build` for local release builds. macOS DMG packaging may need to run outside a sandbox because Tauri invokes system image mounting tools.
 
+### Inspecting a shipped build's webview (Windows)
+
+A released `dblitz.exe` has no devtools: `toggle_devtools` is `cfg(debug_assertions)`
+and the F12 handler is gated on SvelteKit's `dev`. WebView2 still honours its
+environment variables though, so a **release** binary can be driven over CDP without
+rebuilding anything:
+
+```powershell
+$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222'
+$env:WEBVIEW2_USER_DATA_FOLDER = "$env:TEMP\dblitz-dbg-udf"
+Start-Process dblitz.exe -ArgumentList '"<path to a database>"'
+```
+
+`http://127.0.0.1:9222/json` then lists the targets, and the `webSocketDebuggerUrl`
+accepts `Runtime.enable` / `Runtime.evaluate` — enough to read
+`document.body.innerText`, call `window.__TAURI_INTERNALS__.invoke(...)` against the
+live backend, and catch `Runtime.exceptionThrown`.
+
+**This is the only way to tell a backend failure from a webview failure in a shipped
+build, and from outside they look identical.** The native window title is set by
+`open_database` on the Rust side, so a title showing the filename proves the database
+opened even while every panel renders its "Open a SQLite database…" placeholder. That
+combination means the frontend died after a successful open — in the 26.7.5 case
+(diagnosed 2026-08-14) an `effect_update_depth_exceeded` loop at mount, which left the
+whole reactive graph wedged so the later publish of `dbPath` never reached the DOM.
+
+Three traps, each of which reads as a different bug:
+
+- **The separate user data folder is not optional while another instance is running.**
+  Reusing one folder with different browser arguments fails webview creation with
+  `0x8007139F` ("the group or resource is not in the correct state"), and the process
+  then stays alive owning a window with no content at all.
+- **A `tauri dev` build auto-opens devtools, and that is itself a CDP `page` target.**
+  Filter it out (`!t.url.startsWith("devtools:")`) or you inspect the inspector.
+- **Duplicate-instance detection will silently hijack the run.**
+  `try_activate_existing` matches on the full path, so launching a second copy on a
+  file another instance already holds open just raises that window and exits 0.
+  Close the other instance, or test against a different file.
+
 ## Architecture
 
 - Frontend code lives under `src/`.
