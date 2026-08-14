@@ -1,0 +1,14 @@
+# Line endings are pinned here rather than left to each machine's core.autocrlf.
+#
+# Without this, a Windows clone with autocrlf=true checks the whole tree out as
+# CRLF, and any tool that rewrites a file with LF shows up as a modification
+# whose `git diff` is empty — the Tauri CLI does exactly that to
+# src-tauri/Cargo.toml during `tauri dev`. Storing and checking out LF
+# everywhere makes the working tree identical on Windows and macOS.
+* text=auto eol=lf
+
+# Binaries: never inspected for text, never converted. These are the only
+# binary extensions the tree actually carries (icons and bundle artwork).
+*.png binary
+*.ico binary
+*.icns binary
