@@ -185,9 +185,22 @@ export function persistSqlHistory() {
 // autosave once they've seen it - that's what this module-level flag is for.
 let saveFailureNotified = false;
 
-export async function saveViewConfig() {
+// Saves get their own serialising chain, for the same reason open/close have
+// one: they are fire-and-forget, and two of them in flight at once is the
+// normal case (a column drag emits one per frame). Without this the backend
+// command runs on Tauri's threadpool in whatever order it likes, so an OLDER
+// snapshot can land after a newer one and quietly undo the user's last change.
+//
+// It is a SEPARATE chain from databaseRequestQueue on purpose. Putting saves
+// on that one would make every keystroke-driven autosave block the next
+// open/close behind it; what actually has to hold is (a) saves are ordered
+// among themselves and (b) each save knows its own database, which the
+// captured `path` below gives it independently of any queue.
+let viewConfigSaveQueue: Promise<void> = Promise.resolve();
+
+async function runSaveViewConfig(path: string, config: FileConfig) {
   try {
-    await saveViewConfigCmd(appState.fileConfig);
+    await saveViewConfigCmd(config, path);
   } catch (e) {
     console.error("Failed to save view config:", e);
     if (!saveFailureNotified) {
@@ -195,6 +208,31 @@ export async function saveViewConfig() {
       appState.notice = `View settings could not be saved: ${String(e)}`;
     }
   }
+}
+
+export function saveViewConfig(): Promise<void> {
+  const path = appState.dbPath;
+  // Nothing open: there is no file to key a config off. closeDatabase() resets
+  // fileConfig to the empty default, so a save racing a close would otherwise
+  // write that emptiness over the previous database's real settings.
+  if (path === null) return Promise.resolve();
+
+  // Detach a plain copy at ENQUEUE time. `appState.fileConfig` keeps mutating
+  // under the user's hands and openDatabase() replaces the field wholesale, so
+  // a queued save holding a live reference would serialise whatever the state
+  // had become by the time it ran -- the next database's config, or a
+  // half-finished edit.
+  //
+  // A JSON round trip rather than `$state.snapshot`: this value crosses IPC as
+  // JSON regardless, so the round trip cannot drop anything the backend would
+  // have received, and unlike `$state.snapshot` it detaches unconditionally.
+  // (Measured: `$state.snapshot(appState.fileConfig)` returns that same object
+  // here, not a clone, so later edits still reached the queued save.)
+  const config = JSON.parse(JSON.stringify(appState.fileConfig)) as FileConfig;
+
+  const task = viewConfigSaveQueue.then(() => runSaveViewConfig(path, config));
+  viewConfigSaveQueue = task.catch(() => {});
+  return task;
 }
 
 /**

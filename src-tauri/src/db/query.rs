@@ -4,21 +4,19 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
 use super::filters::{build_where_clause, WhereResult};
+use super::schema::table_columns;
 use super::types::{
     ColumnFilter, DbState, OrderKey, OrderedRows, QueryRequest, QueryResult, RowidIndex,
 };
 use super::util::{collect_rows, quote_ident, read_row, StrErr};
 
+/// The columns `SELECT *` returns for this table, in its order.
+///
+/// Delegates to [`table_columns`] rather than reading `PRAGMA table_info`
+/// here: that PRAGMA omits generated columns, which breaks the positional
+/// agreement every regex filter depends on. See `TableColumns::visible`.
 fn get_column_names(conn: &Connection, quoted_table: &str) -> Result<Vec<String>, String> {
-    let mut stmt = conn
-        .prepare(&format!("PRAGMA table_info({})", quoted_table))
-        .str_err()?;
-    let cols: Vec<String> = stmt
-        .query_map([], |row| row.get::<_, String>(1))
-        .str_err()?
-        .collect::<Result<Vec<_>, _>>()
-        .str_err()?;
-    Ok(cols)
+    Ok(table_columns(conn, quoted_table)?.visible)
 }
 
 /// Determine which SQLite rowid alias (`rowid`, `_rowid_`, `oid`) safely
@@ -35,6 +33,14 @@ fn get_column_names(conn: &Connection, quoted_table: &str) -> Result<Vec<String>
 /// genuinely rowid-less, or when a user has shadowed all three aliases
 /// (legal, if pathological).
 ///
+/// Shadow detection reads `TableColumns::declared`, which is every name the
+/// table declares - **generated columns included**. A generated column can
+/// shadow an alias exactly like an ordinary one: `rowid AS (a % 2)` makes
+/// `SELECT rowid` return a duplicate-valued, non-monotonic expression while
+/// `_rowid_` still addresses the real key. `PRAGMA table_info` does not report
+/// generated columns at all, so building this set from it left that column
+/// invisible here and every rowid-keyed cache below keyed off `a % 2`.
+///
 /// Deliberately left *unquoted* everywhere it's interpolated (here and in
 /// every function below that takes an `alias` parameter): all three
 /// candidates are fixed constants, not user input, so quoting isn't needed
@@ -46,8 +52,9 @@ fn get_column_names(conn: &Connection, quoted_table: &str) -> Result<Vec<String>
 pub(super) fn rowid_alias(conn: &Connection, quoted_table: &str) -> Option<&'static str> {
     const ALIASES: [&str; 3] = ["rowid", "_rowid_", "oid"];
 
-    let user_columns: HashSet<String> = get_column_names(conn, quoted_table)
+    let user_columns: HashSet<String> = table_columns(conn, quoted_table)
         .ok()?
+        .declared
         .into_iter()
         .map(|c| c.to_ascii_lowercase())
         .collect();
@@ -1858,5 +1865,133 @@ mod tests {
         let count = count_rows(&state, "users", &filters, "a").unwrap();
 
         assert_eq!(count, 2);
+    }
+
+    // ---- Generated columns -------------------------------------------------
+    //
+    // `PRAGMA table_info` omits generated columns; `SELECT *` returns them.
+    // Every column list in dblitz therefore comes from `PRAGMA table_xinfo`
+    // (`schema::table_columns`). These four tests pin the three distinct ways
+    // the `table_info` version was wrong.
+
+    #[test]
+    fn generated_columns_are_reported_and_returned() {
+        // `table_info` reported only `a` here, so the grid rendered one column
+        // for rows that carry four values.
+        let state = state_with_memory_db(
+            "CREATE TABLE t (a INTEGER, v AS (a * 2), s AS (a * 3) STORED, z TEXT);
+             INSERT INTO t (a, z) VALUES (1, 'x'), (2, 'y');",
+        );
+        let req = QueryRequest {
+            table: "t".to_string(),
+            offset: 0,
+            limit: 10,
+            filters: vec![],
+            global_filter: String::new(),
+            sort_column: None,
+            sort_asc: true,
+        };
+
+        let result = query_table(&state, &req).unwrap();
+
+        assert_eq!(result.columns, vec!["a", "v", "s", "z"]);
+        // One value per reported column, and the generated ones carry their
+        // computed values rather than a placeholder.
+        assert!(result.rows.iter().all(|row| row.len() == 4));
+        assert_eq!(result.rows[0][1].as_deref(), Some("2"));
+        assert_eq!(result.rows[0][2].as_deref(), Some("3"));
+        assert_eq!(result.rows[1][1].as_deref(), Some("4"));
+    }
+
+    #[test]
+    fn regex_filter_index_survives_a_preceding_generated_column() {
+        // The positional bug: `table_info` yields [a, c] for this table while
+        // `SELECT *` yields [a, b, c]. A regex filter on `c` then resolved to
+        // index 1 and matched `b`'s values, so this query returned the rows
+        // whose *doubled* value matched - here, all of them.
+        let state = state_with_memory_db(
+            "CREATE TABLE t (a INTEGER, b AS (a * 2), c TEXT);
+             INSERT INTO t (a, c) VALUES (1, 'keep'), (2, 'drop'), (3, 'keep');",
+        );
+        let req = QueryRequest {
+            table: "t".to_string(),
+            offset: 0,
+            limit: 10,
+            filters: vec![regex_filter("c", "^keep$")],
+            global_filter: String::new(),
+            sort_column: None,
+            sort_asc: true,
+        };
+
+        let result = query_table(&state, &req).unwrap();
+
+        assert_eq!(result.columns, vec!["a", "b", "c"]);
+        assert_eq!(result.rows.len(), 2);
+        let a: Vec<_> = result.rows.iter().map(|r| r[0].as_deref()).collect();
+        assert_eq!(a, vec![Some("1"), Some("3")]);
+    }
+
+    #[test]
+    fn generated_rowid_column_shadows_the_alias() {
+        // The dangerous case, and the one `table_info` could not see at all:
+        // `rowid` is a legal generated-column name. `SELECT rowid` then returns
+        // `a % 2` - duplicated and non-monotonic - while `_rowid_` still
+        // addresses the real key. Picking `rowid` here poisons every cache
+        // keyed off it.
+        let state = state_with_memory_db(
+            "CREATE TABLE t (a INTEGER, rowid AS (a % 2), data TEXT);
+             INSERT INTO t (a, data) VALUES (1, 'x'), (2, 'y'), (3, 'z');",
+        );
+        let guard = state.conn.lock();
+        let conn = guard.as_ref().unwrap();
+
+        assert_eq!(rowid_alias(conn, "\"t\""), Some("_rowid_"));
+    }
+
+    #[test]
+    fn generated_rowid_column_does_not_corrupt_paging() {
+        // End to end, file-backed and over more than two chunks, because the
+        // sparse rowid index only exists past the first page: page through the
+        // whole table and require every row exactly once, in order. Keyed off
+        // the duplicate-valued `rowid` generated column instead, the boundary
+        // seeks overlap and rows repeat or vanish.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("generated.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE t (n INTEGER, rowid AS (n % 2), label TEXT);")
+                .unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            for n in 0..250i64 {
+                tx.execute(
+                    "INSERT INTO t (n, label) VALUES (?, ?)",
+                    params![n, format!("row-{n}")],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let state = DbState::new();
+        open_database(&state, path.to_str().unwrap()).unwrap();
+
+        let mut seen: Vec<i64> = Vec::new();
+        for page in 0..3 {
+            let req = QueryRequest {
+                table: "t".to_string(),
+                offset: page * 100,
+                limit: 100,
+                filters: vec![],
+                global_filter: String::new(),
+                sort_column: None,
+                sort_asc: true,
+            };
+            let result = query_table(&state, &req).unwrap();
+            assert_eq!(result.columns, vec!["n", "rowid", "label"]);
+            for row in result.rows {
+                seen.push(row[0].as_deref().unwrap().parse::<i64>().unwrap());
+            }
+        }
+
+        assert_eq!(seen, (0..250).collect::<Vec<i64>>());
     }
 }

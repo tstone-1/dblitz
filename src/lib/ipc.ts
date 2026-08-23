@@ -147,8 +147,14 @@ export interface ExportXlsxArgs {
 }
 
 // ---- Typed command wrappers ----------------------------------------------
-// One per `#[tauri::command]`. Kept as thin passthroughs: the value here is the
-// typed signature, not added logic.
+// Thin passthroughs: the value here is the typed signature, not added logic.
+//
+// This does NOT mirror every `#[tauri::command]`, and used to claim it did.
+// `get_tables` and `get_current_path` are registered on the Rust side but
+// unused from the frontend (`open_database` already returns the table list, and
+// the toolbar reads the path out of `appState`), and the paging benchmark is
+// `cfg(debug_assertions)` only. Wrappers exist for the commands the frontend
+// calls; a command with no wrapper here is a command nothing calls.
 
 /** Path of the file the app was launched with (CLI arg / file association). */
 export function getInitialFile(): Promise<string | null> {
@@ -175,9 +181,18 @@ export function loadViewConfig(): Promise<FileConfig> {
   return invoke<FileConfig>("load_view_config");
 }
 
-/** Persist the view config for the open database. */
-export function saveViewConfig(config: FileConfig): Promise<void> {
-  return invoke("save_view_config", { config });
+/**
+ * Persist the view config for `path`.
+ *
+ * The path is explicit rather than "whatever is open": the backend command runs
+ * on Tauri's threadpool, so by the time it executes the open database may have
+ * changed and it would otherwise write these settings under the wrong file's
+ * key. It rejects a path that is no longer open. Callers go through
+ * `saveViewConfig()` in store.svelte.ts, which captures the path at enqueue
+ * time and serialises the saves.
+ */
+export function saveViewConfig(config: FileConfig, path: string): Promise<void> {
+  return invoke("save_view_config", { config, path });
 }
 
 /** Column introspection for a table. */

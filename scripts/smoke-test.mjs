@@ -79,11 +79,17 @@ async function main() {
 
   // Single-table fixture on purpose: BrowseData auto-selects the lone table,
   // so the grid renders without any UI interaction beyond the launch itself.
+  //
+  // `shout` is a generated column, and it is here because the whole column
+  // list depends on which PRAGMA the backend introspects with: `table_info`
+  // omits generated columns while `SELECT *` returns them, so a regression
+  // there renders a grid one column short of its own rows. Only a real
+  // packaged run exercises that end to end.
   const fixtureDir = mkdtempSync(join(tmpdir(), "dblitz-smoke-"));
   const dbPath = join(fixtureDir, "smoke.sqlite");
   const db = new DatabaseSync(dbPath);
   db.exec(
-    "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);" +
+    "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, shout AS (upper(name)));" +
       "INSERT INTO users (name) VALUES ('alice'), ('bravo'), ('carol');",
   );
   db.close();
@@ -169,6 +175,13 @@ async function main() {
     }
 
     console.log("[OK] grid renders a fixture row over production IPC");
+    if (!state.cells.includes("ALICE")) {
+      throw new Error(
+        "grid rendered the ordinary columns but not the generated one; " +
+          `cells: ${JSON.stringify(state.cells)}`,
+      );
+    }
+    console.log("[OK] generated column renders alongside the ordinary ones");
     if (!state.path.includes("smoke.sqlite")) {
       throw new Error(
         `toolbar path does not show the opened database: "${state.path}"`,

@@ -184,28 +184,108 @@ pub fn get_tables(state: &DbState) -> Result<Vec<TableInfo>, String> {
     get_tables_inner(conn)
 }
 
-pub fn get_columns(state: &DbState, table: &str) -> Result<Vec<ColumnInfo>, String> {
-    let guard = state.conn.lock();
-    let conn = guard.as_ref().ok_or("No database open")?;
+/// `PRAGMA table_xinfo`'s `hidden` code for a hidden virtual-table column
+/// (fts5's `<name>` and `rank`): declared and queryable by name, but NOT
+/// returned by `SELECT *`. The other codes - 0 ordinary, 2 generated virtual,
+/// 3 generated stored - are all returned by `SELECT *` and so are all kept.
+const HIDDEN_VIRTUAL_TABLE: i64 = 1;
 
+/// A table's columns, split into the two lists dblitz needs.
+///
+/// Both come from one `PRAGMA table_xinfo` pass, and that is the whole point:
+/// `PRAGMA table_info` **omits generated columns entirely**, which makes each
+/// list below wrong in its own individually silent way.
+pub(super) struct TableColumns {
+    /// Exactly what `SELECT *` returns, in its order: ordinary columns plus
+    /// virtual and stored generated ones, with hidden virtual-table columns
+    /// dropped.
+    ///
+    /// Positional agreement with `SELECT *` is load-bearing, not incidental.
+    /// `build_where_clause` turns a regex filter into a *column index* into
+    /// this list (`filters.rs`), and the row scanner reads the value back out
+    /// of the result row at that index. Built from `table_info`, a table like
+    /// `CREATE TABLE t(a, b AS (a * 2), c)` yields `[a, c]`, so a regex filter
+    /// on `c` resolves to index 1 and silently matches `b`'s values instead.
+    pub visible: Vec<String>,
+    /// Every declared name, hidden virtual-table columns included. Used only to
+    /// decide whether a rowid alias is shadowed, where a missed shadow is
+    /// unsafe and a spurious one merely costs the rowid fast path - so this
+    /// list deliberately errs wide.
+    pub declared: Vec<String>,
+}
+
+/// Read a table's columns through `PRAGMA table_xinfo`.
+///
+/// Nothing in dblitz's own query building may use `table_info`, because its
+/// omission of generated columns corrupts two separate things: the visible
+/// column list stops matching `SELECT *` positionally (see
+/// [`TableColumns::visible`]), and rowid-shadow detection stops seeing a
+/// generated column that shadows `rowid`. The second is the dangerous one - a
+/// `rowid` generated column is a legal, non-unique, non-monotonic expression,
+/// and mistaking it for the real rowid feeds duplicate values into the
+/// boundary cache every deep page seeks against.
+///
+/// `quoted_table` must already be quoted by the caller.
+pub(super) fn table_columns(conn: &Connection, quoted_table: &str) -> Result<TableColumns, String> {
     let mut stmt = conn
-        .prepare(&format!("PRAGMA table_info({})", quote_ident(table)))
+        .prepare(&format!("PRAGMA table_xinfo({})", quoted_table))
         .str_err()?;
 
-    let columns: Vec<ColumnInfo> = stmt
+    let rows: Vec<(String, i64)> = stmt
         .query_map([], |row| {
-            Ok(ColumnInfo {
-                cid: row.get(0)?,
-                name: row.get(1)?,
-                col_type: row.get::<_, String>(2).unwrap_or_default(),
-                notnull: row.get::<_, bool>(3).unwrap_or(false),
-                default_value: row.get(4).ok(),
-                pk: row.get::<_, bool>(5).unwrap_or(false),
-            })
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(6).unwrap_or(0)))
         })
         .str_err()?
         .collect::<Result<Vec<_>, _>>()
         .str_err()?;
+
+    let mut visible = Vec::with_capacity(rows.len());
+    let mut declared = Vec::with_capacity(rows.len());
+    for (name, hidden) in rows {
+        if hidden != HIDDEN_VIRTUAL_TABLE {
+            visible.push(name.clone());
+        }
+        declared.push(name);
+    }
+
+    Ok(TableColumns { visible, declared })
+}
+
+pub fn get_columns(state: &DbState, table: &str) -> Result<Vec<ColumnInfo>, String> {
+    let guard = state.conn.lock();
+    let conn = guard.as_ref().ok_or("No database open")?;
+
+    // `table_xinfo`, not `table_info`: the Structure tab has to list the
+    // generated columns the user can see in Browse Data and in `SELECT *`.
+    // Its `cid` values are contiguous over the real column order too, where
+    // `table_info` leaves gaps where it skipped the generated ones.
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_xinfo({})", quote_ident(table)))
+        .str_err()?;
+
+    let columns: Vec<ColumnInfo> = stmt
+        .query_map([], |row| {
+            Ok((
+                ColumnInfo {
+                    cid: row.get(0)?,
+                    name: row.get(1)?,
+                    col_type: row.get::<_, String>(2).unwrap_or_default(),
+                    notnull: row.get::<_, bool>(3).unwrap_or(false),
+                    default_value: row.get(4).ok(),
+                    pk: row.get::<_, bool>(5).unwrap_or(false),
+                },
+                row.get::<_, i64>(6).unwrap_or(0),
+            ))
+        })
+        .str_err()?
+        .collect::<Result<Vec<_>, _>>()
+        .str_err()?
+        .into_iter()
+        // Drop only what `SELECT *` also withholds, so the Structure tab and
+        // Browse Data agree on what the table has.
+        .filter(|(_, hidden)| *hidden != HIDDEN_VIRTUAL_TABLE)
+        .map(|(col, _)| col)
+        .collect();
 
     Ok(columns)
 }
@@ -299,6 +379,44 @@ mod tests {
         assert!(!b.notnull);
         assert!(!b.pk);
         assert_eq!(b.default_value, None);
+
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn get_columns_lists_generated_columns_with_contiguous_cids() {
+        // `table_info` omits generated columns and leaves gaps in the `cid`
+        // values where it skipped them, so the Structure tab used to show
+        // `a`(0) and `z`(3) for this table while Browse Data showed four
+        // columns. `table_xinfo` reports all four, numbered 0..3.
+        let (state, path) =
+            open_temp_db("CREATE TABLE t (a INTEGER, v AS (a * 2), s AS (a * 3) STORED, z TEXT);");
+
+        let columns = get_columns(&state, "t").unwrap();
+
+        let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "v", "s", "z"]);
+        let cids: Vec<i64> = columns.iter().map(|c| c.cid).collect();
+        assert_eq!(cids, vec![0, 1, 2, 3]);
+
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn get_columns_hides_virtual_table_hidden_columns() {
+        // The control for the filter: `table_xinfo` also reports columns
+        // `SELECT *` does NOT return - fts5 declares a hidden column named
+        // after the table plus `rank`. Listing those would make the Structure
+        // tab claim columns Browse Data never shows, so `hidden = 1` is the one
+        // kind that stays filtered out.
+        let (state, path) = open_temp_db("CREATE VIRTUAL TABLE ft USING fts5(title, body);");
+
+        let columns = get_columns(&state, "ft").unwrap();
+
+        let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["title", "body"]);
 
         close_database(&state);
         let _ = std::fs::remove_file(&path);
