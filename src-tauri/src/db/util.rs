@@ -172,8 +172,8 @@ mod tests {
             "file:/home/user/db.sqlite?immutable=1"
         );
         assert_eq!(
-            path_to_sqlite_uri(r"C:\Users\mail\db.sqlite"),
-            "file:/C:/Users/mail/db.sqlite?immutable=1"
+            path_to_sqlite_uri(r"C:\Users\alice\db.sqlite"),
+            "file:/C:/Users/alice/db.sqlite?immutable=1"
         );
         assert_eq!(
             path_to_sqlite_uri(r"C:\foo bar\db.sqlite"),

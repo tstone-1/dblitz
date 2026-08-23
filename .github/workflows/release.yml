@@ -19,16 +19,16 @@ jobs:
   quality:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version-file: .nvmrc
           cache: npm
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable branch @ 2026-08-23
 
       - name: Install Linux dependencies
         run: |
@@ -45,7 +45,7 @@ jobs:
             librsvg2-dev
 
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri -> target
           key: quality
@@ -64,7 +64,7 @@ jobs:
     outputs:
       release_id: ${{ steps.create.outputs.release_id }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Create draft release
         id: create
         env:
@@ -109,16 +109,16 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version-file: .nvmrc
           cache: npm
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable branch @ 2026-08-23
 
       - name: Add Rust target
         if: matrix.target != ''
@@ -140,7 +140,7 @@ jobs:
             librsvg2-dev
 
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri -> target
           key: ${{ matrix.os }}-${{ matrix.target }}
@@ -173,8 +173,27 @@ jobs:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
         run: |
           set -euo pipefail
-          if [ -z "$APPLE_CERTIFICATE" ] || [ -z "$APPLE_API_KEY_P8" ]; then
-            echo "::warning::Apple signing secrets absent - building ad-hoc signed and UNNOTARIZED."
+
+          # Check ALL SIX, not just two. A rotation that lands five of them
+          # leaves the build "signed" by a path that skips notarization, and
+          # every gate below is conditioned on the identity being set - so the
+          # exact failure they exist to catch used to skip them both.
+          MISSING=""
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_P8; do
+            [ -n "${!v}" ] || MISSING="$MISSING $v"
+          done
+
+          if [ -n "$MISSING" ]; then
+            # A fork has none of these and must still build; the canonical repo
+            # having none of them is a broken release, and publishing an
+            # unnotarized macOS build that Gatekeeper rejects is worse than
+            # publishing nothing. README.md promises notarized builds.
+            if [ "$GITHUB_REPOSITORY" = "tstone-1/dblitz" ]; then
+              echo "::error::Apple signing secrets missing in the canonical repo:$MISSING"
+              echo "::error::Refusing to publish an unnotarized macOS build. Re-set the repo secrets (BUILD.md)."
+              exit 1
+            fi
+            echo "::warning::Apple signing secrets absent$MISSING - building ad-hoc signed and UNNOTARIZED."
             exit 0
           fi
 
@@ -201,7 +220,7 @@ jobs:
           echo "Apple signing enabled for this build."
 
       - name: Build and upload artifacts
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Minisign key for the updater. Every update payload is signed with it
@@ -268,8 +287,18 @@ jobs:
       # rejects on any machine that has never seen it. Same looks-green shape
       # as a release with no latest.json. Gate on the artifact itself so that
       # cannot ship silently.
+      # The condition deliberately includes the canonical repo REGARDLESS of
+      # whether an identity got exported. Gating purely on
+      # `env.APPLE_SIGNING_IDENTITY != ''` meant a missing secret skipped the
+      # very check written to catch a missing secret. The prep step above now
+      # fails first in that case, so this arm is the second lock rather than
+      # the only one - but a gate that cannot run in its own failure case is
+      # not a gate, and this one now runs on every canonical macOS build.
       - name: Verify the macOS build is signed, notarized and stapled
-        if: matrix.os == 'macos-latest' && env.APPLE_SIGNING_IDENTITY != ''
+        if: >-
+          matrix.os == 'macos-latest'
+          && (env.APPLE_SIGNING_IDENTITY != ''
+          || github.repository == 'tstone-1/dblitz')
         run: |
           set -euo pipefail
           APP=src-tauri/target/${{ matrix.target }}/release/bundle/macos/dblitz.app

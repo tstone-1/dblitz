@@ -42,9 +42,13 @@
           Install and restart
         </button>
       {:else}
-        <!-- A .deb/.rpm install: the Tauri updater can only replace an AppImage,
-             so offering an Install button here would promise something that
-             cannot work. Tell the user why and hand them the download. -->
+        <!-- An install the updater cannot replace in place: a .deb/.rpm
+             (it handles AppImage only) or the portable dblitz.exe (no
+             installer owns it). Offering an Install button here would promise
+             something that cannot work - on Windows it would run the NSIS
+             installer and silently produce a SECOND, installed copy while the
+             exe the user launches stays old. Tell them why and hand them the
+             download. `updates.rs` decides; see InstallProvenance. -->
         <span class="update-detail">This installation can't update itself.</span>
       {/if}
       <button onclick={() => void update.openReleasesPage()}>Open GitHub</button>

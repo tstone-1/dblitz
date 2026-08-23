@@ -65,6 +65,7 @@ Three traps, each of which reads as a different bug:
 - Tauri/Rust backend code lives under `src-tauri/`.
 - SQLite backend code lives under `src-tauri/src/db/`, with `src-tauri/src/db.rs` as a thin facade that re-exports the submodules:
   - `schema.rs` — table/column introspection and row counts
+    - **All column discovery goes through `PRAGMA table_xinfo`, never `table_info`, and `schema::table_columns` is the one place that reads it.** `table_info` omits generated columns; `SELECT *` returns them. That mismatch is silent in three directions and only the third is loud enough to notice: the grid renders fewer columns than the rows carry; a regex filter resolves to a *column index* into the visible list, so a filter on a column after a generated one matches the wrong column's values; and a column legally named `rowid` is invisible to the shadow check in `rowid_alias`, which then keys the boundary cache off a duplicate, non-monotonic expression. Measured on 250 rows with `rowid AS (n % 2)`: rows came back grouped by the generated value and 50 of 250 never appeared. `table_columns` returns two lists — `visible` (`hidden` 0/2/3, exactly what `SELECT *` returns, in its order) and `declared` (every name, `hidden=1` included, used only for shadow detection, where erring wide costs the fast path and erring narrow corrupts data).
   - `query.rs` — table paging, the rowid-index fast path, and regex filtering
     - Every non-trivial view (sorted, filtered, regex-filtered) pages from **one** cached ordered-rowid list per table, built once and sliced per chunk. Its identity is `OrderKey`, and the `regex_signature` field in it is load-bearing rather than decorative: a regex is evaluated in Rust and never reaches the SQL, so two views with different patterns produce an **identical** `where_clause`, `params` and `order_clause`. Without that field one pattern's match set is served as another's, and clearing the regex keeps serving the narrowed set. A regex scan selects `{alias}, *`, which shifts every table column one place right — filter indices must be read at `idx + 1`, the same offset `fetch_rows_by_rowids` undoes. Tables with no addressable rowid (WITHOUT ROWID, or all three aliases shadowed) keep the full-scan fallback.
   - `filters.rs` — the `WHERE` clause builder and column-filter operator parsing
@@ -78,6 +79,7 @@ Three traps, each of which reads as a different bug:
   3. `execute_sql` rejects non-readonly prepared statements (`stmt.readonly()`) with a friendly message, and a SQLite authorizer denies ATTACH/DETACH/transactions at the engine level.
   - Accepted trade-off: dblitz does not see live writes from other processes during a session; reopening the file is required to pick up changes. The SQL editor should always advertise read-only in its placeholder/hint text. Backend row/index caches need no invalidation logic because the snapshot is frozen.
 - Windows duplicate-instance detection is keyed by the full database path through the `dblitz_db_path` Win32 window property. Do not replace it with filename-only matching: same-named databases in different directories must open separately. The `FlashWindowEx` call that follows `SetForegroundWindow` in `try_activate_existing` is deliberately unconditional and must stay: activation is usually denied by the foreground lock, and without the flash the second launch exits silently and reads as "dblitz refuses to open this file". See the comment there for why the outcome cannot be tested reliably.
+- **A view-config save carries its own database path; the backend must never pick one from mutable state.** `save_view_config` is `#[tauri::command(async)]`, so it runs on Tauri's threadpool at a time the frontend does not control, while `state.current_path` changes on every open. Choosing the destination there made it depend on scheduling: a save queued for database A that ran after the user opened B wrote A's settings under B's key, and two saves in one database could land out of order. `store.svelte.ts` now serializes saves on their own chain (separate from `databaseRequestQueue`, so an autosave per drag frame cannot block an open), captures the path *and* a detached copy of the config at enqueue time, and the backend writes to the path it was handed rather than rejecting it — a save legitimately outlives its session, and discarding it would throw away a change the user made. That is safe because the path is a lookup **key**, not a destination: the file lands at `<app-config-dir>/<sha256(path)[..16]>.json`, so no path can direct a write outside dblitz's own config directory, and a test pins that. The copy is a JSON round trip rather than `$state.snapshot` — measured in this repo's vitest setup, `$state.snapshot(appState.fileConfig)` returns that same object rather than a clone, so later edits still reached the queued save.
 - Keep the window title filename-only; the toolbar owns display of the full database path.
 - Treat DB Browser for SQLite as the primary UX comparison point when evaluating viewer behavior and parity gaps.
 - In `DataGrid.svelte`, compose new per-column state indicators with inset box shadows rather than background tints so user-selected column colors remain visible.
@@ -100,6 +102,12 @@ grid. It is the only check above the webview↔IPC seam — every vitest and car
 test runs below it — so it is what proves bundled assets load, the launch
 argument reaches `get_initial_file`, `open_database`/`query_table` cross IPC,
 and the grid paints.
+
+The fixture's `shout` column is `GENERATED ALWAYS AS (upper(name))` on
+purpose, and the job asserts `ALICE` renders. Which PRAGMA the backend
+introspects with decides the whole column list (see the `table_xinfo` note in
+Architecture), and a regression there renders a grid one column short of its
+own rows — visible only in a real packaged run.
 
 **It does NOT catch removal of `connect-src ipc: http://ipc.localhost` from the
 CSP, and that was measured, not assumed.** The directive was deleted on a
@@ -145,7 +153,7 @@ caught it either", which is the more useful result.
   - `package-lock.json` — in **two** places (top-level `"version"` and `packages[""].version`). `npm version <v> --no-git-tag-version` does `package.json` and both lockfile entries at once. Nothing fails when this one drifts, which is exactly how 26.7.6 shipped with the lockfile still on 26.7.5.
   - `src-tauri/Cargo.toml`
   - `src-tauri/tauri.conf.json`
-- Update `CHANGELOG.md` before release commits.
+- Update `CHANGELOG.md` before release commits. The `## [version] - Unreleased` heading form is safe **here** — checked 2026-08-23: `release.yml` writes fixed notes pointing at CHANGELOG.md and never slices a section out of it by version heading, so a forgotten rename cannot publish a release whose notes say "Unreleased". Re-check that if the release notes ever become generated.
 - See `BUILD.md` for the release checklist. Its shared-tools copy path is a placeholder unless the user provides a real deployment target.
 - A release workflow can take 20 minutes or more when GitHub Actions has a cold Rust cache, even without dependency changes. Confirm the active job step before treating a long run as stuck.
 - The draft-first release workflow must pass the numeric `releaseId` from `create-release` to `tauri-action`; GitHub's tag lookup returns 404 for a draft release, so reverting build uploads to `tagName` breaks the matrix.
@@ -174,15 +182,34 @@ caught it either", which is the more useful result.
   clobber each other's platform entries and produce a manifest that updates only
   some platforms. dblitz has four legs (two of them macOS), so this bites harder
   here than in a two-leg repo. Nothing fails; the manifest is just incomplete.
-- **Not every install can self-update, and the UI must not pretend otherwise.** The
-  Tauri updater supports **AppImage only** on Linux — `.deb`/`.rpm` installs are
-  package-manager-owned and cannot be replaced in place. `src-tauri/src/updates.rs`
-  gates this on `$APPIMAGE` and the frontend hides the Install button accordingly.
-  The portable `dblitz.exe` likewise has no installer to hand off to. Do not "fix"
-  the gate by always offering the install.
+- **Not every install can self-update, and the UI must not pretend otherwise.** Two
+  of the five artifacts cannot be replaced in place, for the same reason in
+  different clothes — the updater hands its payload to an installer, and neither
+  a package-managed Linux install nor a standalone Windows exe has one that owns
+  this copy. `InstallProvenance` in `src-tauri/src/updates.rs` enumerates all
+  five and `self_update_supported` matches exhaustively, so a new artifact cannot
+  inherit a default answer. Do not "fix" the gate by always offering the install.
+- **Windows provenance is read from the registry, not guessed from the path.**
+  `windows_install_provenance` in `lib.rs` compares the running executable's
+  directory against the `InstallLocation` the NSIS installer recorded under
+  `Software\Microsoft\Windows\CurrentVersion\Uninstall\dblitz` (HKCU for a
+  per-user install, HKLM for per-machine; the value is stored **with** surrounding
+  quotes, so it must be trimmed). Path identity is the test rather than the key
+  merely existing: a user can have dblitz installed *and* be running a portable
+  copy out of Downloads. Anything unreadable reports portable, because the two
+  failure directions are not symmetric — wrongly claiming portable costs one
+  manual download, while wrongly claiming installed runs the NSIS installer,
+  which cannot find the standalone exe and instead creates a *second*, installed
+  copy at the new version while the file the user launches stays old. The last
+  segment of that key is `productName`, and nothing at build time couples them,
+  so a rename in `tauri.conf.json` would silently turn every installed copy into
+  a portable one that never offers an update again; a test pins the two.
 - **`updates.rs` is deliberately pure** — no `tauri::` imports, no env reads, no
-  `cfg!`. The OS and `$APPIMAGE` are passed in from `lib.rs`, which is what lets the
-  Linux gate be unit-tested from macOS and Windows. Keep it that way.
+  `cfg!`, no registry access. Everything host-dependent is resolved in `lib.rs`
+  and arrives as one `InstallProvenance`, which is what lets the Linux *and*
+  Windows gates be unit-tested from any machine. Keep it that way. The
+  `allow(dead_code)` on the enum is there because every build constructs exactly
+  one variant; the tests construct all five.
 - **`ConfigStore::record_run_version` is destructive by design.** It returns the
   previous version and immediately overwrites it, so "did we just update?" is only
   answerable at the moment it is called. `lib.rs` calls it once in `setup` and caches
@@ -215,6 +242,8 @@ caught it either", which is the more useful result.
 - Six repo secrets, macOS legs only: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_API_KEY`, `APPLE_API_ISSUER`, `APPLE_API_KEY_P8`.
 - **The signing vars are exported via `$GITHUB_ENV`, never listed in the build step's `env:` block.** A fork has none of these secrets; `env:` would hand the Tauri CLI an *empty* `APPLE_SIGNING_IDENTITY`, which it reads as "sign with this identity" and fails on. The conditional export step leaves them genuinely unset, so the CLI falls back to the `"signingIdentity": "-"` in `tauri.conf.json` and a fork still builds.
 - **A skipped notarization exits 0.** Missing or malformed credentials make the bundler log `skipping app notarization` and succeed, shipping a signed-but-unnotarized app that Gatekeeper rejects on any machine that has never seen it — looks green, is broken. `release.yml` therefore ends each macOS leg with a verification step gating on `Authority=Developer ID Application`, the `runtime` flag, `stapler validate`, and `source=Notarized Developer ID`. Do not weaken that gate.
+- **The signing gates fail CLOSED in `tstone-1/dblitz`, and that is the whole point of the shape.** Until 26.8.1 the preparation step checked two of the six Apple values and warned-and-exited-0 otherwise, while both the notarization and the verification steps were conditioned on `env.APPLE_SIGNING_IDENTITY != ''` — so dropping any one secret skipped precisely the gates written to catch a dropped secret, and `publish` still ran. Measured: the old guard exited 0 for **all six** absent-secret cases. Now every one of the six is required when `GITHUB_REPOSITORY` is `tstone-1/dblitz` (verified by running the step body against each), the verification step's condition also fires on `github.repository == 'tstone-1/dblitz'` so it cannot skip in its own failure case, and forks — which have none of the secrets — keep the ad-hoc unsigned path. `src/lib/releaseWorkflow.test.ts` pins all of it. **A gate that cannot run in the case it exists for is not a gate.**
+- **Every `uses:` in both workflows is pinned to a full 40-character commit SHA with a `# vX.Y.Z` comment.** The release build job holds the updater's minisign private key, the Apple credentials and a contents-write token at once, and a mutable ref decided which code received them — note `dtolnay/rust-toolchain@stable` is a **branch**, which the shorthand disguises as a toolchain channel. Pinning does not make an action trustworthy; it makes the version reviewable and makes an upstream change arrive as a diff. `.github/dependabot.yml` advances the pins monthly as one grouped PR, because a pin nobody advances is a security fix nobody gets. `src/lib/releaseWorkflow.test.ts` fails on any unpinned ref and carries an emptiness control, since a regex sweep over zero `uses:` lines would otherwise pass while proving nothing.
 - **The bundler notarizes the `.app`, not the `.dmg`.** After a signed build the DMG carries a Developer ID signature but no ticket, and `spctl -a -t open` rejects it as `Unnotarized Developer ID`. Since the DMG is what users download, `release.yml` notarizes and staples it in a separate step and re-uploads it over the asset `tauri-action` published (`gh release upload --clobber`, which resolves the draft by tag). That step runs **per matrix leg**, so both the `aarch64` and `x64` DMGs get their own submission — a shared/universal path would silently staple only one arch.
 - Ordering that must hold: staple happens in the `build` job, `update-tap` hashes the DMG after `publish`, so the cask's `sha256` is of the **stapled** bytes. Moving the staple later, or the hash earlier, produces a cask whose checksum never matches the published asset.
 - Updates inherit the signature: the updater bundler tars the already-stapled `.app` without re-signing, and the staple ticket lives at `Contents/CodeResources` (an ordinary file, not an xattr), so it survives the tar.

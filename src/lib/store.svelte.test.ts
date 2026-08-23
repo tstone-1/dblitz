@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { appState, loadSqlHistory, loadTheme, openDatabase, saveViewConfig } from "./store.svelte";
+import {
+  appState,
+  loadSqlHistory,
+  loadTheme,
+  openDatabase,
+  saveViewConfig,
+} from "./store.svelte";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn().mockResolvedValue(undefined),
@@ -63,6 +69,9 @@ describe("saveViewConfig failure notice", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
     appState.notice = null;
+    // A save with no database open is a deliberate no-op (there is no file to
+    // key the config off), so give these cases something to save against.
+    appState.dbPath = "A.db";
   });
 
   it("surfaces the first failure via appState.notice but does not re-notify on a second failure", async () => {
@@ -144,5 +153,117 @@ describe("database open generation", () => {
     await openDatabase("A.db"); // same path -- still a fresh session
     expect(appState.dbOpenGeneration).toBe(before + 2);
     expect(appState.dbPath).toBe("A.db");
+  });
+});
+
+// A view-config save is fire-and-forget and runs on Tauri's threadpool, so
+// without its own ordering it can land after the database has changed (writing
+// A's settings under B's key) or out of order against itself (an older snapshot
+// overwriting a newer one). Both are silent: the user sees settings they never
+// chose, on a file they may not have open.
+describe("view-config save sequencing", () => {
+  type Call = { command: string; args: Record<string, unknown> };
+
+  function harness() {
+    const calls: Call[] = [];
+    const gates: Array<() => void> = [];
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke).mockImplementation((command, args) => {
+      calls.push({ command, args: (args ?? {}) as Record<string, unknown> });
+      if (command === "save_view_config") {
+        return new Promise<void>((resolve) => gates.push(() => resolve()));
+      }
+      if (command === "open_database") return Promise.resolve([{ name: "t", row_count: 1 }]);
+      if (command === "load_view_config") {
+        return Promise.resolve({ tables: {}, tint: null, label: null });
+      }
+      if (command === "get_columns") return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+    const saves = () => calls.filter((c) => c.command === "save_view_config");
+    return { calls, gates, saves };
+  }
+
+  it("saves under the database that was open when the change was made, not the one open when it dispatches", async () => {
+    const { gates, saves } = harness();
+    await openDatabase("A.db");
+
+    // Park one save in flight so the NEXT one is still queued -- undispatched --
+    // when the database changes underneath it. Without that, the save has
+    // already handed its arguments to the backend before the open happens and
+    // the race this guards cannot occur.
+    const blocking = saveViewConfig();
+    await vi.waitFor(() => expect(saves()).toHaveLength(1));
+
+    appState.fileConfig.label = "from-A";
+    const queuedForA = saveViewConfig();
+    expect(saves()).toHaveLength(1); // still queued
+
+    // The user opens another database before that save gets its turn.
+    await openDatabase("B.db");
+    expect(appState.dbPath).toBe("B.db");
+
+    gates[0]();
+    await blocking;
+    await vi.waitFor(() => expect(saves()).toHaveLength(2));
+    gates[1]();
+    await queuedForA;
+
+    // A's settings went to A, even though B was open when the save dispatched.
+    expect(saves()[1].args.path).toBe("A.db");
+    expect((saves()[1].args.config as { label: string | null }).label).toBe("from-A");
+  });
+
+  it("serializes saves so an older snapshot cannot overwrite a newer one", async () => {
+    const { gates, saves } = harness();
+    await openDatabase("A.db");
+
+    appState.fileConfig.label = "first";
+    const first = saveViewConfig();
+    await vi.waitFor(() => expect(saves()).toHaveLength(1));
+
+    appState.fileConfig.label = "second";
+    const second = saveViewConfig();
+
+    // The second save must not have been dispatched yet: it is queued behind
+    // the first, which is what stops the backend seeing them out of order.
+    expect(saves()).toHaveLength(1);
+
+    gates[0]();
+    await first;
+    await vi.waitFor(() => expect(saves()).toHaveLength(2));
+    gates[1]();
+    await second;
+
+    const labels = saves().map((c) => (c.args.config as { label: string | null }).label);
+    expect(labels).toEqual(["first", "second"]);
+  });
+
+  it("captures the config at enqueue time rather than at dispatch", async () => {
+    const { gates, saves } = harness();
+    await openDatabase("A.db");
+
+    appState.fileConfig.label = "queued";
+    const queued = saveViewConfig();
+    await vi.waitFor(() => expect(saves()).toHaveLength(1));
+
+    // Later edits must not retroactively change what an in-flight save sends,
+    // or a save could carry a state the user has not finished making.
+    appState.fileConfig.label = "edited-after";
+    gates[0]();
+    await queued;
+
+    expect((saves()[0].args.config as { label: string | null }).label).toBe("queued");
+  });
+
+  it("does not save when no database is open", async () => {
+    const { saves } = harness();
+    appState.dbPath = null;
+
+    await saveViewConfig();
+
+    // closeDatabase() resets fileConfig to the empty default, so a save racing
+    // a close would otherwise write that emptiness over real settings.
+    expect(saves()).toHaveLength(0);
   });
 });

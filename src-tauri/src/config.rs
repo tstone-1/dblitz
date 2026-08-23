@@ -935,4 +935,60 @@ mod tests {
         );
         assert!(entries[0].ends_with(".json"));
     }
+
+    #[test]
+    fn save_config_keys_strictly_off_the_db_path_it_is_given() {
+        // `save_view_config` takes the database path from the request rather
+        // than from whatever is currently open, so this is the property that
+        // makes that safe: the path is a lookup key, and one database's config
+        // cannot reach another's file. A save for A that lands while B is open
+        // therefore updates A and leaves B exactly as it was.
+        let dir = TempDir::new().unwrap();
+        let store = ConfigStore::new(dir.path().to_path_buf());
+
+        let for_a = FileConfig {
+            label: Some("A".to_string()),
+            ..Default::default()
+        };
+        let for_b = FileConfig {
+            label: Some("B".to_string()),
+            ..Default::default()
+        };
+
+        store.save_config("/data/a.db", &for_a).unwrap();
+        store.save_config("/data/b.db", &for_b).unwrap();
+        // Out-of-session save for A, exactly as the queue can deliver it.
+        let for_a_later = FileConfig {
+            label: Some("A-later".to_string()),
+            ..Default::default()
+        };
+        store.save_config("/data/a.db", &for_a_later).unwrap();
+
+        assert_eq!(
+            store.load_config("/data/a.db").label.as_deref(),
+            Some("A-later")
+        );
+        assert_eq!(store.load_config("/data/b.db").label.as_deref(), Some("B"));
+    }
+
+    #[test]
+    fn config_path_for_db_stays_inside_the_config_dir() {
+        // A path that looks like traversal is hashed like any other string, so
+        // it cannot escape the config directory. This is what lets the save
+        // command accept a caller-supplied path without validating it as a
+        // filesystem location.
+        let dir = TempDir::new().unwrap();
+        let store = ConfigStore::new(dir.path().to_path_buf());
+
+        for db_path in ["../../etc/passwd", "/etc/passwd", r"..\..\windows", ""] {
+            let path = store.config_path_for_db(db_path);
+            assert_eq!(
+                path.parent(),
+                Some(dir.path()),
+                "{db_path} escaped the config dir: {}",
+                path.display()
+            );
+            assert_eq!(path.extension().and_then(|e| e.to_str()), Some("json"));
+        }
+    }
 }

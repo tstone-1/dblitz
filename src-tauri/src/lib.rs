@@ -12,7 +12,7 @@ use db::{
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 use tracing::warn;
-use updates::UpdateStatus;
+use updates::{InstallProvenance, UpdateStatus};
 
 /// Compute a 64-bit hash of the lowercased path for cross-process duplicate
 /// detection via Win32 window properties.
@@ -82,6 +82,122 @@ fn set_window_db_marker(app: &AppHandle, path: Option<&str>) {
             }
         }
     }
+}
+
+/// The registry key Tauri's NSIS installer writes on install; the trailing
+/// segment is `productName` from `tauri.conf.json`. A test below pins the two
+/// together, because a rename there would silently turn every installed copy
+/// into a "portable" one that never offers an update again.
+#[cfg(windows)]
+const NSIS_UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\dblitz";
+
+/// Read one `REG_SZ` value, or `None` if the key or value is absent, is of
+/// another type, or cannot be read at all. Every failure collapses to the same
+/// answer on purpose - the caller's fallback is the safe one, so there is
+/// nothing useful to distinguish.
+#[cfg(windows)]
+fn read_reg_sz(
+    root: windows::Win32::System::Registry::HKEY,
+    subkey: &str,
+    value: &str,
+) -> Option<String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{RegGetValueW, RRF_RT_REG_SZ};
+
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let subkey = wide(subkey);
+    let value = wide(value);
+
+    // First call sizes the buffer, second fills it. `RegGetValueW` guarantees
+    // the returned REG_SZ is NUL-terminated even when the stored value is not,
+    // which is the reason to prefer it over `RegQueryValueExW` here.
+    let mut size: u32 = 0;
+    let rc = unsafe {
+        RegGetValueW(
+            root,
+            PCWSTR(subkey.as_ptr()),
+            PCWSTR(value.as_ptr()),
+            RRF_RT_REG_SZ,
+            None,
+            None,
+            Some(&mut size),
+        )
+    };
+    if rc != ERROR_SUCCESS || size == 0 {
+        return None;
+    }
+
+    let mut buf = vec![0u16; size.div_ceil(2) as usize];
+    let rc = unsafe {
+        RegGetValueW(
+            root,
+            PCWSTR(subkey.as_ptr()),
+            PCWSTR(value.as_ptr()),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    if rc != ERROR_SUCCESS {
+        return None;
+    }
+
+    // `size` is now the byte count INCLUDING the terminating NUL.
+    let chars = (size as usize / 2).saturating_sub(1);
+    Some(String::from_utf16_lossy(&buf[..chars.min(buf.len())]))
+}
+
+/// Whether this Windows build is the copy the NSIS installer registered, or a
+/// standalone `dblitz.exe`.
+///
+/// Decided by comparing the running executable's directory against the
+/// `InstallLocation` the installer recorded - checked under both HKCU (a
+/// per-user install) and HKLM (per-machine), because the installer writes to
+/// whichever context it ran in. Path identity is the test rather than the mere
+/// existence of the key: a user can have dblitz installed *and* be running a
+/// portable copy out of their Downloads folder, and only the running copy's
+/// location answers which one this process is.
+///
+/// Anything that goes wrong - no key, unreadable registry, a recorded path that
+/// no longer resolves - reports [`InstallProvenance::WindowsPortable`]. See
+/// that variant's docs for why that is the safe direction.
+#[cfg(windows)]
+fn windows_install_provenance() -> InstallProvenance {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+
+    let Ok(exe) = std::env::current_exe() else {
+        return InstallProvenance::WindowsPortable;
+    };
+    let Some(exe_dir) = exe.parent() else {
+        return InstallProvenance::WindowsPortable;
+    };
+    // Canonicalise both sides so casing, 8.3 short names or a symlink in the
+    // path cannot make two spellings of one directory compare unequal.
+    let Ok(exe_dir) = exe_dir.canonicalize() else {
+        return InstallProvenance::WindowsPortable;
+    };
+
+    for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        let Some(raw) = read_reg_sz(root, NSIS_UNINSTALL_KEY, "InstallLocation") else {
+            continue;
+        };
+        // The NSIS template writes this value WITH surrounding quotes, so an
+        // un-trimmed compare never matches anything.
+        let trimmed = raw.trim().trim_matches('"');
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(registered) = std::path::Path::new(trimmed).canonicalize() else {
+            continue;
+        };
+        if registered == exe_dir {
+            return InstallProvenance::WindowsInstaller;
+        }
+    }
+
+    InstallProvenance::WindowsPortable
 }
 
 #[cfg(windows)]
@@ -482,13 +598,32 @@ fn load_view_config(state: State<'_, Arc<DbState>>) -> FileConfig {
     }
 }
 
+/// Persist a view config against the database the CALLER names, not against
+/// whatever happens to be open when this runs.
+///
+/// `#[tauri::command(async)]` means this executes on Tauri's threadpool at a
+/// time the frontend does not control, while `state.current_path` is mutable
+/// and changes on every open. Selecting the destination from it made the
+/// destination depend on scheduling: a save queued for database A that ran
+/// after the user opened database B wrote A's settings under B's key, silently
+/// replacing them. `path` closes that by carrying the answer with the request.
+///
+/// Deliberately does NOT also require `path` to still be the open database. A
+/// save legitimately outlives its session - the user changes a filter and
+/// immediately opens another file - and rejecting it there would throw away a
+/// change they made while showing them a save-failed notice for doing nothing
+/// wrong. Writing it to the file it belongs to is both lossless and correct.
+///
+/// That is safe because `path` is a lookup KEY, not a destination: the config
+/// lands at `<app-config-dir>/<sha256(path)[..16]>.json` (see
+/// `ConfigStore::config_path_for_db`), so no value of `path` can direct a write
+/// outside dblitz's own config directory.
 #[tauri::command(async)]
-fn save_view_config(state: State<'_, Arc<DbState>>, config: FileConfig) -> Result<(), String> {
-    let path = state.current_path.lock();
-    match path.as_ref() {
-        Some(p) => config::save_config(p, &config).err_ctx(&format!("saving view config for {p}")),
-        None => Err("No database open".to_string()),
+fn save_view_config(config: FileConfig, path: String) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("Cannot save view config without a database path".to_string());
     }
+    config::save_config(&path, &config).err_ctx(&format!("saving view config for {path}"))
 }
 
 /// Search for an existing dblitz window that has the same file open by
@@ -645,13 +780,22 @@ pub fn run() {
                     warn!(error = %e, "Failed to record run version");
                     None
                 });
+            // Which artifact is this? `updates.rs` owns the policy; resolving
+            // its input needs the OS, the environment and the registry, so it
+            // happens here.
+            #[cfg(target_os = "linux")]
+            // AppImage exports this; a .deb/.rpm install does not, and the
+            // Tauri updater cannot replace those in place.
+            let provenance = updates::linux_provenance(std::env::var("APPIMAGE").ok().as_deref());
+            #[cfg(windows)]
+            let provenance = windows_install_provenance();
+            #[cfg(target_os = "macos")]
+            let provenance = InstallProvenance::MacOsBundle;
+
             app.manage(UpdateStatus::new(
                 previous_version,
                 current_version,
-                cfg!(target_os = "linux"),
-                // AppImage exports this; a .deb/.rpm install does not, and the
-                // Tauri updater cannot replace those in place.
-                std::env::var("APPIMAGE").ok().as_deref(),
+                provenance,
             ));
             // Skipped under WebDriver: tauri-driver exports TAURI_AUTOMATION
             // when it launches the app (that's how wry knows to put the
@@ -847,7 +991,24 @@ mod open_request_tests {
 
 #[cfg(all(test, windows))]
 mod tests {
-    use super::path_hash;
+    use super::{path_hash, NSIS_UNINSTALL_KEY};
+
+    /// The uninstall key's last segment is `productName`, and NOTHING at build
+    /// time couples the two. Rename the product in `tauri.conf.json` and the
+    /// installer writes a key this lookup never finds, so every installed copy
+    /// silently reclassifies itself as portable and stops offering updates -
+    /// with no error anywhere, on exactly the machines least able to report it.
+    #[test]
+    fn uninstall_key_tracks_the_bundle_product_name() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let product = conf["productName"].as_str().expect("productName");
+        assert_eq!(
+            NSIS_UNINSTALL_KEY.rsplit('\\').next(),
+            Some(product),
+            "NSIS_UNINSTALL_KEY must end with tauri.conf.json's productName"
+        );
+    }
 
     /// Explorer, the recent-files list and the file dialog can all hand back
     /// the same file with different casing, and NTFS treats those as one file.

@@ -1,0 +1,26 @@
+version: 2
+
+# The workflows pin every action to a full commit SHA, which is the point:
+# whoever controls a mutable tag controls the code that receives the updater's
+# minisign private key and the Apple Developer ID material in the release build
+# job. A SHA pin makes an upstream change arrive as a reviewable diff.
+#
+# The cost of pinning is that the pins go stale silently, including security
+# fixes, so this exists to turn each one into a pull request. Dependabot
+# rewrites the SHA and the trailing `# vX.Y.Z` comment together, which keeps
+# `src/lib/releaseWorkflow.test.ts` satisfied and keeps the comment honest.
+#
+# Actions only. npm and cargo updates are applied by hand during release prep
+# (AGENTS.md, "Dependency Management"), where a held-back major is a decision
+# rather than a PR to merge.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns:
+          - "*"

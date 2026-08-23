@@ -5,6 +5,64 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.8.1] - 2026-08-23
+
+Fixes from a full-codebase deep review (4 blockers, 2 warnings, 1 nitpick — all
+addressed).
+
+### Fixed
+- **Tables with generated columns no longer lose columns or mis-page rows.**
+  Column discovery used `PRAGMA table_info`, which SQLite deliberately omits
+  generated columns from, while every query reads `SELECT *`, which returns
+  them. Three consequences, all silent: the grid rendered fewer columns than the
+  rows carried; a regex filter on a column sitting after a generated one matched
+  the wrong column's values; and — the serious one — a column legally named
+  `rowid` was invisible to the check for whether it shadows the real rowid, so
+  paging keyed itself off that column's duplicate, non-monotonic values.
+  Measured on a 250-row table with `rowid AS (n % 2)`: rows came back grouped by
+  the generated value and 50 of the 250 never appeared at all. All introspection
+  now goes through `PRAGMA table_xinfo`, and the Structure tab lists generated
+  columns with contiguous `cid`s to match.
+- **The portable `dblitz.exe` no longer offers an update it cannot install.**
+  The updater treated every non-Linux build as replaceable in place, so the
+  portable exe showed **Install and restart** — which runs the NSIS installer,
+  producing a second, *installed* copy at the new version while the file the
+  user launches stays old. It now reads the installer's recorded
+  `InstallLocation` from the registry and compares it against the running
+  executable's directory; anything it cannot establish counts as portable, which
+  is the direction that costs a manual download rather than a silent no-op.
+  README.md has promised this behaviour since the updater shipped.
+- **View settings can no longer be saved against the wrong database.** Every
+  filter pin, column resize and sort change fires a background save, and the
+  backend chose the destination from whichever database happened to be open when
+  the request reached the threadpool. Opening a second database could therefore
+  write the first one's settings under the second one's key, and two saves in
+  one database could land out of order and let an older snapshot overwrite a
+  newer one. Saves are now serialized, carry a detached copy of the config and
+  the database path captured when the change was made, and the backend writes to
+  the path it was given.
+
+### Changed
+- **A macOS release build with missing signing secrets now fails instead of
+  publishing.** The check required two of the six Apple values, and both the
+  notarization and artifact-verification steps were conditioned on the signing
+  identity being non-empty — so a rotation that dropped any one secret skipped
+  the very gates written to catch it and published an unnotarized build that
+  Gatekeeper rejects. All six are now required in `tstone-1/dblitz`, the
+  verification runs on every canonical macOS leg regardless, and forks keep
+  their ad-hoc unsigned path.
+- **Every GitHub Actions `uses:` is pinned to a full commit SHA.** The release
+  build job holds the updater's minisign private key, the Apple credentials and
+  a contents-write token, and a mutable tag — `dtolnay/rust-toolchain@stable` is
+  a branch — decided which code received them. Pinning does not make an action
+  trustworthy; it makes an upstream change arrive as a reviewable diff. A
+  monthly Dependabot group advances the pins so they cannot rot silently.
+- Dependencies refreshed for the release: Rust 1.98.0, `rust_xlsxwriter` 0.96 →
+  0.99, and the usual transitive `cargo update` / `npm update` sweep. Both
+  held-back npm majors stay held and are genuinely blocked — `typescript` 7 by
+  `@sveltejs/kit`'s and `svelte-check`'s peer ranges (`^5 || ^6`), and
+  `@types/node` 26 by `.nvmrc` pinning the runtime to Node 24.
+
 ## [26.8.0] - 2026-08-05
 
 Fixes from a follow-up full-codebase deep review (0 blockers, 2 warnings,
