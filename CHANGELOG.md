@@ -57,6 +57,10 @@ addressed).
   a branch — decided which code received them. Pinning does not make an action
   trustworthy; it makes an upstream change arrive as a reviewable diff. A
   monthly Dependabot group advances the pins so they cannot rot silently.
+- The Linux build is checked locally before tagging now. A `cfg`-gated import
+  compiled clean on Windows and failed the Linux release leg under
+  `-D warnings`; the release workflow's quality gate caught it before anything
+  was published, and `AGENTS.md` records how to run that leg from this machine.
 - Dependencies refreshed for the release: Rust 1.98.0, `rust_xlsxwriter` 0.96 →
   0.99, and the usual transitive `cargo update` / `npm update` sweep. Both
   held-back npm majors stay held and are genuinely blocked — `typescript` 7 by

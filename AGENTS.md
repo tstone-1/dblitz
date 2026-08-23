@@ -18,6 +18,14 @@
   - `cd src-tauri && cargo fmt --check`
   - `cd src-tauri && cargo test`
   - `cd src-tauri && cargo clippy --all-targets --all-features -- -D warnings` (matches CI/`npm run quality` — a bare `cargo clippy` can pass locally and still fail CI)
+- **A green gate on one OS says nothing about a `cfg`-gated symbol on another, and `-D warnings` turns that into a hard build failure.** Hit cutting 26.8.1: `use updates::{InstallProvenance, UpdateStatus};` compiled clean on Windows and failed the Linux release leg with `error: unused import: InstallProvenance` — the only two places naming that type were `cfg(windows)` and `cfg(target_os = "macos")`, so on Linux the import was genuinely unused. Windows clippy structurally cannot see it. The tag had already been pushed; nothing published, because the `quality` job runs before `create-release`. Two habits: annotate the type on every arm of a `cfg` triple (`let provenance: InstallProvenance = ...`) so the name is used everywhere, and **check the other platform before pushing a tag** rather than after. `checks.yml`'s backend job covers all three OSes but only on push/PR, which a same-moment tag push races.
+- **A Windows machine can run the Linux gate for real, through WSL**, which is the cheapest way to close the gap above. Install the same apt deps `checks.yml` lists plus rustup stable, then run the gate against the checkout over `/mnt/...`, giving it its own target dir so it cannot thrash the Windows one:
+  ```bash
+  export CARGO_TARGET_DIR="$HOME/dblitz-linux-target"
+  cd /mnt/<drive>/<path-to>/dblitz/src-tauri
+  cargo clippy --all-targets --all-features -- -D warnings && cargo fmt --check && cargo test
+  ```
+  Expect **149** Rust tests there against **155** on Windows. That gap is exactly the platform-gated ones — four `path_hash` tests, `uninstall_key_tracks_the_bundle_product_name`, and `config::tests::normalize_for_dedup_is_case_insensitive_on_windows` — and nothing runs on Linux that does not also run on Windows. Diff the two `cargo test` name lists if that count ever changes, rather than trusting the totals.
 - Use `npx tauri build` for local release builds. macOS DMG packaging may need to run outside a sandbox because Tauri invokes system image mounting tools.
 
 ### Inspecting a shipped build's webview (Windows)

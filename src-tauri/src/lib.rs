@@ -783,14 +783,21 @@ pub fn run() {
             // Which artifact is this? `updates.rs` owns the policy; resolving
             // its input needs the OS, the environment and the registry, so it
             // happens here.
+            // Each arm is annotated with the type on purpose. Without it the
+            // Linux build never names `InstallProvenance` — both of the arms
+            // that would are `cfg`-ed out — so the import at the top of this
+            // file becomes an unused import, which `-D warnings` rejects. That
+            // is invisible to a Windows-only local gate and only surfaces on
+            // the Linux CI leg.
             #[cfg(target_os = "linux")]
             // AppImage exports this; a .deb/.rpm install does not, and the
             // Tauri updater cannot replace those in place.
-            let provenance = updates::linux_provenance(std::env::var("APPIMAGE").ok().as_deref());
+            let provenance: InstallProvenance =
+                updates::linux_provenance(std::env::var("APPIMAGE").ok().as_deref());
             #[cfg(windows)]
-            let provenance = windows_install_provenance();
+            let provenance: InstallProvenance = windows_install_provenance();
             #[cfg(target_os = "macos")]
-            let provenance = InstallProvenance::MacOsBundle;
+            let provenance: InstallProvenance = InstallProvenance::MacOsBundle;
 
             app.manage(UpdateStatus::new(
                 previous_version,
