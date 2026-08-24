@@ -21,6 +21,26 @@ updates:
     commit-message:
       prefix: ci
     groups:
+      # Actions that only ever run a check. Grouping these into one PR is fine:
+      # none of them is handed a secret, so the worst a bad bump does is redden
+      # CI, which is the point of CI.
       actions:
         patterns:
           - "*"
+        exclude-patterns:
+          - "tauri-apps/tauri-action"
+      # tauri-action gets its own group because it is the one action that
+      # receives the updater's minisign private key, the Apple credentials and a
+      # contents-write token — and because it is the one whose breakage is
+      # silent: a bad `latest.json` publishes green and simply updates nobody
+      # (BUILD.md says so twice).
+      #
+      # The first grouped PR this file produced put `tauri-action` v0.6.2 -> v1.0.0
+      # — a breaking change to the updater payload's filenames — in the same diff
+      # as two routine GitHub-owned bumps. That is the shape that gets merged on
+      # a glance. Alone in its own PR it cannot ride along with anything, and
+      # AGENTS.md's rule that a major is a decision rather than a line item has
+      # something to attach to.
+      release-critical:
+        patterns:
+          - "tauri-apps/tauri-action"
