@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  cargoLockVersions,
+  cargoPackageName,
   cargoPackageVersion,
   checkReleaseContract,
   readReleaseFiles,
@@ -23,6 +25,25 @@ function consistentFiles(version: string, changelogDate = "2026-08-23") {
       packages: { "": { name: "dblitz", version } },
     }),
     cargoToml: `[package]\nname = "dblitz"\nversion = "${version}"\n\n[dependencies]\nserde = "1.0"\n`,
+    // Shaped like the real lock: the crate's own block, then a dependency that
+    // LISTS "dblitz" in its `dependencies` array. A parser that greps for the
+    // name anywhere would find the wrong block.
+    cargoLock: [
+      "[[package]]",
+      'name = "dblitz"',
+      `version = "${version}"`,
+      "dependencies = [",
+      ' "serde",',
+      "]",
+      "",
+      "[[package]]",
+      'name = "some-plugin"',
+      'version = "0.1.0"',
+      "dependencies = [",
+      ' "dblitz",',
+      "]",
+      "",
+    ].join("\n"),
     tauriConf: JSON.stringify({ productName: "dblitz", version }),
     changelog: `# Changelog\n\n## [${version}] - ${changelogDate}\n\n### Fixed\n- something\n`,
   };
@@ -64,6 +85,11 @@ describe("release preflight", () => {
     ["tauri.conf.json", (f: ReturnType<typeof consistentFiles>) => {
       f.tauriConf = JSON.stringify({ productName: "dblitz", version: "26.8.1" });
     }],
+    ["Cargo.lock", (f: ReturnType<typeof consistentFiles>) => {
+      // The exact drift this was added for: `cargo check` not run after the
+      // Cargo.toml bump, so the committed lock still names the old version.
+      f.cargoLock = f.cargoLock.replace('version = "26.8.2"', 'version = "26.8.1"');
+    }],
   ] as const) {
     it(`rejects a tag when only ${label} lags behind`, () => {
       // One file at a time: a check that only looked at package.json would pass
@@ -101,6 +127,43 @@ describe("release preflight", () => {
     const toml = '[dependencies]\nfoo = { version = "9.9.9" }\n\n[package]\nversion = "26.8.2"\n';
     expect(cargoPackageVersion(toml)).toBe("26.8.2");
     expect(cargoPackageVersion("[dependencies]\nversion = \"9.9.9\"\n")).toBe(null);
+  });
+
+  it("rejects a Cargo.lock with no entry for the crate at all", () => {
+    const files = consistentFiles("26.8.2");
+    files.cargoLock = '[[package]]\nname = "serde"\nversion = "1.0.0"\n';
+    expect(checkReleaseContract({ tag: "v26.8.2", ...files }).join("\n")).toContain(
+      'no [[package]] entry for "dblitz"',
+    );
+  });
+
+  it("rejects a Cargo.lock carrying the crate twice", () => {
+    // Ambiguous rather than merely wrong: picking one arbitrarily would let a
+    // stale duplicate satisfy the check.
+    const files = consistentFiles("26.8.2");
+    files.cargoLock += '\n[[package]]\nname = "dblitz"\nversion = "26.8.1"\n';
+    expect(checkReleaseContract({ tag: "v26.8.2", ...files }).join("\n")).toContain(
+      "expected exactly one",
+    );
+  });
+
+  it("looks the lock entry up by the name Cargo.toml declares", () => {
+    // Coupling control: rename the crate in BOTH files and the check must
+    // follow. A hard-coded "dblitz" would fail here.
+    const files = consistentFiles("26.8.2");
+    files.cargoToml = files.cargoToml.replace('name = "dblitz"', 'name = "renamed"');
+    files.cargoLock = files.cargoLock.replace('name = "dblitz"', 'name = "renamed"');
+    expect(checkReleaseContract({ tag: "v26.8.2", ...files })).toEqual([]);
+  });
+
+  it("does not mistake a dependency reference for a package declaration", () => {
+    // The fixture's second block lists "dblitz" inside `dependencies = [...]`.
+    // Only the real declaration must be read, and only once.
+    expect(cargoLockVersions(consistentFiles("26.8.2").cargoLock, "dblitz")).toEqual([
+      "26.8.2",
+    ]);
+    expect(cargoPackageName('[package]\nname = "dblitz"\nversion = "1.0"\n')).toBe("dblitz");
+    expect(cargoPackageName('[dependencies]\nname = "nope"\n')).toBe(null);
   });
 
   it("passes against this repository's own files at its declared version", () => {

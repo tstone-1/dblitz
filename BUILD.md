@@ -395,7 +395,7 @@ ships looking green.
 - [ ] All changes tested and working: `npm run tauri dev`
 
 **Version & documentation:**
-- [ ] Update version in all four files:
+- [ ] Update version in all five files:
   - `src-tauri/Cargo.toml` (line 3)
   - `src-tauri/tauri.conf.json` (line 4)
   - `package.json` (line 3)
@@ -404,9 +404,14 @@ ships looking green.
     `package.json` and both lockfile entries in one go; hand-editing
     `package.json` alone leaves the lockfile behind on the previous version
     (26.7.6 shipped that way).
-- [ ] Verify all version files agree:
+  - `src-tauri/Cargo.lock` — do **not** hand-edit. Run `cd src-tauri && cargo check`
+    after bumping `Cargo.toml`; it rewrites the lock's own `dblitz` entry. Skipping
+    this leaves a stale version committed, and nothing fails, because the next
+    build regenerates it.
+- [ ] Verify all version files agree — this is exactly what CI's `preflight` job
+  runs, so a green answer here means the tag will not be rejected:
   ```bash
-  rg -n '"version"|^version =' package.json package-lock.json src-tauri/Cargo.toml src-tauri/tauri.conf.json | head
+  node scripts/release-preflight.mjs vYY.M.MICRO
   ```
 - [ ] Update `CHANGELOG.md` with new version entry and date
 

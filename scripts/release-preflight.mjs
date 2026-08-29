@@ -23,6 +23,7 @@ const CALVER = /^(\d{2})\.(\d{1,2})\.(\d+)$/;
  * @property {string} packageJson      Raw `package.json`.
  * @property {string} packageLock      Raw `package-lock.json`.
  * @property {string} cargoToml        Raw `src-tauri/Cargo.toml`.
+ * @property {string} cargoLock        Raw `src-tauri/Cargo.lock`.
  * @property {string} tauriConf        Raw `src-tauri/tauri.conf.json`.
  * @property {string} changelog        Raw `CHANGELOG.md`.
  */
@@ -44,6 +45,56 @@ export function cargoPackageVersion(toml) {
   const nextSection = /^\[/m.exec(rest);
   const body = nextSection ? rest.slice(0, nextSection.index) : rest;
   return /^version\s*=\s*"([^"]+)"/m.exec(body)?.[1] ?? null;
+}
+
+/**
+ * The `[package]` name from a Cargo manifest.
+ *
+ * Read rather than hard-coded, so the lockfile lookup below stays coupled to
+ * the crate this repository actually builds. A rename that touched only
+ * `Cargo.toml` would otherwise leave the lock check silently searching for a
+ * package that no longer exists.
+ *
+ * @param {string} toml
+ * @returns {string | null}
+ */
+export function cargoPackageName(toml) {
+  const section = /^\[package\]$/m.exec(toml);
+  if (!section) return null;
+  const rest = toml.slice(section.index + section[0].length);
+  const nextSection = /^\[/m.exec(rest);
+  const body = nextSection ? rest.slice(0, nextSection.index) : rest;
+  return /^name\s*=\s*"([^"]+)"/m.exec(body)?.[1] ?? null;
+}
+
+/**
+ * Every version `Cargo.lock` records for a package name.
+ *
+ * Returns an array because a lockfile may legitimately carry one name at
+ * several versions (two majors of a shared dependency), and collapsing that to
+ * a single answer would pick one arbitrarily. The caller requires exactly one
+ * entry for the crate being released.
+ *
+ * Parsing is anchored inside each `[[package]]` block: `name = ` at the start
+ * of a line. A dependency merely LISTED by that name sits inside a
+ * `dependencies = [ ... ]` array whose entries are indented, so it cannot be
+ * mistaken for a package declaration.
+ *
+ * @param {string} lock
+ * @param {string} name
+ * @returns {string[]}
+ */
+export function cargoLockVersions(lock, name) {
+  /** @type {string[]} */
+  const versions = [];
+  for (const block of lock.split(/^\[\[package\]\]$/m).slice(1)) {
+    const end = /^\[/m.exec(block);
+    const body = end ? block.slice(0, end.index) : block;
+    if (/^name\s*=\s*"([^"]+)"/m.exec(body)?.[1] !== name) continue;
+    const version = /^version\s*=\s*"([^"]+)"/m.exec(body)?.[1];
+    if (version !== undefined) versions.push(version);
+  }
+  return versions;
 }
 
 /**
@@ -97,6 +148,26 @@ export function checkReleaseContract(input) {
 
   expect("src-tauri/Cargo.toml version", cargoPackageVersion(input.cargoToml));
 
+  // Cargo.lock carries the crate's own version too, and it is committed. Bumping
+  // Cargo.toml alone leaves it behind: nothing fails, because the next build
+  // simply regenerates it - which is the same "silent drift" shape that let
+  // 26.7.6 ship on a stale package-lock.json. `cargo check` refreshes it.
+  const crate = cargoPackageName(input.cargoToml);
+  if (!crate) {
+    failures.push("src-tauri/Cargo.toml has no [package] name, so Cargo.lock cannot be checked.");
+  } else {
+    const locked = cargoLockVersions(input.cargoLock, crate);
+    if (locked.length === 0) {
+      failures.push(`src-tauri/Cargo.lock has no [[package]] entry for "${crate}".`);
+    } else if (locked.length > 1) {
+      failures.push(
+        `src-tauri/Cargo.lock has ${locked.length} [[package]] entries for "${crate}" (${locked.join(", ")}); expected exactly one.`,
+      );
+    } else {
+      expect("src-tauri/Cargo.lock version", locked[0]);
+    }
+  }
+
   const tauri = parseJson("src-tauri/tauri.conf.json", input.tauriConf);
   if (tauri) expect("src-tauri/tauri.conf.json version", tauri.version);
 
@@ -130,6 +201,7 @@ export function readReleaseFiles(root, readText) {
     packageJson: at("package.json"),
     packageLock: at("package-lock.json"),
     cargoToml: at("src-tauri/Cargo.toml"),
+    cargoLock: at("src-tauri/Cargo.lock"),
     tauriConf: at("src-tauri/tauri.conf.json"),
     changelog: at("CHANGELOG.md"),
   };
