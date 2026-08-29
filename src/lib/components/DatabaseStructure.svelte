@@ -3,6 +3,7 @@
   import { appState } from "$lib/store.svelte";
   import { createAutoSelectFirstTable } from "./autoSelectFirstTable.svelte";
   import { createDbGenerationReset } from "./dbGenerationReset.svelte";
+  import { createSessionOwnedRequest } from "./sessionOwnedRequest";
 
   let selectedTable = $state<string | null>(null);
   let columns = $state<ColumnInfo[]>([]);
@@ -50,21 +51,32 @@
     schema = [];
   }
 
+  // Publication ownership for the two async reads on this panel. Both used to
+  // assign their response unconditionally, so a slow response could label one
+  // table with another table's columns, and a response from a closed database
+  // could repopulate a panel the session reset had just cleared. Each read gets
+  // its own guard so they never supersede each other - see sessionOwnedRequest.
+  const requestSchema = createSessionOwnedRequest<SchemaEntry[]>({
+    getGeneration: () => appState.dbOpenGeneration,
+    publish: (value) => { schema = value; },
+    onError: (message) => { appState.error = message; },
+  });
+  const requestColumns = createSessionOwnedRequest<ColumnInfo[]>({
+    getGeneration: () => appState.dbOpenGeneration,
+    publish: (value) => { columns = value; },
+    onError: (message) => { appState.error = message; },
+  });
+
   async function loadSchema() {
-    try {
-      schema = await getSchema();
-    } catch (e) {
-      appState.error = String(e);
-    }
+    await requestSchema(() => getSchema());
   }
 
   async function selectTable(name: string) {
+    // Selection is published immediately and deliberately: the click must show
+    // as selected at once. Only the COLUMNS wait for ownership, which is what
+    // makes a stale response a no-op instead of a mislabelled table.
     selectedTable = name;
-    try {
-      columns = await getColumns(name);
-    } catch (e) {
-      appState.error = String(e);
-    }
+    await requestColumns(() => getColumns(name));
   }
 
   function typeColor(t: string): string {

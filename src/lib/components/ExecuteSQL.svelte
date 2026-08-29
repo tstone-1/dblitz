@@ -11,7 +11,7 @@
     persistSqlHistory,
   } from "$lib/store.svelte";
   import DataGrid from "./DataGrid.svelte";
-  import type { SelectionData } from "./selectionData";
+  import { selectionColumnTypes, type SelectionData } from "./selectionData";
   import { createDbGenerationReset } from "./dbGenerationReset.svelte";
   import SqlEditor from "./SqlEditor.svelte";
   import { resolveResultColumnColors } from "./sqlTable";
@@ -123,20 +123,15 @@
   }
 
   async function exportSelection(data: SelectionData) {
-    // A selection's headers are a contiguous slice of `result.columns` (see
-    // buildSelectionData), so walk `result.columns` forward matching each
-    // header by name to find its declared type - the forward-only search
-    // keeps duplicate-named result columns (e.g. a self-join) aligned to the
-    // right occurrence instead of always the first.
-    const columns = result?.columns ?? [];
-    const types = result?.column_types ?? [];
-    let searchFrom = 0;
-    const columnTypes = data.headers.map((header) => {
-      const idx = columns.indexOf(header, searchFrom);
-      if (idx === -1) return "";
-      searchFrom = idx + 1;
-      return types[idx] ?? "";
-    });
+    // Types are recovered by POSITION, never by header name. A result set can
+    // repeat a column name with different types (`SELECT a.value, b.value`),
+    // and the previous name search started at column 0 - so selecting only the
+    // second `value` resolved the first one's type and exported text like
+    // `00123` as the number 123. `columnIndices` carries the answer.
+    const columnTypes = selectionColumnTypes(
+      data.columnIndices,
+      result?.column_types ?? [],
+    );
     await exportToXlsx({
       headers: data.headers,
       rows: data.rows,

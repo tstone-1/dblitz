@@ -18,6 +18,10 @@ pub use types::{
     ColumnFilter, ColumnInfo, DbState, QueryRequest, QueryResult, SchemaEntry, SqlResult, TableInfo,
 };
 pub(crate) use util::{ErrCtx, StrErr};
+// Re-exported for tests only: `lib.rs` pins the launch-path fix against the URI
+// this actually produces, rather than against a restatement of the rule.
+#[cfg(test)]
+pub(crate) use util::path_to_sqlite_uri;
 
 pub fn cancel_queries(state: &DbState) {
     state

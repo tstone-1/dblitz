@@ -16,6 +16,27 @@ on:
       - 'v*'
 
 jobs:
+  # Fail closed BEFORE a draft release exists. Everything below this job is
+  # thorough about what it builds and signs, and none of it looks at the tag:
+  # a v26.8.2 tag on a tree whose manifests still say 26.8.1 would publish a
+  # 26.8.2 release full of 26.8.1 artifacts and 26.8.1 updater metadata with
+  # nothing red anywhere. BUILD.md asks a human for this comparison; this is
+  # the same comparison, enforced.
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      # No `npm ci`: the script is dependency-free on purpose, so this gate
+      # cannot be taken out by an install failure.
+      - name: Verify the tag matches every version file
+        run: node scripts/release-preflight.mjs "${{ github.ref_name }}"
+
   quality:
     runs-on: ubuntu-latest
     steps:
@@ -57,7 +78,7 @@ jobs:
         run: npm run quality
 
   create-release:
-    needs: quality
+    needs: [preflight, quality]
     runs-on: ubuntu-latest
     permissions:
       contents: write

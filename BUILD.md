@@ -432,7 +432,22 @@ ls -lh src-tauri/target/release/dblitz.exe
 ### 3. Git Commit and Tag
 
 ```bash
-git add -A
+# Look at the WHOLE worktree first. A release commit in a public repo is a bad
+# place to discover that something unrelated came along for the ride.
+git status --porcelain
+git diff --stat
+
+# Stage by explicit pathspec, never `git add -A` / `git add .`. Blanket staging
+# sweeps in every untracked file in the tree - scratch scripts, a database you
+# were testing against, work written for another branch - and this repository is
+# public. Add any file the release genuinely touched to the list below.
+git add package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock \
+        src-tauri/tauri.conf.json CHANGELOG.md
+
+# Read what is actually staged before committing it.
+git diff --cached --stat
+git status --porcelain   # anything still listed is deliberately NOT in this commit
+
 git commit -m "Release vYY.M.MICRO: Brief description"
 git tag vYY.M.MICRO
 git push origin main
@@ -538,7 +553,11 @@ rg -n '"version"|^version =' package.json package-lock.json src-tauri/Cargo.toml
 # Update CHANGELOG.md
 npx tauri build
 cp src-tauri/target/release/dblitz.exe /path/to/shared/tools/dblitz.exe
-git add -A && git commit -m "Release vYY.M.MICRO: Description"
+git status --porcelain && git diff --stat   # review the whole tree before staging
+# Explicit pathspec, never `git add -A` -- this repo is public (see step 3)
+git add package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock \
+        src-tauri/tauri.conf.json CHANGELOG.md
+git diff --cached --stat && git commit -m "Release vYY.M.MICRO: Description"
 git tag vYY.M.MICRO && git push origin main && git push origin vYY.M.MICRO
 git describe --tags --exact-match
 git ls-remote --tags origin vYY.M.MICRO

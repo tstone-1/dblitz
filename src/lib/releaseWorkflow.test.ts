@@ -138,3 +138,33 @@ describe("macOS release signing fails closed in the canonical repo", () => {
     expect(verify).toContain("source=Notarized Developer ID");
   });
 });
+
+/**
+ * BUILD.md is the release recipe for a PUBLIC repository, and it used to say
+ * `git add -A` in two places. Blanket staging sweeps every untracked file in
+ * the worktree into the release commit - a scratch script, a test database, a
+ * file written for another branch - and in a public repo that is a
+ * confidentiality problem as much as a tidiness one. The instruction is only
+ * worth anything if it stays changed, hence this gate.
+ */
+describe("release instructions stage by explicit pathspec", () => {
+  const build = readText("BUILD.md").split(/\r?\n/);
+  // Command lines only. The document deliberately NAMES `git add -A` in prose
+  // and in `#` comments to say not to use it, and that must not trip the check.
+  const gitAddCommands = build
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("git add "));
+
+  it("has git add commands to check at all", () => {
+    // Emptiness control: a rewrite that removed the staging step entirely, or a
+    // change to how the recipe is formatted, would otherwise pass silently.
+    expect(gitAddCommands.length).toBeGreaterThan(0);
+  });
+
+  it("uses no blanket staging command", () => {
+    const blanket = gitAddCommands.filter((line) =>
+      /^git add\s+(-A\b|--all\b|\.\s*$|\.\s)/.test(line),
+    );
+    expect(blanket).toEqual([]);
+  });
+});

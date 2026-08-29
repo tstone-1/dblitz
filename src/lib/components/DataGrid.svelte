@@ -3,6 +3,7 @@
   import { createCellSelection } from "./cellSelection.svelte";
   import { createDragReorder } from "./dragReorder.svelte";
   import { buildSelectionData, type SelectionData } from "./selectionData";
+  import { serializeClipboardTable, writeClipboardTable } from "./clipboardTable";
   import { buildSelectionStats, DEFAULT_MAX_STATS_ROWS } from "./selectionStats";
   import {
     buildGridTemplate,
@@ -236,10 +237,13 @@
         isSelected: selection.isSelected,
       });
       if (!data) return;
-      const lines: string[] = [];
-      if (withHeaders) lines.push(data.headers.join('\t'));
-      for (const row of data.rows) lines.push(row.join('\t'));
-      await navigator.clipboard.writeText(lines.join('\n'));
+      // Serialization is delegated because it is not a join: a cell holding a
+      // tab or a newline used to become extra spreadsheet columns or rows while
+      // the copy reported success. See clipboardTable.ts.
+      await writeClipboardTable(
+        serializeClipboardTable(withHeaders ? data.headers : null, data.rows),
+        navigator.clipboard,
+      );
       if (data.truncated) {
         onNotice?.(`Selection copied with the first ${data.rows.length.toLocaleString()} selected row(s) only.`);
       }

@@ -463,7 +463,37 @@ fn handle_open_request(app: &AppHandle, url: &str) {
 /// `open-file` listener — which is what makes the ready flag mean what it says.
 #[tauri::command]
 fn get_initial_file(pending: State<'_, PendingOpen>) -> Option<String> {
-    pending.take_initial(std::env::args().nth(1))
+    pending.take_initial(std::env::args().nth(1).map(|p| absolutize_launch_path(&p)))
+}
+
+/// Resolve a launch-argument path against the process working directory.
+///
+/// `argv[1]` is the one path that reaches dblitz relative. Every other entry
+/// point - the file dialog, drag-and-drop, the recents list, macOS document-open
+/// Apple events - hands over an absolute path already. A relative one was passed
+/// through untouched, and `path_to_sqlite_uri` then emitted
+/// `file:/inventory.sqlite?immutable=1`, which names `/inventory.sqlite` at the
+/// FILESYSTEM ROOT rather than the file in the shell's directory. So
+/// `dblitz inventory.sqlite` either failed or, worse, opened an unrelated
+/// root-level file of the same name.
+///
+/// Resolved here rather than inside `path_to_sqlite_uri` on purpose: the
+/// absolute path is also what gets stored in the recents list, hashed into the
+/// per-database config key and compared by the Windows duplicate-instance check,
+/// and all three want one stable spelling of the file. `std::path::absolute`
+/// touches no filesystem (no existence check, no symlink resolution) and handles
+/// the Windows drive-relative form `C:file.db`, which `cwd.join()` does not.
+fn absolutize_launch_path(path: &str) -> String {
+    if std::path::Path::new(path).is_absolute() {
+        return path.to_string();
+    }
+    match std::path::absolute(path) {
+        Ok(absolute) => absolute.to_string_lossy().into_owned(),
+        // No working directory (deleted, or unreadable). Nothing better to say
+        // than what the user typed; the open then fails with a real SQLite
+        // error instead of silently reading a different file.
+        Err(_) => path.to_string(),
+    }
 }
 
 /// This launch's version transition plus whether this install can replace
@@ -849,7 +879,7 @@ pub fn run() {
 /// the comments in [`PendingOpen`] and the run-event handler.
 #[cfg(test)]
 mod open_request_tests {
-    use super::{file_url_to_path, PendingOpen};
+    use super::{absolutize_launch_path, file_url_to_path, PendingOpen};
 
     #[test]
     fn file_url_percent_escapes_are_decoded() {
@@ -993,6 +1023,43 @@ mod open_request_tests {
             Some("/tmp/argv.sqlite")
         );
         assert_eq!(pending.take_initial(None), None);
+    }
+
+    #[test]
+    fn a_relative_launch_argument_resolves_against_the_working_directory() {
+        // The regression: a relative argv path reached `path_to_sqlite_uri`
+        // untouched, which turned "inventory.sqlite" into
+        // "file:/inventory.sqlite?immutable=1" - the FILESYSTEM ROOT, not the
+        // shell's directory. So `dblitz inventory.sqlite` opened the wrong file
+        // or none at all.
+        let cwd = std::env::current_dir().expect("a working directory");
+        let resolved = absolutize_launch_path("inventory.sqlite");
+
+        assert!(
+            std::path::Path::new(&resolved).is_absolute(),
+            "a relative launch argument must be made absolute, got {resolved:?}"
+        );
+        assert_eq!(
+            std::path::Path::new(&resolved),
+            cwd.join("inventory.sqlite"),
+            "it must resolve against the working directory, not the root"
+        );
+        // The defect's exact signature, stated directly so a future change that
+        // reintroduces it fails here and not three layers away.
+        assert_ne!(
+            crate::db::path_to_sqlite_uri(&resolved),
+            "file:/inventory.sqlite?immutable=1"
+        );
+    }
+
+    #[test]
+    fn an_absolute_launch_argument_is_passed_through_unchanged() {
+        // Control: the fix must not rewrite the path every other entry point
+        // already hands over absolute.
+        let cwd = std::env::current_dir().expect("a working directory");
+        let absolute = cwd.join("db.sqlite");
+        let absolute = absolute.to_string_lossy().into_owned();
+        assert_eq!(absolutize_launch_path(&absolute), absolute);
     }
 }
 

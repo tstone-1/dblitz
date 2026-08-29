@@ -187,9 +187,18 @@ export function loadViewConfig(): Promise<FileConfig> {
  * The path is explicit rather than "whatever is open": the backend command runs
  * on Tauri's threadpool, so by the time it executes the open database may have
  * changed and it would otherwise write these settings under the wrong file's
- * key. It rejects a path that is no longer open. Callers go through
- * `saveViewConfig()` in store.svelte.ts, which captures the path at enqueue
- * time and serialises the saves.
+ * key.
+ *
+ * It deliberately does NOT reject a path that is no longer open. A save
+ * legitimately outlives its session - change a filter, immediately open another
+ * file - and refusing it would discard a change the user made. The path is a
+ * lookup KEY, not a destination: the config lands at
+ * `<app-config-dir>/<sha256(path)[..16]>.json`, so no value can direct a write
+ * outside dblitz's own config directory. See `save_view_config` in
+ * `src-tauri/src/lib.rs` for the full contract.
+ *
+ * Callers go through `saveViewConfig()` in store.svelte.ts, which captures the
+ * path at enqueue time and serialises the saves.
  */
 export function saveViewConfig(config: FileConfig, path: string): Promise<void> {
   return invoke("save_view_config", { config, path });

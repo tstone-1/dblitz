@@ -5,6 +5,53 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.8.2] - 2026-08-29
+
+Fixes from a full-codebase deep review (3 blockers, 3 warnings, 1 nitpick — all
+addressed).
+
+### Fixed
+- **Copying cells that contain a tab or a newline no longer corrupts the paste.**
+  The clipboard payload was a raw `join("\t")` / `join("\n")`, so SQLite text
+  holding a tab, LF or CRLF became extra spreadsheet columns or extra rows while
+  the copy reported success. Selections are now serialized as both an HTML table
+  (which spreadsheets prefer, and where a delimiter inside a cell cannot split
+  it) and RFC 4180-quoted tab-delimited text, with round-trip tests for tab, LF,
+  CRLF and quotes.
+- **Exporting a selected column from a SQL result with duplicate column names no
+  longer applies the wrong column's type.** Selection data carried only the
+  sliced header names, so type recovery searched the result columns by name from
+  index 0. For `SELECT a.value, b.value` typed `INTEGER, TEXT`, selecting only
+  the second column resolved the first, and text such as `00123` was written to
+  the workbook as the number 123. Selections now carry their source column
+  indices and types are recovered by position.
+- **The Structure tab can no longer show one table labelled with another table's
+  columns.** Clicking table A then B while A's request was in flight published
+  whichever response arrived last, and a raw-schema response from a closed
+  database could repopulate the panel after a session reset. Both reads now
+  capture a request token and the database generation before awaiting, and
+  publish only if neither has moved.
+- **A relative database path on the command line opened the wrong file.**
+  `dblitz inventory.sqlite` passed `argv[1]` through untouched, producing the
+  URI `file:/inventory.sqlite?immutable=1` — the filesystem root, not the
+  shell's working directory. Launch arguments are now resolved to an absolute
+  path before anything uses them.
+
+### Changed
+- **The release workflow proves the tag matches the tree before creating a
+  release.** A new `preflight` job blocks draft creation until the tag is valid
+  CalVer and agrees with `package.json`, both `package-lock.json` entries,
+  `Cargo.toml`, `tauri.conf.json`, and a dated `CHANGELOG.md` heading. Until
+  now a `v26.8.2` tag on 26.8.1 manifests would have published 26.8.1 artifacts
+  and updater metadata as 26.8.2, with nothing red anywhere.
+- **BUILD.md stages release commits by explicit pathspec.** Both the main recipe
+  and the quick reference said `git add -A`, which can sweep unrelated or
+  untracked work into a commit in a public repository. A test rejects blanket
+  staging in the release instructions.
+- Corrected the `saveViewConfig` doc comment, which claimed the backend rejects
+  a path that is no longer open. It deliberately accepts one, because a save can
+  legitimately outlive its database session.
+
 ## [26.8.1] - 2026-08-23
 
 Fixes from a full-codebase deep review (4 blockers, 2 warnings, 1 nitpick — all

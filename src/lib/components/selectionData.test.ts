@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSelectionData } from "./selectionData";
+import { buildSelectionData, selectionColumnTypes } from "./selectionData";
 
 describe("buildSelectionData", () => {
   it("loads unloaded virtual rows before serializing a selection", async () => {
@@ -19,6 +19,7 @@ describe("buildSelectionData", () => {
 
     expect(data).toEqual({
       headers: ["id", "name"],
+      columnIndices: [0, 1],
       rows: [
         ["1", "alpha"],
         ["2", "bravo"],
@@ -38,6 +39,7 @@ describe("buildSelectionData", () => {
 
     expect(data).toEqual({
       headers: ["id"],
+      columnIndices: [0],
       rows: [["0"], ["1"]],
       truncated: true,
     });
@@ -61,6 +63,7 @@ describe("buildSelectionData", () => {
 
     expect(data).toEqual({
       headers: ["A", "B", "C"],
+      columnIndices: [0, 1, 2],
       rows: [
         ["a0", "", "c0"],
         ["", "b2", ""],
@@ -88,5 +91,57 @@ describe("buildSelectionData", () => {
         getRows: async () => [],
       }),
     ).rejects.toThrow("could not be loaded");
+  });
+
+  it("records the source column index of every header, not just its name", async () => {
+    // The regression this pins: a selection of columns 2..3 used to carry only
+    // the sliced NAMES, so a consumer recovering per-column metadata searched
+    // from index 0 and resolved the wrong occurrence of a repeated name.
+    const data = await buildSelectionData({
+      selection: { r0: 0, r1: 0, c0: 2, c1: 3 },
+      columns: ["value", "other", "value", "value"],
+      getRow: () => ["a", "b", "c", "d"],
+    });
+
+    expect(data?.headers).toEqual(["value", "value"]);
+    expect(data?.columnIndices).toEqual([2, 3]);
+  });
+});
+
+describe("selectionColumnTypes", () => {
+  it("resolves a later duplicate column name to its own declared type", async () => {
+    // `SELECT a.value, b.value` with types INTEGER, TEXT. Selecting ONLY the
+    // second column previously resolved the first `value` (a forward search
+    // that started at 0), so the export marked text numeric and the workbook
+    // turned "00123" into 123.
+    const columns = ["value", "value"];
+    const columnTypes = ["INTEGER", "TEXT"];
+    const data = await buildSelectionData({
+      selection: { r0: 0, r1: 0, c0: 1, c1: 1 },
+      columns,
+      getRow: () => ["1", "00123"],
+    });
+
+    expect(data?.rows).toEqual([["00123"]]);
+    expect(selectionColumnTypes(data!.columnIndices, columnTypes)).toEqual(["TEXT"]);
+  });
+
+  it("resolves an earlier duplicate to its own type as well", async () => {
+    // Control for the case above: if the mapping ignored position entirely and
+    // always answered "TEXT", the assertion above would pass for the wrong
+    // reason. Selecting column 0 of the same result must give INTEGER.
+    const data = await buildSelectionData({
+      selection: { r0: 0, r1: 0, c0: 0, c1: 0 },
+      columns: ["value", "value"],
+      getRow: () => ["1", "00123"],
+    });
+
+    expect(selectionColumnTypes(data!.columnIndices, ["INTEGER", "TEXT"])).toEqual([
+      "INTEGER",
+    ]);
+  });
+
+  it("reports an unknown type as empty rather than guessing a neighbour's", () => {
+    expect(selectionColumnTypes([0, 5], ["TEXT"])).toEqual(["TEXT", ""]);
   });
 });

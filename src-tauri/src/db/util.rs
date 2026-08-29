@@ -44,7 +44,7 @@ impl<T> ErrCtx<T> for Result<T, String> {
 /// Convert an OS file path into a SQLite URI with `?immutable=1`. Percent-
 /// encodes the few characters that have special meaning in URIs and
 /// normalizes Windows backslashes to forward slashes.
-pub(super) fn path_to_sqlite_uri(path: &str) -> String {
+pub(crate) fn path_to_sqlite_uri(path: &str) -> String {
     // Percent-encode in this order: % first (so we don't double-encode our
     // own escapes), then the others.
     let encoded = path
