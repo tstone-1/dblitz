@@ -9,6 +9,10 @@ export default defineConfig(async () => ({
   test: {
     environment: "node",
     include: ["src/**/*.test.ts"],
+    // Persist transformed modules across runs and across separate vitest
+    // processes. Transform is roughly half of a cold run here, and the cache
+    // lives in node_modules/.vitest-cache, so reinstalling deps invalidates it.
+    fsModuleCache: true,
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

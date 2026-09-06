@@ -24,7 +24,7 @@ rusqlite = { version = "0.40.1", features = ["bundled", "hooks", "column_decltyp
 regex = "1.13"
 sha2 = "0.11"
 hex = "0.4"
-dirs = "6"
+dirs = "7"
 parking_lot = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
