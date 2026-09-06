@@ -229,14 +229,26 @@ pub struct RecentFile {
     pub label: Option<String>,
 }
 
-/// Normalize a path for case-insensitive dedup on Windows. On Unix, paths are
-/// case-sensitive so the original is returned.
-fn normalize_for_dedup(p: &str) -> String {
-    if cfg!(windows) {
+/// Normalize a path so two spellings of the same file collapse to one key.
+///
+/// `windows_semantics` decides whether that means case-folding and
+/// slash-normalizing (Windows, where `C:\\Users\\Alice\\x.db` and
+/// `c:/users/alice/x.db` are one file) or leaving the bytes alone (Unix, where
+/// they are two). It is a parameter rather than a `cfg!` so the Windows
+/// behaviour is testable on the machines this is developed on - a rule that can
+/// only be exercised on one platform is a rule nobody runs.
+fn normalize_path_key(p: &str, windows_semantics: bool) -> String {
+    if windows_semantics {
         p.replace('\\', "/").to_lowercase()
     } else {
         p.to_string()
     }
+}
+
+/// Normalize a path for case-insensitive dedup on Windows. On Unix, paths are
+/// case-sensitive so the original is returned.
+fn normalize_for_dedup(p: &str) -> String {
+    normalize_path_key(p, cfg!(windows))
 }
 
 /// All config I/O, rooted at one base directory. Every operation is a method on
@@ -250,12 +262,18 @@ fn normalize_for_dedup(p: &str) -> String {
 /// store.
 pub struct ConfigStore {
     dir: PathBuf,
+    /// Whether per-database config keys treat paths the Windows way. Mirrors
+    /// the host by default; tests set it explicitly (see `normalize_path_key`).
+    windows_path_semantics: bool,
 }
 
 impl ConfigStore {
     /// Store rooted at an explicit directory. Used by tests with a `TempDir`.
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self {
+            dir,
+            windows_path_semantics: cfg!(windows),
+        }
     }
 
     /// Production store: rooted at the real OS config directory.
@@ -263,27 +281,77 @@ impl ConfigStore {
         Self::new(config_dir())
     }
 
+    /// Where this database's view config lives.
+    ///
+    /// Keyed off the NORMALIZED path, so on Windows one file has one config no
+    /// matter which spelling opened it. Keying off the raw string gave
+    /// `C:\\Users\\Alice\\x.db` and `c:/users/alice/x.db` two separate config
+    /// files: the user set a tint and column widths, opened the same file from
+    /// a shortcut that spelled the path differently, and got defaults back -
+    /// with the settings they had made still on disk under the other key, so
+    /// nothing looked broken enough to report. The recents list has always
+    /// deduped this way (`normalize_for_dedup`); only the config key did not.
+    ///
+    /// The path is a lookup key and never a destination: it is hashed, and the
+    /// result is a 16-hex-character filename inside `self.dir`, so no value of
+    /// `db_path` - traversal, absolute, empty - can direct a write anywhere
+    /// else. `config_path_for_db_stays_inside_the_config_dir` pins that.
     fn config_path_for_db(&self, db_path: &str) -> PathBuf {
+        self.hashed_path(&normalize_path_key(db_path, self.windows_path_semantics))
+    }
+
+    /// The pre-normalization key: the hash of the raw path, which is where
+    /// every config written before that change still is. Read from when the
+    /// normalized key has no file yet, so an upgrade does not silently reset
+    /// everyone's saved views; the next save writes the normalized key and
+    /// removes this one.
+    fn legacy_config_path_for_db(&self, db_path: &str) -> PathBuf {
+        self.hashed_path(db_path)
+    }
+
+    fn hashed_path(&self, key: &str) -> PathBuf {
         let mut hasher = Sha256::new();
-        hasher.update(db_path.as_bytes());
+        hasher.update(key.as_bytes());
         let hash = hex::encode(hasher.finalize());
         self.dir.join(format!("{}.json", &hash[..16]))
     }
 
     pub fn load_config(&self, db_path: &str) -> FileConfig {
         let path = self.config_path_for_db(db_path);
-        if path.exists() {
-            match fs::read_to_string(&path) {
-                Ok(s) => match serde_json::from_str(&s) {
-                    Ok(config) => return sanitize_file_config(config),
-                    Err(e) => {
-                        warn!(path = %path.display(), error = %e, "Config file corrupted, using defaults")
-                    }
-                },
-                Err(e) => warn!(path = %path.display(), error = %e, "Failed to read config file"),
+        if let Some(config) = self.read_config_file(&path) {
+            return config;
+        }
+        // Only reached before this database has been saved under the new key.
+        let legacy = self.legacy_config_path_for_db(db_path);
+        if legacy != path {
+            if let Some(config) = self.read_config_file(&legacy) {
+                info!(path = %legacy.display(), "Loaded view config from the pre-normalization key");
+                return config;
             }
         }
         FileConfig::default()
+    }
+
+    /// Read and sanitize one config file. `None` when it is absent, unreadable
+    /// or corrupt - all three mean "nothing usable here", and the caller's
+    /// fallback is the same in each case.
+    fn read_config_file(&self, path: &Path) -> Option<FileConfig> {
+        if !path.exists() {
+            return None;
+        }
+        match fs::read_to_string(path) {
+            Ok(s) => match serde_json::from_str(&s) {
+                Ok(config) => Some(sanitize_file_config(config)),
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "Config file corrupted, using defaults");
+                    None
+                }
+            },
+            Err(e) => {
+                warn!(path = %path.display(), error = %e, "Failed to read config file");
+                None
+            }
+        }
     }
 
     pub fn save_config(&self, db_path: &str, config: &FileConfig) -> Result<(), String> {
@@ -291,6 +359,16 @@ impl ConfigStore {
         let path = self.config_path_for_db(db_path);
         let json = serde_json::to_string_pretty(&sanitize_file_config(config.clone())).str_err()?;
         atomic_write(&path, &json)?;
+        // Migration completes here: the value now lives under the normalized
+        // key, so the raw-path file is stale and would only be read again if
+        // the normalized one were lost. Best-effort - a failed removal leaves a
+        // harmless orphan, and reporting it would fail a save that succeeded.
+        let legacy = self.legacy_config_path_for_db(db_path);
+        if legacy != path && legacy.exists() {
+            if let Err(e) = fs::remove_file(&legacy) {
+                warn!(path = %legacy.display(), error = %e, "Failed to remove the pre-normalization config file");
+            }
+        }
         info!(path = %path.display(), "Saved view config");
         Ok(())
     }
@@ -510,8 +588,8 @@ mod tests {
     fn normalize_for_dedup_is_case_insensitive_on_windows() {
         // Same path written two different ways: backslashes vs slashes,
         // mixed case vs lowercase. Both must collapse to the same key.
-        let a = normalize_for_dedup("C:\\Users\\Mail\\foo.db");
-        let b = normalize_for_dedup("c:/users/mail/foo.db");
+        let a = normalize_for_dedup("C:\\Users\\Alice\\foo.db");
+        let b = normalize_for_dedup("c:/users/alice/foo.db");
         assert_eq!(a, b, "Windows dedup must be case- and slash-insensitive");
     }
 
@@ -971,6 +1049,121 @@ mod tests {
         assert_eq!(store.load_config("/data/b.db").label.as_deref(), Some("B"));
     }
 
+    /// A store that keys config files the way a Windows host would, so the
+    /// case-folding behaviour is exercised on every platform's `cargo test`
+    /// rather than only on the one machine that could run it.
+    fn windows_store(dir: &TempDir) -> ConfigStore {
+        ConfigStore {
+            dir: dir.path().to_path_buf(),
+            windows_path_semantics: true,
+        }
+    }
+
+    #[test]
+    fn view_config_key_folds_windows_path_spellings_together() {
+        // The defect: one database, two config files. The user set a tint and
+        // column widths, reopened the same file through a shortcut that spelled
+        // the path differently, and got defaults - with their settings still on
+        // disk under the other key.
+        let dir = TempDir::new().unwrap();
+        let store = windows_store(&dir);
+        let config = FileConfig {
+            label: Some("PROD".to_string()),
+            ..FileConfig::default()
+        };
+
+        store
+            .save_config(r"C:\Users\Alice\inventory.db", &config)
+            .unwrap();
+
+        assert_eq!(
+            store
+                .load_config("c:/users/alice/inventory.db")
+                .label
+                .as_deref(),
+            Some("PROD"),
+            "the same file spelled differently must resolve to the same config"
+        );
+        assert_eq!(
+            store.config_path_for_db(r"C:\Users\Alice\inventory.db"),
+            store.config_path_for_db("c:/users/alice/inventory.db")
+        );
+    }
+
+    #[test]
+    fn unix_paths_stay_case_sensitive() {
+        // The control for the fold above: on Unix these are two different
+        // files and must keep two different configs.
+        let dir = TempDir::new().unwrap();
+        let store = ConfigStore {
+            dir: dir.path().to_path_buf(),
+            windows_path_semantics: false,
+        };
+        assert_ne!(
+            store.config_path_for_db("/data/Inventory.db"),
+            store.config_path_for_db("/data/inventory.db")
+        );
+    }
+
+    #[test]
+    fn load_config_falls_back_to_the_pre_normalization_key_then_migrates() {
+        // Everything saved before the key changed lives under the hash of the
+        // RAW path. Without the fallback, upgrading would silently hand every
+        // existing user default views for every database they had customised.
+        let dir = TempDir::new().unwrap();
+        let store = windows_store(&dir);
+        let db = r"C:\Users\Alice\legacy.db";
+        let legacy = store.legacy_config_path_for_db(db);
+        let normalized = store.config_path_for_db(db);
+        assert_ne!(legacy, normalized, "the test needs the two keys to differ");
+
+        fs::create_dir_all(dir.path()).unwrap();
+        fs::write(
+            &legacy,
+            serde_json::to_string(&FileConfig {
+                label: Some("OLD".to_string()),
+                ..FileConfig::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.load_config(db).label.as_deref(),
+            Some("OLD"),
+            "an existing config under the old key must still be found"
+        );
+
+        // Migration: the next save writes the new key and drops the old file.
+        store
+            .save_config(
+                db,
+                &FileConfig {
+                    label: Some("NEW".to_string()),
+                    ..FileConfig::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            normalized.exists(),
+            "the save must write the normalized key"
+        );
+        assert!(
+            !legacy.exists(),
+            "the pre-normalization file must be removed once its value has moved"
+        );
+        assert_eq!(store.load_config(db).label.as_deref(), Some("NEW"));
+        // And the other spelling now sees it too, which is the point of the
+        // whole change.
+        assert_eq!(
+            store
+                .load_config("c:/users/alice/legacy.db")
+                .label
+                .as_deref(),
+            Some("NEW")
+        );
+    }
+
     #[test]
     fn config_path_for_db_stays_inside_the_config_dir() {
         // A path that looks like traversal is hashed like any other string, so
@@ -980,15 +1173,24 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = ConfigStore::new(dir.path().to_path_buf());
 
+        let windows = windows_store(&dir);
         for db_path in ["../../etc/passwd", "/etc/passwd", r"..\..\windows", ""] {
-            let path = store.config_path_for_db(db_path);
-            assert_eq!(
-                path.parent(),
-                Some(dir.path()),
-                "{db_path} escaped the config dir: {}",
-                path.display()
-            );
-            assert_eq!(path.extension().and_then(|e| e.to_str()), Some("json"));
+            // Both keys: the normalization step must not have opened a way out
+            // of the directory either, and the legacy reader hashes the raw
+            // string the same way.
+            for path in [
+                store.config_path_for_db(db_path),
+                store.legacy_config_path_for_db(db_path),
+                windows.config_path_for_db(db_path),
+            ] {
+                assert_eq!(
+                    path.parent(),
+                    Some(dir.path()),
+                    "{db_path} escaped the config dir: {}",
+                    path.display()
+                );
+                assert_eq!(path.extension().and_then(|e| e.to_str()), Some("json"));
+            }
         }
     }
 }

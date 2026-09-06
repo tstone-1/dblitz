@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 import { createVirtualRows } from "./virtualRows.svelte";
 import type { QueryResult } from "$lib/ipc";
 
+// Production defers a chunk request by one macrotask so a chunk the user has
+// scrolled past can be dropped instead of fetched (see `scheduleFetch`). Every
+// test below that is not specifically ABOUT the deferral injects this instead,
+// so `getRow` still issues its request synchronously and the existing
+// assertions keep measuring what they were written to measure.
+const runNow = (run: () => void) => run();
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -21,6 +28,7 @@ describe("createVirtualRows", () => {
     const firstLoad = deferred<QueryResult>();
 
     const rows = createVirtualRows({
+      defer: runNow,
       chunkSize: 2,
       getSelectedTable: () => "items",
       loadChunk: (offset, limit) => {
@@ -58,6 +66,7 @@ describe("createVirtualRows", () => {
   it("materializes visible row ranges across chunks", async () => {
     const columns = ["id", "name"];
     const rows = createVirtualRows({
+      defer: runNow,
       chunkSize: 2,
       getSelectedTable: () => "items",
       loadChunk: async (offset, limit) => ({
@@ -88,6 +97,7 @@ describe("createVirtualRows", () => {
   it("rejects stale materialization after a newer reload starts", async () => {
     const pending = deferred<QueryResult>();
     const rows = createVirtualRows({
+      defer: runNow,
       chunkSize: 2,
       getSelectedTable: () => "items",
       loadChunk: () => pending.promise,
@@ -115,6 +125,7 @@ describe("createVirtualRows", () => {
   it("reports background chunk errors without rethrowing unhandled rejections", async () => {
     const errors: string[] = [];
     const rows = createVirtualRows({
+      defer: runNow,
       chunkSize: 2,
       getSelectedTable: () => "items",
       loadChunk: async () => {
@@ -140,6 +151,7 @@ describe("createVirtualRows", () => {
     // whose epoch is still current. That must not raise the error bar.
     const errors: string[] = [];
     const rows = createVirtualRows({
+      defer: runNow,
       chunkSize: 2,
       getSelectedTable: () => "items",
       loadChunk: async () => {
@@ -166,6 +178,7 @@ describe("createVirtualRows", () => {
   function makeChunkCountingRows() {
     let loadCount = 0;
     const rows = createVirtualRows({
+      defer: runNow,
       chunkSize: 1,
       getSelectedTable: () => "items",
       loadChunk: async (offset) => {
@@ -280,6 +293,7 @@ describe("createVirtualRows", () => {
     let live = 1;
     const seen: number[] = [];
     const rows = createVirtualRows<number>({
+      defer: runNow,
       chunkSize: 2,
       getSelectedTable: () => "items",
       makeSnapshot: () => live,
@@ -312,6 +326,7 @@ describe("createVirtualRows", () => {
     const pending = deferred<QueryResult>();
     let live = 1;
     const rows = createVirtualRows<number>({
+      defer: runNow,
       chunkSize: 2,
       getSelectedTable: () => "items",
       makeSnapshot: () => live,
@@ -345,6 +360,7 @@ describe("createVirtualRows", () => {
     let cancelCalls = 0;
     let totalRows = 0;
     const rows = createVirtualRows({
+      defer: runNow,
       chunkSize: 2,
       getSelectedTable: () => "items",
       loadChunk: async (offset) => {
@@ -383,9 +399,360 @@ describe("createVirtualRows", () => {
     expect(totalRows).toBe(1);
     expect(rows.getVisibleRow(0)).toBeNull(); // cache was cleared by reset()
   });
+
+  // ---- Failure latch (a failing chunk is not retried every render) --------
+
+  it("retries a failed chunk on every render without the latch, and never with it", async () => {
+    // The reported defect: a regex filter of "(" makes every chunk fail with
+    // "Invalid regex". The grid re-renders constantly, each render calls getRow
+    // for every visible row, and each miss re-fired the same failing IPC call.
+    const errors: string[] = [];
+    let loadCount = 0;
+    const rows = createVirtualRows({
+      defer: runNow,
+      chunkSize: 2,
+      getSelectedTable: () => "items",
+      loadChunk: async () => {
+        loadCount++;
+        throw new Error("Invalid regex");
+      },
+      cancelQueries: async () => {},
+      getVisibleColumns: () => ["id"],
+      getColumnIndex: () => 0,
+      hasColumns: () => true,
+      setColumns: () => {},
+      setTotalRows: () => {},
+      setError: (message) => errors.push(message),
+    });
+
+    expect(rows.getVisibleRow(0)).toBeNull();
+    await loadsSettled();
+    expect(loadCount).toBe(1);
+    expect(errors).toHaveLength(1);
+
+    // Five more render passes over the same rows.
+    for (let pass = 0; pass < 5; pass++) {
+      expect(rows.getVisibleRow(0)).toBeNull();
+      expect(rows.getVisibleRow(1)).toBeNull();
+      await loadsSettled();
+    }
+    expect(loadCount).toBe(1);
+    expect(errors).toHaveLength(1);
+  });
+
+  it("clears the failure latch on the next reload", async () => {
+    // Positive control for the latch: it must not turn a transient failure into
+    // a permanently blank table. Fixing the filter has to make the rows load.
+    let fail = true;
+    let loadCount = 0;
+    const rows = createVirtualRows({
+      defer: runNow,
+      chunkSize: 2,
+      getSelectedTable: () => "items",
+      loadChunk: async (offset) => {
+        loadCount++;
+        if (fail) throw new Error("Invalid regex");
+        return { columns: ["id"], rows: [["a"], ["b"]], total_rows: 2, offset };
+      },
+      cancelQueries: async () => {},
+      getVisibleColumns: () => ["id"],
+      getColumnIndex: () => 0,
+      hasColumns: () => true,
+      setColumns: () => {},
+      setTotalRows: () => {},
+      setError: () => {},
+    });
+
+    expect(rows.getVisibleRow(0)).toBeNull();
+    await loadsSettled();
+    expect(loadCount).toBe(1);
+
+    fail = false;
+    await rows.beginReload();
+    expect(rows.getVisibleRow(0)).toBeNull();
+    await loadsSettled();
+    expect(loadCount).toBe(2);
+    expect(rows.getVisibleRow(0)).toEqual(["a"]);
+  });
+
+  it("does not latch a chunk cancelled by a newer request", async () => {
+    // Pressing Cancel in the SQL tab rejects an in-flight browse chunk. That is
+    // a successful user action; latching it would blank the rows it interrupted
+    // until the next reload.
+    let attempt = 0;
+    const rows = createVirtualRows({
+      defer: runNow,
+      chunkSize: 2,
+      getSelectedTable: () => "items",
+      loadChunk: async (offset) => {
+        attempt++;
+        if (attempt === 1) {
+          throw new Error('querying table "items": Query cancelled by a newer request');
+        }
+        return { columns: ["id"], rows: [["a"], ["b"]], total_rows: 2, offset };
+      },
+      cancelQueries: async () => {},
+      getVisibleColumns: () => ["id"],
+      getColumnIndex: () => 0,
+      hasColumns: () => true,
+      setColumns: () => {},
+      setTotalRows: () => {},
+      setError: () => {},
+    });
+
+    expect(rows.getVisibleRow(0)).toBeNull();
+    await loadsSettled();
+    expect(rows.getVisibleRow(0)).toBeNull(); // next render retries
+    await loadsSettled();
+    expect(rows.getVisibleRow(0)).toEqual(["a"]);
+    expect(attempt).toBe(2);
+  });
+
+  it("zeroes the row count and latches chunk 0 when the first chunk fails", async () => {
+    // beginReload() has already emptied the cache, so leaving the previous
+    // query's totalRows in place made the grid render that many blank rows --
+    // each of which called getRow and re-fired the failing query.
+    let totalRows = 99;
+    let loadCount = 0;
+    const rows = createVirtualRows({
+      defer: runNow,
+      chunkSize: 2,
+      getSelectedTable: () => "items",
+      loadChunk: async () => {
+        loadCount++;
+        throw new Error("Invalid regex");
+      },
+      cancelQueries: async () => {},
+      getVisibleColumns: () => ["id"],
+      getColumnIndex: () => 0,
+      hasColumns: () => true,
+      setColumns: () => {},
+      setTotalRows: (next) => { totalRows = next; },
+      setError: () => {},
+    });
+
+    const reload = await rows.beginReload();
+    expect(reload).not.toBeNull();
+    expect(rows.failFirstChunk(reload!.epoch)).toBe(true);
+    expect(totalRows).toBe(0);
+
+    // Anything still rendered must not re-fire the failing query.
+    expect(rows.getVisibleRow(0)).toBeNull();
+    await loadsSettled();
+    expect(loadCount).toBe(0);
+  });
+
+  it("ignores failFirstChunk from a superseded reload", async () => {
+    let totalRows = 42;
+    const rows = createVirtualRows({
+      defer: runNow,
+      chunkSize: 2,
+      getSelectedTable: () => "items",
+      loadChunk: async (offset) => ({ columns: ["id"], rows: [], total_rows: 0, offset }),
+      cancelQueries: async () => {},
+      getVisibleColumns: () => ["id"],
+      getColumnIndex: () => 0,
+      hasColumns: () => true,
+      setColumns: () => {},
+      setTotalRows: (next) => { totalRows = next; },
+      setError: () => {},
+    });
+
+    const stale = await rows.beginReload();
+    await rows.beginReload(); // a newer reload takes over
+    expect(rows.failFirstChunk(stale!.epoch)).toBe(false);
+    expect(totalRows).toBe(42);
+  });
+
+  // ---- Deferral + visible window ------------------------------------------
+
+  it("drops a deferred request for a chunk that scrolled out of view", async () => {
+    const loaded: number[] = [];
+    let flush: (() => void) | null = null;
+    const rows = createVirtualRows({
+      chunkSize: 2,
+      getSelectedTable: () => "items",
+      loadChunk: async (offset) => {
+        loaded.push(offset);
+        return { columns: ["id"], rows: [["a"], ["b"]], total_rows: 1000, offset };
+      },
+      cancelQueries: async () => {},
+      getVisibleColumns: () => ["id"],
+      getColumnIndex: () => 0,
+      hasColumns: () => true,
+      setColumns: () => {},
+      setTotalRows: () => {},
+      setError: () => {},
+      defer: (run) => { flush = run; },
+    });
+
+    // Render pass 1: rows 0-1 (chunk 0) are on screen and miss.
+    rows.setVisibleWindow(0, 1);
+    expect(rows.getVisibleRow(0)).toBeNull();
+
+    // The user scrolls before the deferred request is issued: pass 2 renders
+    // rows 100-101 (chunk 50) and asks for those instead.
+    rows.setVisibleWindow(100, 101);
+    expect(rows.getVisibleRow(100)).toBeNull();
+
+    expect(loaded).toEqual([]); // nothing issued yet -- that is the deferral
+    flush!();
+    await loadsSettled();
+
+    // Chunk 50 is fetched; chunk 0 is dropped, because nothing is showing it.
+    expect(loaded).toEqual([100]);
+  });
+
+  it("still fetches a chunk that is inside the reported window", async () => {
+    // Emptiness control for the test above: a window check that rejected
+    // everything would satisfy it just as well.
+    const loaded: number[] = [];
+    let flush: (() => void) | null = null;
+    const rows = createVirtualRows({
+      chunkSize: 2,
+      getSelectedTable: () => "items",
+      loadChunk: async (offset) => {
+        loaded.push(offset);
+        return { columns: ["id"], rows: [["a"], ["b"]], total_rows: 1000, offset };
+      },
+      cancelQueries: async () => {},
+      getVisibleColumns: () => ["id"],
+      getColumnIndex: () => 0,
+      hasColumns: () => true,
+      setColumns: () => {},
+      setTotalRows: () => {},
+      setError: () => {},
+      defer: (run) => { flush = run; },
+    });
+
+    rows.setVisibleWindow(0, 5);
+    expect(rows.getVisibleRow(0)).toBeNull();
+    expect(rows.getVisibleRow(4)).toBeNull();
+    expect(loaded).toEqual([]);
+    flush!();
+    await loadsSettled();
+    expect(loaded.toSorted((a, b) => a - b)).toEqual([0, 4]);
+  });
+
+  // ---- Range materialisation concurrency ----------------------------------
+
+  it("bounds concurrency and dedupes against an in-flight viewport fetch", async () => {
+    // Ctrl+A over a wide selection used to fire every missing chunk at once
+    // with Promise.all, bypassing the in-flight map entirely: 200 concurrent
+    // query_table calls against one backend connection, duplicating whatever
+    // the viewport already had going.
+    const started: number[] = [];
+    let inFlight = 0;
+    let peakInFlight = 0;
+    const gates: Array<() => void> = [];
+
+    const rows = createVirtualRows({
+      defer: runNow,
+      chunkSize: 2,
+      getSelectedTable: () => "items",
+      loadChunk: (offset) => {
+        started.push(offset);
+        inFlight++;
+        peakInFlight = Math.max(peakInFlight, inFlight);
+        return new Promise<QueryResult>((resolve) => {
+          gates.push(() => {
+            inFlight--;
+            resolve({ columns: ["id"], rows: [["a"], ["b"]], total_rows: 40, offset });
+          });
+        });
+      },
+      cancelQueries: async () => {},
+      getVisibleColumns: () => ["id"],
+      getColumnIndex: () => 0,
+      hasColumns: () => true,
+      setColumns: () => {},
+      setTotalRows: () => {},
+      setError: () => {},
+    });
+
+    // The viewport already has chunk 3 (rows 6-7) in flight.
+    expect(rows.getVisibleRow(6)).toBeNull();
+    expect(started).toEqual([6]);
+
+    // Ctrl+A over rows 0..19 -- ten chunks, one of them already loading.
+    const materialized = rows.getVisibleRows(0, 19);
+
+    // Release the gates as they open, tracking the high-water mark.
+    for (let guard = 0; guard < 100 && gates.length > 0; guard++) {
+      gates.shift()!();
+      await loadsSettled();
+    }
+    await materialized;
+
+    expect(peakInFlight).toBeLessThanOrEqual(4);
+    // Ten chunks, each requested exactly once: the viewport's chunk 3 was
+    // joined, not re-requested.
+    expect(started.toSorted((a, b) => a - b)).toEqual([0, 2, 4, 6, 8, 10, 12, 14, 16, 18]);
+  });
+
+  // ---- Cached-only reads ---------------------------------------------------
+
+  it("peekVisibleRow never starts a fetch", async () => {
+    // DataGrid's selection statistics run over every selected cell. Reading
+    // them through getRow pulled the whole table across IPC, one chunk per
+    // re-render, to compute a Sum nobody asked to wait for.
+    const loaded: number[] = [];
+    const rows = createVirtualRows({
+      defer: runNow,
+      chunkSize: 2,
+      getSelectedTable: () => "items",
+      loadChunk: async (offset) => {
+        loaded.push(offset);
+        return { columns: ["id"], rows: [["a"], ["b"]], total_rows: 100, offset };
+      },
+      cancelQueries: async () => {},
+      getVisibleColumns: () => ["id"],
+      getColumnIndex: () => 0,
+      hasColumns: () => true,
+      setColumns: () => {},
+      setTotalRows: () => {},
+      setError: () => {},
+    });
+
+    expect(rows.peekVisibleRow(0)).toBeNull();
+    expect(rows.peekVisibleRow(50)).toBeNull();
+    await loadsSettled();
+    expect(loaded).toEqual([]);
+
+    // Once a chunk is cached the peek reads it, so the guard is not "always
+    // null".
+    expect(rows.getVisibleRow(0)).toBeNull();
+    await loadsSettled();
+    expect(rows.peekVisibleRow(0)).toEqual(["a"]);
+  });
+
+  it("bumps cacheVersion when a chunk lands", async () => {
+    const rows = createVirtualRows({
+      defer: runNow,
+      chunkSize: 2,
+      getSelectedTable: () => "items",
+      loadChunk: async (offset) => ({
+        columns: ["id"], rows: [["a"], ["b"]], total_rows: 100, offset,
+      }),
+      cancelQueries: async () => {},
+      getVisibleColumns: () => ["id"],
+      getColumnIndex: () => 0,
+      hasColumns: () => true,
+      setColumns: () => {},
+      setTotalRows: () => {},
+      setError: () => {},
+    });
+
+    const before = rows.cacheVersion;
+    expect(rows.getVisibleRow(0)).toBeNull();
+    await loadsSettled();
+    expect(rows.cacheVersion).toBeGreaterThan(before);
+  });
 });
 
+/** Drain the microtask queue. A macrotask boundary flushes all of it, which a
+ *  fixed number of `await Promise.resolve()` does not -- the load pipeline is
+ *  several `.then`/`.finally` links deep. */
 async function loadsSettled() {
-  await Promise.resolve();
-  await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
 }

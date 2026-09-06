@@ -4,6 +4,7 @@
   import { onMount } from "svelte";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getInitialFile, toggleDevtools } from "$lib/ipc";
+  import { openSucceeded } from "$lib/openOutcome";
   import { appState, initTheme, openDatabase } from "$lib/store.svelte";
   import { update } from "$lib/updateState.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
@@ -22,7 +23,12 @@
   // double-click, Dock "Open Recent", CLI arg) identical to them.
   async function handleOpenFile(path: string) {
     await openDatabase(path);
-    appState.activeTab = "browse";
+    // Only switch tabs on a SUCCESSFUL open -- `openDatabase` never throws, so
+    // awaiting it says nothing. The rule (and why both halves are needed) is in
+    // openOutcome.ts.
+    if (openSucceeded({ requestedPath: path, dbPath: appState.dbPath, error: appState.error })) {
+      appState.activeTab = "browse";
+    }
   }
 
   onMount(() => {

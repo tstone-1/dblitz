@@ -126,3 +126,50 @@ describe("createCellSelection", () => {
     expect(selection.isSelected(2, 9)).toBe(true);
   });
 });
+
+describe("cellFlags", () => {
+  it("agrees with five isSelected probes for a single rectangle", () => {
+    // The fast path answers all five questions from the rectangle's bounds.
+    // This pins it against the definition it replaced, cell by cell, including
+    // the cells just outside the rectangle.
+    const selection = createCellSelection();
+    selection.setSelection({ row: 2, col: 1 }, { row: 4, col: 3 });
+
+    for (let row = 0; row <= 6; row++) {
+      for (let col = 0; col <= 5; col++) {
+        const flags = selection.cellFlags(row, col);
+        const selected = selection.isSelected(row, col);
+        expect(flags.selected).toBe(selected);
+        expect(flags.top).toBe(selected && !selection.isSelected(row - 1, col));
+        expect(flags.bottom).toBe(selected && !selection.isSelected(row + 1, col));
+        expect(flags.left).toBe(selected && !selection.isSelected(row, col - 1));
+        expect(flags.right).toBe(selected && !selection.isSelected(row, col + 1));
+      }
+    }
+  });
+
+  it("agrees with five isSelected probes for two touching rectangles", () => {
+    // The slow path exists for exactly this: the shared edge between two
+    // adjacent rectangles must not be drawn as a selection border.
+    const selection = createCellSelection();
+    selection.setSelection({ row: 1, col: 1 }, { row: 3, col: 2 });
+    selection.onCellMouseDown(makeCellEvent(3, { ctrlKey: true }), 1);
+    selection.onCellMouseEnter(3, 3);
+
+    for (let row = 0; row <= 5; row++) {
+      for (let col = 0; col <= 5; col++) {
+        const flags = selection.cellFlags(row, col);
+        const selected = selection.isSelected(row, col);
+        expect(flags.selected).toBe(selected);
+        expect(flags.top).toBe(selected && !selection.isSelected(row - 1, col));
+        expect(flags.bottom).toBe(selected && !selection.isSelected(row + 1, col));
+        expect(flags.left).toBe(selected && !selection.isSelected(row, col - 1));
+        expect(flags.right).toBe(selected && !selection.isSelected(row, col + 1));
+      }
+    }
+    // Control: the fixture really does have two rectangles that touch, so the
+    // loop above is not just re-testing the single-rectangle path.
+    expect(selection.isSelected(1, 3)).toBe(true);
+    expect(selection.cellFlags(2, 2).right).toBe(false);
+  });
+});

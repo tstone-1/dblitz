@@ -1,4 +1,6 @@
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -187,5 +189,58 @@ describe("release workflow wires the preflight in", () => {
     // A gate that runs beside `create-release` instead of before it lets the
     // draft exist anyway, which is the state this is meant to prevent.
     expect(/create-release:\s*\n\s*needs: \[preflight, quality\]/.test(workflow)).toBe(true);
+  });
+});
+
+/**
+ * The gate's main-module guard decides whether it runs at all, so being wrong
+ * there is silent: node exits 0 having printed nothing and release.yml reads
+ * that as "the tag matches every version file". Two idioms got this wrong --
+ * comparing argv[1] against a percent-ENCODED import.meta.url (any space in
+ * the path), and against a REALPATH-resolved one (any symlink; on macOS /tmp
+ * is already a symlink). The temp dir below has both.
+ */
+describe("the preflight CLI actually runs from an awkward path", () => {
+  function runCopyIn(dir: string, tag: string) {
+    mkdirSync(join(dir, "scripts"));
+    mkdirSync(join(dir, "src-tauri"));
+    for (const f of [
+      "package.json",
+      "package-lock.json",
+      "CHANGELOG.md",
+      "src-tauri/Cargo.toml",
+      "src-tauri/Cargo.lock",
+      "src-tauri/tauri.conf.json",
+    ]) {
+      copyFileSync(join(root, f), join(dir, f));
+    }
+    const script = join(dir, "scripts", "release-preflight.mjs");
+    copyFileSync(join(root, "scripts/release-preflight.mjs"), script);
+    return spawnSync(process.execPath, [script, tag], { encoding: "utf8" });
+  }
+
+  it("rejects a disagreeing tag from a path with a space and a symlink", () => {
+    const dir = mkdtempSync(join(tmpdir(), "preflight gate "));
+    try {
+      const run = runCopyIn(dir, "v99.9.9");
+      expect(run.status).toBe(1);
+      expect(run.stderr).toContain("[FAIL] Release preflight rejected v99.9.9");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts the repository's own version from the same path", () => {
+    // Positive control. Without it the assertion above would still pass if the
+    // script had simply become unable to succeed.
+    const version = (JSON.parse(readText(join(root, "package.json"))) as { version: string }).version;
+    const dir = mkdtempSync(join(tmpdir(), "preflight gate "));
+    try {
+      const run = runCopyIn(dir, `v${version}`);
+      expect(run.status).toBe(0);
+      expect(run.stdout).toContain("[OK] Release preflight");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

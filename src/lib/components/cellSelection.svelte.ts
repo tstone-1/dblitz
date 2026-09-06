@@ -68,6 +68,26 @@ function coversMultipleCells(bounds: SelectionBounds[]): boolean {
   return false;
 }
 
+/** Per-cell render answer: is it selected, and which of its borders are the
+ *  selection's own edge. */
+export interface CellFlags {
+  selected: boolean;
+  top: boolean;
+  bottom: boolean;
+  left: boolean;
+  right: boolean;
+}
+
+/** Shared instance for the overwhelmingly common "not selected" answer, so a
+ *  full render pass allocates nothing for the cells it does not highlight. */
+const NOT_SELECTED: CellFlags = Object.freeze({
+  selected: false,
+  top: false,
+  bottom: false,
+  left: false,
+  right: false,
+});
+
 export function createCellSelection() {
   // Committed rectangles making up the (possibly disjoint) selection.
   let rects = $state<Rect[]>([]);
@@ -103,6 +123,39 @@ export function createCellSelection() {
   function isSelected(row: number, col: number): boolean {
     for (const b of bounds) if (contains(b, row, col)) return true;
     return false;
+  }
+
+  /**
+   * Membership AND the four selection-border edges for one cell, in one call.
+   *
+   * DataGrid used to ask `isSelected` five times per cell per render (the cell
+   * itself plus its four neighbours) to decide which borders to draw. For the
+   * ordinary single-rectangle selection -- a drag, a Shift+click, Ctrl+A -- the
+   * edges are just the rectangle's own bounds, so one `contains` answers all
+   * five. The multi-rectangle path keeps the neighbour probes, because a cell
+   * on the edge of one rectangle that touches another must NOT draw a border
+   * there.
+   */
+  function cellFlags(row: number, col: number): CellFlags {
+    if (bounds.length === 1) {
+      const b = bounds[0];
+      if (!contains(b, row, col)) return NOT_SELECTED;
+      return {
+        selected: true,
+        top: row === b.r0,
+        bottom: row === b.r1,
+        left: col === b.c0,
+        right: col === b.c1,
+      };
+    }
+    if (!isSelected(row, col)) return NOT_SELECTED;
+    return {
+      selected: true,
+      top: !isSelected(row - 1, col),
+      bottom: !isSelected(row + 1, col),
+      left: !isSelected(row, col - 1),
+      right: !isSelected(row, col + 1),
+    };
   }
 
   function colIdxFromEvent(e: MouseEvent): number {
@@ -196,6 +249,7 @@ export function createCellSelection() {
     get selectedColumnCount() { return selectedColumnCount; },
     get hasMultipleSelectedCells() { return hasMultipleSelectedCells; },
     isSelected,
+    cellFlags,
     onCellMouseDown,
     onCellMouseEnter,
     handleContextMenu,

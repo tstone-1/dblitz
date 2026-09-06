@@ -1,10 +1,12 @@
 mod config;
-mod db;
+/// Database access. Public only so the benchmark examples under
+/// `src-tauri/examples/` can measure the shipped query paths instead of
+/// re-implementing them - see [`db::bench_api`]. Everything the app itself uses
+/// goes through the `#[tauri::command]` wrappers below.
+pub mod db;
 mod updates;
 
 use config::FileConfig;
-#[cfg(debug_assertions)]
-use db::BenchmarkResult;
 use db::{
     ColumnFilter, ColumnInfo, DbState, ErrCtx, QueryRequest, QueryResult, SchemaEntry, SqlResult,
     StrErr, TableInfo,
@@ -463,7 +465,25 @@ fn handle_open_request(app: &AppHandle, url: &str) {
 /// `open-file` listener — which is what makes the ready flag mean what it says.
 #[tauri::command]
 fn get_initial_file(pending: State<'_, PendingOpen>) -> Option<String> {
-    pending.take_initial(std::env::args().nth(1).map(|p| absolutize_launch_path(&p)))
+    pending.take_initial(launch_argument())
+}
+
+/// The database named on the command line, resolved to an absolute path.
+///
+/// One function, because there are two callers and they must agree: the webview
+/// asks for it through `get_initial_file`, and the Windows duplicate-instance
+/// check in `run()` hashes it to find an existing window. They did NOT agree -
+/// `run()` read `argv[1]` raw - so the two spellings hashed differently and
+/// `dblitz inventory.db` from the file's own directory opened a second window on
+/// a file already open.
+fn launch_argument() -> Option<String> {
+    resolve_launch_argument(std::env::args().nth(1))
+}
+
+/// The half of [`launch_argument`] that does not read the process environment,
+/// so it can be tested.
+fn resolve_launch_argument(raw: Option<String>) -> Option<String> {
+    raw.map(|path| absolutize_launch_path(&path))
 }
 
 /// Resolve a launch-argument path against the process working directory.
@@ -478,9 +498,13 @@ fn get_initial_file(pending: State<'_, PendingOpen>) -> Option<String> {
 /// root-level file of the same name.
 ///
 /// Resolved here rather than inside `path_to_sqlite_uri` on purpose: the
-/// absolute path is also what gets stored in the recents list, hashed into the
-/// per-database config key and compared by the Windows duplicate-instance check,
-/// and all three want one stable spelling of the file. `std::path::absolute`
+/// absolute path is also what gets stored in the recents list, what the
+/// per-database config key is derived from, and what the Windows
+/// duplicate-instance check compares, and all four want one stable spelling of
+/// the file. That was a statement of intent rather than of fact until this was
+/// fixed - `run()` passed the raw `argv[1]` to `try_activate_existing`, so the marker
+/// written from the absolute path and the hash looked up from the relative one
+/// could not match. `std::path::absolute`
 /// touches no filesystem (no existence check, no symlink resolution) and handles
 /// the Windows drive-relative form `C:file.db`, which `cwd.join()` does not.
 fn absolutize_launch_path(path: &str) -> String {
@@ -515,11 +539,6 @@ fn get_check_for_updates_on_startup() -> bool {
 #[tauri::command(async)]
 fn set_check_for_updates_on_startup(enabled: bool) -> Result<(), String> {
     config::set_check_for_updates_on_startup(enabled)
-}
-
-#[tauri::command(async)]
-fn get_tables(state: State<'_, Arc<DbState>>) -> Result<Vec<TableInfo>, String> {
-    db::get_tables(&state).err_ctx("loading the table list")
 }
 
 #[tauri::command(async)]
@@ -593,16 +612,6 @@ fn export_to_xlsx(
 }
 
 #[cfg(debug_assertions)]
-#[tauri::command(async)]
-fn benchmark_query(
-    state: State<'_, Arc<DbState>>,
-    table: String,
-    chunk_size: i64,
-) -> Result<Vec<BenchmarkResult>, String> {
-    db::benchmark_query(&state, &table, chunk_size)
-}
-
-#[cfg(debug_assertions)]
 #[tauri::command]
 fn toggle_devtools(app: tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -612,11 +621,6 @@ fn toggle_devtools(app: tauri::AppHandle) {
             window.open_devtools();
         }
     }
-}
-
-#[tauri::command]
-fn get_current_path(state: State<'_, Arc<DbState>>) -> Option<String> {
-    state.current_path.lock().clone()
 }
 
 #[tauri::command(async)]
@@ -657,8 +661,17 @@ fn save_view_config(config: FileConfig, path: String) -> Result<(), String> {
 }
 
 /// Search for an existing dblitz window that has the same file open by
-/// comparing the `dblitz_db_path` window property (a 64-bit hash of the
-/// full, lowercased path set by [`set_window_db_marker`]).
+/// comparing the `dblitz_db_path` window property.
+///
+/// The property does not hold the path: it holds the 64-bit
+/// [`path_hash`] of the case-folded path, written by [`set_window_db_marker`]
+/// (`SetPropW` stores one pointer-sized value, which is why it is a hash and not
+/// the string). So `path` here must be spelled the same way the other instance
+/// spelled it - absolute - or the two hashes cannot agree; `run()` absolutizes
+/// before calling. Case folding means `C:\Db\x.sqlite` and `c:\db\x.sqlite`
+/// match, which is right on Windows; two genuinely different files colliding on
+/// a 64-bit hash would raise the wrong window, which is why the value is a hash
+/// of the whole path rather than of the filename.
 ///
 /// If found, restore (un-minimise) and surface it, returning `true` so
 /// the caller can exit early.
@@ -741,8 +754,16 @@ pub fn run() {
 
     // If launched with a file already open in another instance, activate
     // that window instead of opening a duplicate.
+    //
+    // Absolutized first, and that is load-bearing rather than tidy: the marker
+    // the running instance published was hashed from the absolutized path (the
+    // one `get_initial_file` hands the webview), so hashing the raw `argv[1]`
+    // compared two different spellings of the same file. `dblitz inventory.db`
+    // from the directory holding it therefore never matched, and opened a
+    // second window on a file already open - the exact case this check exists
+    // for, and the one a user is most likely to reach from a terminal.
     #[cfg(windows)]
-    if let Some(path) = std::env::args().nth(1) {
+    if let Some(path) = launch_argument() {
         if try_activate_existing(&path) {
             return;
         }
@@ -771,7 +792,6 @@ pub fn run() {
             close_database,
             cancel_queries,
             open_database,
-            get_tables,
             get_columns,
             get_schema,
             query_table,
@@ -779,10 +799,7 @@ pub fn run() {
             execute_sql,
             export_to_xlsx,
             #[cfg(debug_assertions)]
-            benchmark_query,
-            #[cfg(debug_assertions)]
             toggle_devtools,
-            get_current_path,
             load_view_config,
             save_view_config,
             get_initial_file,
@@ -879,7 +896,7 @@ pub fn run() {
 /// the comments in [`PendingOpen`] and the run-event handler.
 #[cfg(test)]
 mod open_request_tests {
-    use super::{absolutize_launch_path, file_url_to_path, PendingOpen};
+    use super::{absolutize_launch_path, file_url_to_path, resolve_launch_argument, PendingOpen};
 
     #[test]
     fn file_url_percent_escapes_are_decoded() {
@@ -1050,6 +1067,27 @@ mod open_request_tests {
             crate::db::path_to_sqlite_uri(&resolved),
             "file:/inventory.sqlite?immutable=1"
         );
+    }
+
+    #[test]
+    fn every_caller_of_the_launch_argument_gets_the_absolute_path() {
+        // Two callers read `argv[1]`: the webview, through `get_initial_file`,
+        // and - on Windows - the duplicate-instance check in `run()`, which
+        // hashes it to find a window already showing this file. `run()` used to
+        // read it raw, so the two hashed different spellings of one path and
+        // `dblitz inventory.db`, run from the directory holding it, opened a
+        // second window on a file that was already open. They now share this
+        // one resolver, which is what stops them drifting apart again.
+        let cwd = std::env::current_dir().expect("a working directory");
+
+        let resolved = resolve_launch_argument(Some("inventory.sqlite".to_string()))
+            .expect("a present argument stays present");
+        assert_eq!(
+            std::path::Path::new(&resolved),
+            cwd.join("inventory.sqlite")
+        );
+
+        assert_eq!(resolve_launch_argument(None), None, "no argument, no path");
     }
 
     #[test]

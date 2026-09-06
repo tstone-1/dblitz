@@ -34,6 +34,29 @@ import type { QueryResult } from "$lib/ipc";
 //   Rust-side generation and cancel_queries flips a token so in-flight SQL on
 //   the old connection stops and returns partial rows rather than fighting the
 //   new one.
+//
+// -----------------------------------------------------------------------------
+// Request discipline (what stops a miss from becoming a storm)
+// -----------------------------------------------------------------------------
+// `getRow` runs synchronously inside the grid's render pass, once per visible
+// row, and a miss used to fire an IPC call there and then. Three separate
+// runaways came out of that, and each has its own guard below:
+//
+// * A chunk whose fetch FAILED was retried by the very next render, forever.
+//   A regex filter of "(" returns "Invalid regex" per chunk, and the grid then
+//   re-issued it every frame with no way out but changing the filter.
+//   -> `failedChunks`, latched per epoch and cleared on the next reload.
+//
+// * A chunk the user scrolled PAST was still fetched. The request is issued
+//   one tick late instead (`deps.defer`), and dropped at that point if it is no
+//   longer inside the window the grid last rendered (`setVisibleWindow`).
+//
+// * A wide `getVisibleRows` range (Ctrl+A copy) fired every missing chunk at
+//   once with `Promise.all` and bypassed the in-flight map entirely -- 200
+//   concurrent `query_table` calls, duplicating whatever the viewport already
+//   had in flight. -> both paths now share `pendingChunks` through
+//   `loadShared`, and the range path runs at most `MAX_RANGE_CONCURRENCY` of
+//   them.
 // =============================================================================
 
 type Row = (string | null)[];
@@ -60,12 +83,45 @@ export interface VirtualRowsDeps<S = void> {
   setColumns: (columns: string[]) => void;
   setTotalRows: (totalRows: number) => void;
   setError: (message: string) => void;
+  /**
+   * Runs a render-pass-deferred chunk request. Injected so a test can flush it
+   * synchronously; production uses a macrotask, which is what lets a request
+   * queued by one render pass be dropped after a later pass has scrolled the
+   * chunk out of view.
+   */
+  defer?: (run: () => void) => void;
 }
 
 export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
   let rowCache = $state<Map<number, Row[]>>(new Map());
-  let pendingChunks = new Map<number, Promise<void>>();
+  // Bumped whenever a chunk lands. Consumers that want to recompute something
+  // from CACHED rows only (DataGrid's selection statistics) depend on this
+  // instead of calling getRow and triggering fetches from inside a `$derived`.
+  let cacheVersion = $state(0);
+  // One in-flight load per chunk, shared by the viewport fetcher and the range
+  // materializer so neither can duplicate the other's request.
+  let pendingChunks = new Map<number, Promise<QueryResult | null>>();
+  // Chunks whose in-flight load must be written into rowCache when it lands.
+  // A range wider than the cache cap deliberately does not publish (see
+  // getVisibleRows), but a viewport fetch for the same chunk still does.
+  let publishOnArrival = new Set<number>();
+  // Chunks whose load failed in THIS epoch. Latched: the grid re-renders on
+  // every scroll and every state change, so without this a chunk that cannot
+  // load is re-requested forever.
+  let failedChunks = new Set<number>();
+  // Chunks a render pass asked for and whose request has not been issued yet.
+  let scheduledChunks = new Set<number>();
+  let flushScheduled = false;
+  // Chunk range the grid last rendered; null until it reports one.
+  let visibleChunks: { first: number; last: number } | null = null;
   let epoch = 0;
+
+  const defer = deps.defer ?? ((run: () => void) => { setTimeout(run, 0); });
+
+  // How many chunk loads a wide `getVisibleRows` range may have in flight.
+  // Four is enough to keep the backend busy while a Ctrl+A copy over a
+  // million-row table stays a queue rather than a stampede.
+  const MAX_RANGE_CONCURRENCY = 4;
 
   function captureSnapshot(): S {
     return deps.makeSnapshot ? deps.makeSnapshot() : (undefined as S);
@@ -112,10 +168,23 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
     return myEpoch === epoch;
   }
 
-  function projectVisible(fullRow: Row): Row {
-    return deps
+  /**
+   * A projector for the current visible-column set.
+   *
+   * Built ONCE per projection pass. `projectVisible` used to call
+   * `deps.getVisibleColumns()` (in BrowseData: rebuild the ordered list, then
+   * the filtered visible list) and `deps.getColumnIndex` per row, so a Ctrl+A
+   * copy over 100k rows rebuilt two arrays 100k times.
+   */
+  function visibleProjector(): (fullRow: Row) => Row {
+    const indices = deps
       .getVisibleColumns()
-      .map((col) => fullRow[deps.getColumnIndex(col) ?? 0] ?? null);
+      .map((col) => deps.getColumnIndex(col) ?? 0);
+    return (fullRow) => indices.map((i) => fullRow[i] ?? null);
+  }
+
+  function projectVisible(fullRow: Row): Row {
+    return visibleProjector()(fullRow);
   }
 
   function applyResult(
@@ -133,48 +202,116 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
     touchRecency(chunkIdx);
     evictIfOverCap(newCache);
     rowCache = newCache;
+    cacheVersion++;
   }
 
-  function fetchChunk(chunkIdx: number): Promise<void> {
+  /**
+   * The single in-flight load for a chunk. Both the viewport fetcher and the
+   * range materializer go through here, so a chunk is never requested twice
+   * concurrently regardless of which of them asked first.
+   *
+   * Resolves to `null` when the epoch moved on while the load was in flight --
+   * that answer belongs to a query nobody is showing any more.
+   */
+  function loadShared(chunkIdx: number, publish: boolean): Promise<QueryResult | null> {
+    if (publish) publishOnArrival.add(chunkIdx);
     const pending = pendingChunks.get(chunkIdx);
     if (pending) return pending;
 
     const myEpoch = epoch;
     const snapshot = currentSnapshot;
     const offset = chunkIdx * deps.chunkSize;
-    let task: Promise<void>;
-    task = (async () => {
-      const result = await deps.loadChunk(offset, deps.chunkSize, snapshot);
-      if (!isCurrent(myEpoch)) return;
-      applyResult(chunkIdx, result, "if-empty");
-    })().catch((e) => {
-      const message = String(e);
-      // `cancel_queries` bumps a backend generation shared by BOTH tabs, so
-      // cancelling a SQL-tab query rejects any browse chunk fetch that happens
-      // to be in flight -- with this epoch still current, so the isCurrent
-      // guard alone does not filter it. That is a successful user action, not
-      // a failure: the chunk simply isn't cached, and the next render calls
-      // getRow() again and refetches it. Reporting it would put a red error
-      // bar up for pressing Cancel.
-      if (isCurrent(myEpoch) && !message.includes(CANCELLED_QUERY_MESSAGE)) {
-        deps.setError(message);
-      }
-    }).finally(() => {
-      if (pendingChunks.get(chunkIdx) === task) pendingChunks.delete(chunkIdx);
+    let tracked: Promise<QueryResult | null>;
+    const task = deps.loadChunk(offset, deps.chunkSize, snapshot).then((result) => {
+      if (!isCurrent(myEpoch)) return null;
+      if (publishOnArrival.has(chunkIdx)) applyResult(chunkIdx, result, "if-empty");
+      return result;
     });
+    tracked = task.finally(() => {
+      if (pendingChunks.get(chunkIdx) === tracked) pendingChunks.delete(chunkIdx);
+      publishOnArrival.delete(chunkIdx);
+    });
+    pendingChunks.set(chunkIdx, tracked);
+    return tracked;
+  }
 
-    pendingChunks.set(chunkIdx, task);
-    return task;
+  function fetchChunk(chunkIdx: number): Promise<void> {
+    const myEpoch = epoch;
+    return loadShared(chunkIdx, true).then(
+      () => {},
+      (e: unknown) => {
+        const message = String(e);
+        // `cancel_queries` bumps a backend generation shared by BOTH tabs, so
+        // cancelling a SQL-tab query rejects any browse chunk fetch that happens
+        // to be in flight -- with this epoch still current, so the isCurrent
+        // guard alone does not filter it. That is a successful user action, not
+        // a failure: the chunk simply isn't cached, and the next render calls
+        // getRow() again and refetches it. Reporting it would put a red error
+        // bar up for pressing Cancel -- and latching it would make a cancel
+        // permanently blank the rows it interrupted.
+        if (!isCurrent(myEpoch) || message.includes(CANCELLED_QUERY_MESSAGE)) return;
+        failedChunks.add(chunkIdx);
+        deps.setError(message);
+      },
+    );
+  }
+
+  /**
+   * Note that the grid wants a chunk, and issue the request one tick later.
+   *
+   * The deferral is what makes the visible-window check meaningful: by the time
+   * the flush runs, the grid may have rendered again at a different scroll
+   * position, and a chunk that is no longer under the viewport is dropped
+   * rather than fetched for nobody. `pendingChunks` still dedupes anything that
+   * does get issued.
+   */
+  function scheduleFetch(chunkIdx: number) {
+    if (scheduledChunks.has(chunkIdx) || pendingChunks.has(chunkIdx)) return;
+    scheduledChunks.add(chunkIdx);
+    const myEpoch = epoch;
+    if (flushScheduled) return;
+    flushScheduled = true;
+    defer(() => {
+      flushScheduled = false;
+      const requested = scheduledChunks;
+      scheduledChunks = new Set();
+      if (!isCurrent(myEpoch)) return;
+      for (const idx of requested) {
+        if (failedChunks.has(idx)) continue;
+        if (visibleChunks && (idx < visibleChunks.first || idx > visibleChunks.last)) continue;
+        void fetchChunk(idx);
+      }
+    });
+  }
+
+  /**
+   * The row range the grid last rendered. Called from the render pass, and it
+   * writes only plain (non-reactive) state -- the same discipline
+   * `touchRecency` follows and for the same reason.
+   */
+  function setVisibleWindow(firstRow: number, lastRow: number) {
+    visibleChunks = {
+      first: Math.floor(firstRow / deps.chunkSize),
+      last: Math.floor(lastRow / deps.chunkSize),
+    };
   }
 
   function getRow(index: number): Row | null {
     const chunkIdx = Math.floor(index / deps.chunkSize);
     const chunk = rowCache.get(chunkIdx);
     if (!chunk) {
-      void fetchChunk(chunkIdx);
+      if (!failedChunks.has(chunkIdx)) scheduleFetch(chunkIdx);
       return null;
     }
     touchRecency(chunkIdx);
+    return chunk[index - chunkIdx * deps.chunkSize] ?? null;
+  }
+
+  /** Cached-only read: never schedules a fetch. */
+  function peekRow(index: number): Row | null {
+    const chunkIdx = Math.floor(index / deps.chunkSize);
+    const chunk = rowCache.get(chunkIdx);
+    if (!chunk) return null;
     return chunk[index - chunkIdx * deps.chunkSize] ?? null;
   }
 
@@ -183,11 +320,23 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
     return fullRow ? projectVisible(fullRow) : null;
   }
 
+  /**
+   * `getVisibleRow` without the side effect.
+   *
+   * DataGrid's selection statistics are computed from whatever is cached; they
+   * must never start a fetch, because they run for every cell of the selection
+   * and used to walk a Ctrl+A selection chunk by chunk, pulling the entire table
+   * through IPC to produce a Sum/Avg nobody asked to wait for.
+   */
+  function peekVisibleRow(index: number): Row | null {
+    const fullRow = peekRow(index);
+    return fullRow ? projectVisible(fullRow) : null;
+  }
+
   async function getVisibleRows(start: number, end: number): Promise<Row[]> {
     if (!deps.getSelectedTable()) return [];
 
     const myEpoch = epoch;
-    const snapshot = currentSnapshot;
     const firstChunk = Math.floor(start / deps.chunkSize);
     const lastChunk = Math.floor(end / deps.chunkSize);
     const chunkCount = lastChunk - firstChunk + 1;
@@ -221,23 +370,38 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
       // cap deliberately do not: they cannot all stay resident anyway, so
       // publishing them would only evict the user's actual viewport chunks.
       const publishFetched = chunkCount <= MAX_CACHED_CHUNKS;
+      const missing: number[] = [];
+      for (let index = 0; index < chunkCount; index++) {
+        const chunkIdx = firstChunk + index;
+        // Read the cache before the first await, so every task in this batch
+        // sees the same pre-load contents and a later eviction cannot unsee
+        // a hit that was there when the range started.
+        const cached = rowCache.get(chunkIdx);
+        if (cached) {
+          touchRecency(chunkIdx);
+          chunks.set(chunkIdx, cached);
+        } else {
+          missing.push(chunkIdx);
+        }
+      }
+
+      // A bounded worker pool rather than `Promise.all` over every chunk: a
+      // Ctrl+A copy of a million rows is 2,000 chunks, and firing them at once
+      // both stampedes the single backend connection and duplicates whatever
+      // the viewport already had in flight.
+      let next = 0;
+      const worker = async () => {
+        while (next < missing.length) {
+          const chunkIdx = missing[next++];
+          const result = await loadShared(chunkIdx, publishFetched);
+          if (result) chunks.set(chunkIdx, result.rows);
+        }
+      };
       await Promise.all(
-        Array.from({ length: chunkCount }, async (_, index) => {
-          const chunkIdx = firstChunk + index;
-          // Read the cache before the first await, so every task in this batch
-          // sees the same pre-load contents and a later eviction cannot unsee
-          // a hit that was there when the range started.
-          const cached = rowCache.get(chunkIdx);
-          if (cached) {
-            touchRecency(chunkIdx);
-            chunks.set(chunkIdx, cached);
-            return;
-          }
-          const result = await deps.loadChunk(chunkIdx * deps.chunkSize, deps.chunkSize, snapshot);
-          if (!isCurrent(myEpoch)) return;
-          chunks.set(chunkIdx, result.rows);
-          if (publishFetched) applyResult(chunkIdx, result, "if-empty");
-        }),
+        Array.from(
+          { length: Math.min(MAX_RANGE_CONCURRENCY, missing.length) },
+          worker,
+        ),
       );
     }
 
@@ -245,14 +409,27 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
       throw new Error("Selection changed while rows were loading. Try again.");
     }
 
+    // One projector for the whole range, not one per row.
+    const project = visibleProjector();
     const out: Row[] = [];
     for (let idx = start; idx <= end; idx++) {
       const chunkIdx = Math.floor(idx / deps.chunkSize);
       const fullRow = chunks.get(chunkIdx)?.[idx - chunkIdx * deps.chunkSize];
       if (!fullRow) throw new Error("Selection contains rows that could not be loaded.");
-      out.push(projectVisible(fullRow));
+      out.push(project(fullRow));
     }
     return out;
+  }
+
+  /** Everything that is scoped to one epoch's cache contents. */
+  function clearEpochState() {
+    rowCache = new Map();
+    pendingChunks.clear();
+    publishOnArrival.clear();
+    failedChunks.clear();
+    scheduledChunks.clear();
+    chunkRecency.clear();
+    cacheVersion++;
   }
 
   async function beginReload(): Promise<{ epoch: number; snapshot: S } | null> {
@@ -263,15 +440,31 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
     currentSnapshot = captureSnapshot();
     await deps.cancelQueries();
     if (!isCurrent(myEpoch)) return null;
-    rowCache = new Map();
-    pendingChunks.clear();
-    chunkRecency.clear();
+    clearEpochState();
     return { epoch: myEpoch, snapshot: currentSnapshot };
   }
 
   function applyFirstChunk(myEpoch: number, result: QueryResult): boolean {
     if (!isCurrent(myEpoch)) return false;
     applyResult(0, result, "always");
+    return true;
+  }
+
+  /**
+   * The first chunk of this reload failed.
+   *
+   * Two things have to happen together, and doing only one of them is what made
+   * a bad filter look like a corrupted grid. `beginReload` has already emptied
+   * the cache, but the caller's `totalRows` still holds the PREVIOUS query's
+   * count -- so the grid renders that many empty rows, each of which calls
+   * getRow, misses, and re-fires the failing query. Zeroing the row count
+   * leaves the error banner alone on screen, and latching chunk 0 stops the
+   * retry loop for anything that does still get rendered.
+   */
+  function failFirstChunk(myEpoch: number): boolean {
+    if (!isCurrent(myEpoch)) return false;
+    failedChunks.add(0);
+    deps.setTotalRows(0);
     return true;
   }
 
@@ -298,19 +491,24 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
   function reset(): void {
     epoch++;
     currentSnapshot = captureSnapshot();
-    rowCache = new Map();
-    pendingChunks.clear();
-    chunkRecency.clear();
+    clearEpochState();
+    visibleChunks = null;
     void deps.cancelQueries();
   }
 
   return {
     getVisibleRow,
+    peekVisibleRow,
     getVisibleRows,
     firstChunkRows,
+    setVisibleWindow,
     beginReload,
     applyFirstChunk,
+    failFirstChunk,
     isCurrent,
     reset,
+    get cacheVersion() {
+      return cacheVersion;
+    },
   };
 }

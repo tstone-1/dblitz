@@ -5,6 +5,130 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.9.0] - 2026-09-06
+
+### Fixed
+- **Ctrl+Enter (Cmd+Enter on macOS) runs the SQL statement again.** CodeMirror's
+  `defaultKeymap` binds `Mod-Enter` to `insertBlankLine`, and because it was
+  listed first it won on every platform: Ctrl+Enter on Windows and Linux, and
+  Cmd+Enter on macOS, inserted a blank line instead of executing. The execute
+  bindings now sit at `Prec.highest`, ahead of every other keymap.
+- **A database file truncated by another process now reports an error instead
+  of killing the app.** The connection asked SQLite to memory-map the file, and
+  `?immutable=1` means no locking, so a file shrinking under an open mapping
+  (cloud sync, another tool's `VACUUM`) took the process down with SIGBUS and
+  printed nothing. Without the mapping the same sequence returns "database disk
+  image is malformed", which the UI can show. The mapping was also not a win:
+  cold, every measured operation was faster without it.
+- **Launching dblitz on a file that is already open now finds the existing
+  window, whatever the path spelling (Windows).** Duplicate detection hashed
+  the raw command-line argument while the window marker held the resolved
+  absolute path, so `dblitz inventory.sqlite` from a shell opened a second
+  window on a file the first one already had. Both readers now go through one
+  resolver.
+- **Per-database view settings survive a differently-spelled path (Windows).**
+  The config filename was a hash of the path as typed, so `C:\Db\x.sqlite` and
+  `c:\db\X.SQLITE` — the same file — kept two separate sets of column widths,
+  colours and pinned filters. The key is now case-folded and slash-normalized
+  on Windows and byte-exact everywhere else. Settings saved under the old key
+  are still read and are migrated on the next save.
+- **A regex filter naming a column that does not exist now reports an error.**
+  The column was silently dropped, which left the filter matching every row —
+  the opposite of what a filter that cannot be evaluated should show.
+- **Regex filter semantics are now defined and tested.** NULL matches as the
+  empty string, so `^$` finds blank cells; a BLOB never matches; a number
+  matches the text the grid displays for it.
+- **REAL values render the way SQLite renders them.** A stored `3.0` displayed
+  as `3`, so a filter typed against what the grid showed did not match. Values
+  now print as SQLite's own text conversion does (`3.0`, `1.0e+20`, and `-0.0`
+  as `0.0`). For values needing more than 13 significant digits the two texts
+  can differ in the last digits while denoting the same double, which is a
+  limit of SQLite's own `%!.15g` formatting.
+- **`=<number>` matches on a column with no declared type.** SQLite applies a
+  column's affinity to the bound value, and a column that declares no type has
+  none, so the text `42` never equalled the stored number 42. Such columns now
+  compare both ways. Columns with a declared type are unchanged.
+- **A first chunk that fails no longer leaves the grid claiming rows it cannot
+  show.** The failure is latched for that load and the row count is zeroed;
+  a cancellation does not latch.
+- **Switching to Browse Data now waits for the open to succeed.** A failed open
+  moved the app to the Browse tab anyway, next to its own error message.
+- **The Excel export confirmation names the file it wrote.**
+
+### Changed
+- **Keyboard shortcut labels follow the platform**, showing Cmd on macOS and
+  Ctrl elsewhere instead of one hard-coded spelling.
+- The Reset button's tooltip now says what Shift+click does.
+- Removed three backend commands the UI never called: `get_tables`,
+  `get_current_path`, and the paging benchmark.
+
+### Performance
+Measured on a 5,000,000-row synthetic table unless stated otherwise.
+
+- **Opening a large table is immediate again.** The first chunk of an unsorted
+  table is served with `LIMIT`, and the rowid index is built lazily on the
+  first scroll past it: 302 ms to 0.2 ms.
+- **Regex filtering is roughly ten times faster.** The scan now selects only
+  the columns a pattern is applied to and matches on the raw value rather than
+  building a string per cell: 3.2 s to 312 ms.
+- **Scrolling a filtered view no longer re-counts the table on every page.**
+  Row counts are cached per table for the life of the open file, which is
+  correct only because the connection is an immutable snapshot. A 500,000-row
+  filtered scroll went from 297 ms to 38 ms in total, and from 40-69 ms to
+  0.10-0.11 ms per page.
+- **The SQL and Structure tabs no longer wait for a slow Browse Data query.**
+  They read a second read-only connection to the same immutable snapshot, so a
+  `SELECT 1` issued during a sort of a 5,000,000-row table answers in 0.02 ms
+  instead of queueing 734 ms behind the sort.
+- The global filter skips columns declared BLOB, which cannot match a text
+  search (1.48 s to 1.30 s over twelve columns). Columns with no declared type
+  are still searched.
+- Column introspection runs once per query instead of once per helper.
+- Page reads no longer clone every cell to drop the leading rowid.
+- Grid scrolling is coalesced to one animation frame, chunk fetches for a range
+  share one request per chunk and run at most four at a time, and the column
+  list keeps a stable identity so a scroll no longer rebuilds it.
+- Selection statistics are computed in a debounced effect over already-cached
+  rows instead of fetching from a derived read.
+- **The SQL editor is loaded on first use.** CodeMirror is no longer part of
+  the initial page bundle, which cuts the entry-referenced JavaScript to under
+  a third of its previous size.
+
+### Internal
+- `Cargo.lock` joined the release preflight contract. It carries the crate's own
+  version and `cargo check` rewrites it after a `Cargo.toml` bump, so a
+  forgotten regeneration was previously invisible — it was still on 26.8.1 when
+  26.8.2 was staged. All five version files are now checked before a tag can
+  create a release.
+- The two benchmark examples now call the shipped query functions through the
+  real read-only, immutable connection instead of re-implementing them, so they
+  cannot drift from what the app runs. The public seam is `db::bench_api`.
+- Every CI job has a `timeout-minutes` with the observed maximum recorded next
+  to it, both workflows default to `permissions: contents: read` with write
+  granted per job, and the release workflow serializes on the workflow rather
+  than the ref (each tag is its own ref, so a ref-scoped group serializes
+  nothing).
+- The Linux build prerequisites live in one file, `.github/tauri-linux-deps.txt`,
+  read by all four apt steps. The gate workflow had been installing
+  `libappindicator3-dev` while the release workflow installed
+  `libayatana-appindicator3-dev`.
+- The release preflight script's main-module guard compared URLs by string, so
+  from any path containing a space or reached through a symlink it exited 0
+  without running a single check, and the workflow read that as a pass. It now
+  uses `import.meta.main`, and the workflow additionally requires the script's
+  success line in the output.
+- The smoke test has an overall deadline, a per-request timeout, and forwards
+  the WebDriver process's stderr; a missing `tauri-driver` used to surface as an
+  unhandled exception.
+- `Cargo.toml` declares `license = "MIT"`, matching `package.json` and
+  `LICENSE`.
+- Dependencies refreshed for the release: Rust 1.98.1, CodeMirror
+  `@codemirror/state` 6.7.1 → 6.7.4, `@codemirror/view` 6.43.9 → 6.43.11 and
+  `@codemirror/search` 6.7.1 → 6.7.2 (the SQL editor), and the Tauri plugins
+  `updater` 2.10.1 → 2.11.0, `dialog` 2.7.2 → 2.7.3 and `opener` 2.5.4 → 2.5.5
+  on both the Rust and the JavaScript side. SQLite/`rusqlite` and the Tauri
+  core are unchanged.
+
 ## [26.8.2] - 2026-08-29
 
 Fixes from a full-codebase deep review (3 blockers, 3 warnings, 1 nitpick — all

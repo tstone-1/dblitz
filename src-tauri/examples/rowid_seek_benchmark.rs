@@ -1,8 +1,24 @@
+// Deep-paging benchmark: dblitz's rowid seek against LIMIT/OFFSET and against
+// DB Browser for SQLite's prefetch-window equivalent.
+//
+// Run: cargo run --release --example rowid_seek_benchmark [rows] [chunk] [repeats] [prefetch]
+// (Release mode matters — the offset path's cost is in SQLite's C core.)
+//
+// Every measured path calls the SHIPPED code, through `dblitz_lib::db` and its
+// `bench_api` re-exports: the database is opened by `open_database` (so the
+// connection carries the same flags and PRAGMAs the app uses), the index is
+// built by `build_rowid_index`, the seek runs the SQL `rowid_page_sql` writes,
+// the baseline runs `query_with_offset`, and every row is materialized by
+// `collect_rows`. This file used to re-implement all five, which meant a change
+// to the real query path silently stopped being the thing these numbers
+// describe.
 use std::env;
-use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use rusqlite::types::ValueRef;
+use dblitz_lib::db::bench_api::{
+    build_rowid_index, collect_rows, query_with_offset, quote_ident, rowid_alias, rowid_page_sql,
+};
+use dblitz_lib::db::{open_database, DbState};
 use rusqlite::{params, Connection};
 
 const DEFAULT_ROWS: i64 = 1_000_000;
@@ -10,6 +26,7 @@ const DEFAULT_CHUNK_SIZE: i64 = 500;
 const DEFAULT_REPEATS: usize = 5;
 const DB_BROWSER_PREFETCH_SIZE: i64 = 50_000;
 const DB_BROWSER_SOURCE_COMMIT: &str = "6cba47ef";
+const TABLE: &str = "records";
 
 #[derive(Debug)]
 struct Measurement {
@@ -30,25 +47,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_browser_prefetch = arg_i64(4).unwrap_or(DB_BROWSER_PREFETCH_SIZE);
 
     let temp = tempfile::NamedTempFile::new()?;
-    let mut conn = Connection::open(temp.path())?;
-    seed_database(&mut conn, rows)?;
+    {
+        let mut conn = Connection::open(temp.path())?;
+        seed_database(&mut conn, rows)?;
+    }
+
+    // The real open path: read-only, immutable, with the app's PRAGMAs.
+    let state = DbState::new();
+    open_database(&state, temp.path().to_str().expect("temp path is UTF-8"))?;
+    let guard = state.conn.lock();
+    let conn = guard
+        .as_ref()
+        .expect("open_database published a connection");
+    let quoted = quote_ident(TABLE);
+    let alias = rowid_alias(conn, &quoted).expect("a plain rowid table has an addressable rowid");
 
     let target_rows = page_aligned_targets(rows, chunk_size);
 
-    let (boundaries, index_build_ms) = timed(|| build_rowid_boundaries(&conn, chunk_size))?;
+    let generation = state.current_query_generation();
+    let start = Instant::now();
+    let index = build_rowid_index(conn, &state, generation, TABLE, &quoted, alias, chunk_size)
+        .expect("index build must not be cancelled here");
+    let index_build_ms = duration_ms(start.elapsed());
 
     let mut measurements = Vec::new();
     for target_row in target_rows {
         let (db_browser_offset, db_browser_rows) =
             db_browser_window(rows, db_browser_prefetch, target_row);
         let baseline_offset_ms = median_ms(repeats, chunk_size as usize, || {
-            query_offset(&conn, chunk_size, target_row)
+            offset_page(conn, &quoted, chunk_size, target_row)
         })?;
         let db_browser_ms = median_ms(repeats, db_browser_rows as usize, || {
-            query_offset(&conn, db_browser_rows, db_browser_offset)
+            offset_page(conn, &quoted, db_browser_rows, db_browser_offset)
         })?;
         let rowid_ms = median_ms(repeats, chunk_size as usize, || {
-            query_rowid_range(&conn, &boundaries, chunk_size, target_row)
+            rowid_page(
+                conn,
+                &quoted,
+                alias,
+                &index.boundaries,
+                chunk_size,
+                target_row,
+            )
         })?;
         measurements.push(Measurement {
             target_row,
@@ -156,35 +196,39 @@ fn seed_database(conn: &mut Connection, rows: i64) -> rusqlite::Result<()> {
     tx.commit()
 }
 
-fn build_rowid_boundaries(conn: &Connection, chunk_size: i64) -> rusqlite::Result<Vec<i64>> {
-    let mut stmt = conn.prepare("SELECT rowid FROM records ORDER BY rowid ASC")?;
-    let mut rows = stmt.query([])?;
-    let mut boundaries = Vec::new();
-    let mut idx = 0i64;
-
-    while let Some(row) = rows.next()? {
-        if idx % chunk_size == 0 {
-            boundaries.push(row.get(0)?);
-        }
-        idx += 1;
-    }
-
-    Ok(boundaries)
-}
-
-fn query_offset(conn: &Connection, limit: i64, offset: i64) -> rusqlite::Result<usize> {
-    let mut stmt = conn.prepare("SELECT * FROM records LIMIT ? OFFSET ?")?;
-    let col_count = stmt.column_count();
-    let mut rows = stmt.query(params![limit, offset])?;
-    count_rows_and_read(&mut rows, col_count)
-}
-
-fn query_rowid_range(
+/// The shipped OFFSET path, which is what dblitz falls back to for a table with
+/// no addressable rowid - and what every viewer that has no index does for
+/// every page.
+fn offset_page(
     conn: &Connection,
+    quoted_table: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<usize, String> {
+    let result = query_with_offset(
+        conn,
+        quoted_table,
+        "",
+        "",
+        &[],
+        offset,
+        limit,
+        None,
+        Vec::new(),
+    )?;
+    Ok(result.rows.len())
+}
+
+/// The shipped rowid seek: the SQL `rowid_page_sql` generates, run against the
+/// boundaries `build_rowid_index` sampled, read by `collect_rows`.
+fn rowid_page(
+    conn: &Connection,
+    quoted_table: &str,
+    alias: &str,
     boundaries: &[i64],
     limit: i64,
     offset: i64,
-) -> rusqlite::Result<usize> {
+) -> Result<usize, String> {
     debug_assert_eq!(
         offset % limit,
         0,
@@ -194,38 +238,12 @@ fn query_rowid_range(
     let Some(start_rowid) = boundaries.get(chunk) else {
         return Ok(0);
     };
-
-    if let Some(end_rowid) = boundaries.get(chunk + 1) {
-        let mut stmt = conn
-            .prepare("SELECT * FROM records WHERE rowid >= ? AND rowid < ? ORDER BY rowid ASC")?;
-        let col_count = stmt.column_count();
-        let mut rows = stmt.query(params![start_rowid, end_rowid])?;
-        count_rows_and_read(&mut rows, col_count)
-    } else {
-        let mut stmt =
-            conn.prepare("SELECT * FROM records WHERE rowid >= ? ORDER BY rowid ASC LIMIT ?")?;
-        let col_count = stmt.column_count();
-        let mut rows = stmt.query(params![start_rowid, limit])?;
-        count_rows_and_read(&mut rows, col_count)
-    }
-}
-
-fn count_rows_and_read(rows: &mut rusqlite::Rows<'_>, col_count: usize) -> rusqlite::Result<usize> {
-    let mut count = 0usize;
-    let mut payload_len = 0usize;
-    while let Some(row) = rows.next()? {
-        for col in 0..col_count {
-            payload_len += match row.get_ref(col)? {
-                ValueRef::Null => 0,
-                ValueRef::Integer(_) => size_of::<i64>(),
-                ValueRef::Real(_) => size_of::<f64>(),
-                ValueRef::Text(value) | ValueRef::Blob(value) => value.len(),
-            };
-        }
-        count += 1;
-    }
-    black_box(payload_len);
-    Ok(count)
+    let has_next = boundaries.get(chunk + 1).is_some();
+    let sql = rowid_page_sql(quoted_table, alias, has_next);
+    let second: i64 = boundaries.get(chunk + 1).copied().unwrap_or(limit);
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = collect_rows(&mut stmt, &[start_rowid, &second])?;
+    Ok(rows.len())
 }
 
 fn median_ms<F>(
@@ -234,7 +252,7 @@ fn median_ms<F>(
     mut f: F,
 ) -> Result<f64, Box<dyn std::error::Error>>
 where
-    F: FnMut() -> rusqlite::Result<usize>,
+    F: FnMut() -> Result<usize, String>,
 {
     let mut durations = Vec::with_capacity(repeats);
     for _ in 0..repeats {
@@ -245,15 +263,6 @@ where
     }
     durations.sort();
     Ok(duration_ms(durations[durations.len() / 2]))
-}
-
-fn timed<F, T>(f: F) -> Result<(T, f64), Box<dyn std::error::Error>>
-where
-    F: FnOnce() -> rusqlite::Result<T>,
-{
-    let start = Instant::now();
-    let value = f()?;
-    Ok((value, duration_ms(start.elapsed())))
 }
 
 fn duration_ms(duration: Duration) -> f64 {

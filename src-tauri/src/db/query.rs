@@ -8,15 +8,50 @@ use super::schema::table_columns;
 use super::types::{
     ColumnFilter, DbState, OrderKey, OrderedRows, QueryRequest, QueryResult, RowidIndex,
 };
-use super::util::{collect_rows, quote_ident, read_row, StrErr};
+use super::util::{collect_rows, quote_ident, read_row, read_row_from, render_real, StrErr};
 
-/// The columns `SELECT *` returns for this table, in its order.
+/// Upper bound on how many chunk boundaries or rowids a single `Vec` is
+/// pre-sized for.
 ///
-/// Delegates to [`table_columns`] rather than reading `PRAGMA table_info`
-/// here: that PRAGMA omits generated columns, which breaks the positional
-/// agreement every regex filter depends on. See `TableColumns::visible`.
-fn get_column_names(conn: &Connection, quoted_table: &str) -> Result<Vec<String>, String> {
-    Ok(table_columns(conn, quoted_table)?.visible)
+/// The count that drives the pre-size comes from `COUNT(*)` on a file dblitz
+/// did not write, so it is attacker-controllable in the only sense that
+/// matters here: a crafted header can make it enormous, and
+/// `Vec::with_capacity` would try to reserve that much before reading a single
+/// row. Capping it costs nothing real - 1M boundaries is 8 MB, and a table
+/// needing more than that reallocates a few times, which is the behaviour
+/// every un-hinted `Vec` already has.
+const MAX_PREALLOC: usize = 1 << 20;
+
+/// `Vec::with_capacity` from an untrusted row count, bounded.
+fn preallocated<T>(estimated_len: i64) -> Vec<T> {
+    Vec::with_capacity(estimated_len.clamp(0, MAX_PREALLOC as i64) as usize)
+}
+
+/// The table's unfiltered `COUNT(*)`, from cache when it has been taken before.
+///
+/// The connection is `?immutable=1`, so a count cannot go stale for as long as
+/// it is cached - the whole file is a frozen snapshot. That is what makes this
+/// safe, and it is the only reason a viewer may cache a row count at all.
+/// Seeded at open by `open_database` from the counts it already took, so the
+/// first browse of a table normally finds it here.
+pub(super) fn cached_total_rows(
+    conn: &Connection,
+    state: &DbState,
+    table: &str,
+    quoted_table: &str,
+) -> Result<i64, String> {
+    if let Some(count) = state.table_counts.lock().get(table) {
+        return Ok(*count);
+    }
+    let total: i64 = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {}", quoted_table),
+            [],
+            |row| row.get(0),
+        )
+        .str_err()?;
+    state.table_counts.lock().insert(table.to_string(), total);
+    Ok(total)
 }
 
 /// Determine which SQLite rowid alias (`rowid`, `_rowid_`, `oid`) safely
@@ -49,15 +84,26 @@ fn get_column_names(conn: &Connection, quoted_table: &str) -> Result<Vec<String>
 /// string literal (a legacy compatibility quirk), which would make
 /// `SELECT "rowid" FROM t` "succeed" on a WITHOUT ROWID table by silently
 /// returning the literal string `rowid` instead of erroring.
-pub(super) fn rowid_alias(conn: &Connection, quoted_table: &str) -> Option<&'static str> {
+pub fn rowid_alias(conn: &Connection, quoted_table: &str) -> Option<&'static str> {
+    rowid_alias_for(
+        conn,
+        quoted_table,
+        &table_columns(conn, quoted_table).ok()?.declared,
+    )
+}
+
+/// [`rowid_alias`] for a caller that has already read the table's declared
+/// column names. `query_table` has: it reads `table_columns` once per request
+/// for the column list the grid needs, and re-reading the PRAGMA here made that
+/// twice per scroll chunk for an answer that cannot have changed in between.
+pub(super) fn rowid_alias_for(
+    conn: &Connection,
+    quoted_table: &str,
+    declared: &[String],
+) -> Option<&'static str> {
     const ALIASES: [&str; 3] = ["rowid", "_rowid_", "oid"];
 
-    let user_columns: HashSet<String> = table_columns(conn, quoted_table)
-        .ok()?
-        .declared
-        .into_iter()
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
+    let user_columns: HashSet<String> = declared.iter().map(|c| c.to_ascii_lowercase()).collect();
 
     ALIASES.into_iter().find(|alias| {
         !user_columns.contains(*alias)
@@ -73,7 +119,7 @@ pub(super) fn rowid_alias(conn: &Connection, quoted_table: &str) -> Option<&'sta
 /// placeholders bind (start_rid, end_rid) or (start_rid, limit) accordingly.
 /// Shared by the live query path and the debug benchmark so the generated SQL
 /// can't drift between the thing measured and the thing shipped.
-pub(super) fn rowid_page_sql(quoted_table: &str, alias: &str, has_next_boundary: bool) -> String {
+pub fn rowid_page_sql(quoted_table: &str, alias: &str, has_next_boundary: bool) -> String {
     if has_next_boundary {
         format!(
             "SELECT * FROM {table} WHERE {alias} >= ? AND {alias} < ? ORDER BY {alias} ASC",
@@ -91,21 +137,16 @@ pub(super) fn rowid_page_sql(quoted_table: &str, alias: &str, has_next_boundary:
 
 /// Build a sparse rowid index for a table: sample the rowid at every chunk_size boundary.
 /// This turns OFFSET-based queries into O(log n) rowid seeks.
-pub(super) fn build_rowid_index(
+pub fn build_rowid_index(
     conn: &Connection,
     state: &DbState,
     generation: u64,
+    table: &str,
     quoted_table: &str,
     alias: &str,
     chunk_size: i64,
 ) -> Option<RowidIndex> {
-    let total_rows: i64 = conn
-        .query_row(
-            &format!("SELECT COUNT(*) FROM {}", quoted_table),
-            [],
-            |row| row.get(0),
-        )
-        .ok()?;
+    let total_rows = cached_total_rows(conn, state, table, quoted_table).ok()?;
 
     let mut stmt = conn
         .prepare(&format!(
@@ -116,7 +157,7 @@ pub(super) fn build_rowid_index(
         .ok()?;
     let mut rows_iter = stmt.query([]).ok()?;
 
-    let mut boundaries: Vec<i64> = Vec::with_capacity((total_rows / chunk_size + 1) as usize);
+    let mut boundaries: Vec<i64> = preallocated(total_rows / chunk_size + 1);
     let mut idx = 0i64;
     // Match `next()` explicitly rather than `while let Ok(Some(..))`: the latter
     // treats an `Err` (SQLITE_INTERRUPT from a cancel, SQLITE_CORRUPT mid-scan)
@@ -134,8 +175,23 @@ pub(super) fn build_rowid_index(
                     return None;
                 }
                 if idx % chunk_size == 0 {
-                    if let Ok(rid) = row.get::<_, i64>(0) {
-                        boundaries.push(rid);
+                    // A boundary that fails to read must abandon the build, not
+                    // be skipped: `boundaries[k]` IS chunk k's starting rowid,
+                    // so dropping one shifts every chunk after it by a page.
+                    // The user would scroll to row 500,000 and be shown row
+                    // 500,500's data, with nothing anywhere reporting an error.
+                    // Same reasoning as the `Err` arm below - cache nothing,
+                    // let the caller rebuild.
+                    match row.get::<_, i64>(0) {
+                        Ok(rid) => boundaries.push(rid),
+                        Err(e) => {
+                            tracing::warn!(
+                                table = %quoted_table,
+                                error = %e,
+                                "rowid index build read a non-integer boundary; not caching a shifted index"
+                            );
+                            return None;
+                        }
                     }
                 }
                 idx += 1;
@@ -157,6 +213,97 @@ pub(super) fn build_rowid_index(
         total_rows,
         chunk_size,
     })
+}
+
+/// Test one compiled regex against one cell, without materializing the cell.
+///
+/// Reads through `get_ref`, so a TEXT cell is matched over the bytes SQLite
+/// already holds - no `String` per cell, per column, per row. On a 5M-row scan
+/// that allocation was most of the cost.
+///
+/// Three semantics, each chosen against a defect in what came before:
+///   - **NULL matches the empty string.** The grid renders NULL as a blank
+///     cell, so `^$` finding nothing was indistinguishable from a bug; it now
+///     finds exactly the blanks.
+///   - **A BLOB never matches.** Cells used to be tested against the grid's
+///     `[BLOB 1234 bytes]` placeholder, so the pattern `bytes` matched every
+///     BLOB row in the table, and `\d+` matched by their sizes. Neither is data
+///     the user can see or search for.
+///   - **Numbers match their rendered text**, the same text the grid shows
+///     (see `render_real`), so a regex on a numeric column tests what the user
+///     is looking at.
+fn cell_matches_regex(row: &rusqlite::Row, index: usize, regex: &Regex) -> bool {
+    use rusqlite::types::ValueRef;
+    match row.get_ref(index) {
+        Ok(ValueRef::Null) => regex.is_match(""),
+        Ok(ValueRef::Text(bytes)) => match std::str::from_utf8(bytes) {
+            Ok(text) => regex.is_match(text),
+            // Invalid UTF-8 in a TEXT cell: match what the grid would display.
+            Err(_) => regex.is_match(&String::from_utf8_lossy(bytes)),
+        },
+        Ok(ValueRef::Integer(n)) => regex.is_match(&n.to_string()),
+        Ok(ValueRef::Real(f)) => regex.is_match(&render_real(f)),
+        Ok(ValueRef::Blob(_)) => false,
+        Err(_) => false,
+    }
+}
+
+/// Every regex matches its cell. `filters` indexes THIS statement's columns,
+/// which is not always the table's column order - see
+/// [`project_regex_columns`].
+fn row_matches_regexes(row: &rusqlite::Row, filters: &[(usize, Regex)]) -> bool {
+    filters
+        .iter()
+        .all(|(index, regex)| cell_matches_regex(row, *index, regex))
+}
+
+/// The SQL projection a regex scan needs, and the filter list rewritten against
+/// it.
+///
+/// A regex is evaluated in Rust, so the scan has to carry the values - but only
+/// the values some pattern is actually tested against. It used to select
+/// `{alias}, *` and convert every column of every row to a `String` to test one
+/// of them: 12 allocations per row on the benchmark table, 11 of them thrown
+/// away, and one of those a full copy of a BLOB. Projecting `{alias}` plus the
+/// filtered columns, and matching through `get_ref` (see
+/// [`cell_matches_regex`]), makes the scan read what it needs and nothing else:
+/// measured on a 5M-row table, one pattern on one TEXT column, 3.25 s -> 0.32 s.
+///
+/// Returns the column list to interpolate after the alias, and the filters
+/// re-indexed to their position in that list (offset by 1 for the alias).
+/// Duplicate columns - two patterns on one column - are projected once.
+fn project_regex_columns(
+    columns: &[String],
+    regex_filters: &[(usize, Regex)],
+) -> Result<(String, Vec<(usize, Regex)>), String> {
+    let mut projected: Vec<&String> = Vec::new();
+    let mut rewritten: Vec<(usize, Regex)> = Vec::with_capacity(regex_filters.len());
+    for (column_index, regex) in regex_filters {
+        // An index `build_where_clause` produced against this same column list
+        // cannot be out of range, and the error is unreachable today. It is an
+        // error rather than a skip because skipping one column would leave the
+        // projection and the rewritten indices disagreeing about which column
+        // is which - the exact silent mis-match this function exists to
+        // prevent, arriving through the back door.
+        let name = columns.get(*column_index).ok_or_else(|| {
+            format!("Regex filter names column {column_index}, which this table does not have")
+        })?;
+        let position = match projected.iter().position(|c| *c == name) {
+            Some(position) => position,
+            None => {
+                projected.push(name);
+                projected.len() - 1
+            }
+        };
+        // +1: the scan selects the rowid alias first.
+        rewritten.push((position + 1, regex.clone()));
+    }
+    let list = projected
+        .iter()
+        .map(|name| quote_ident(name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok((list, rewritten))
 }
 
 /// Full-scan fallback for regex-filtered views on tables the ordered-rowid
@@ -198,17 +345,11 @@ fn query_with_regex_filter(
         if state.query_generation.load(Ordering::Relaxed) != generation {
             return Err("Query cancelled by a newer request".to_string());
         }
-        let values = read_row(row, col_count);
-        let matches = regex_filters.iter().all(|(idx, re)| {
-            values
-                .get(*idx)
-                .and_then(|v| v.as_ref())
-                .map(|s| re.is_match(s))
-                .unwrap_or(false)
-        });
-        if matches {
+        // This scan is a bare `SELECT *`, so a filter's column index addresses
+        // the statement's columns directly - no projection to remap.
+        if row_matches_regexes(row, regex_filters) {
             if matched >= offset && rows.len() < limit as usize {
-                rows.push(values);
+                rows.push(read_row(row, col_count));
             }
             matched += 1;
         }
@@ -244,7 +385,46 @@ fn query_with_rowid_index(
         indexes.remove(table);
     }
     if !indexes.contains_key(table) {
-        if let Some(idx) = build_rowid_index(conn, state, generation, quoted_table, alias, limit) {
+        // The first chunk does not need the index and must not wait for it.
+        // `boundaries[0]` is the table's lowest rowid, which is exactly where an
+        // ordered scan starts anyway, so chunk 0 is a plain `LIMIT` - while
+        // building the index means reading every rowid in the table first,
+        // before the user sees a single row of a table they just clicked.
+        // Measured warm on a 5M-row table: 109 ms to count plus 193 ms to scan
+        // the rowids, against 0.22 ms for the page below, with the count coming
+        // from the cache the open already filled. Build the index lazily on the
+        // first request that actually seeks (`offset > 0`), i.e. the first
+        // scroll.
+        //
+        // `ORDER BY {alias} ASC` rather than a bare `LIMIT`: it is free on a
+        // rowid table (that IS the b-tree order, no sorter is used) and it makes
+        // the rows provably the same ones the indexed path serves for chunk 0,
+        // rather than the same ones by convention.
+        if chunk_idx == 0 {
+            drop(indexes);
+            let total_rows = match cached_total_rows(conn, state, table, quoted_table) {
+                Ok(total) => total,
+                Err(e) => return Some(Err(e)),
+            };
+            let sql = format!(
+                "SELECT * FROM {table} ORDER BY {alias} ASC LIMIT ?",
+                table = quoted_table,
+                alias = alias
+            );
+            let result = conn.prepare(&sql).str_err().and_then(|mut stmt| {
+                let rows = collect_rows(&mut stmt, &[&limit])?;
+                Ok(QueryResult {
+                    columns,
+                    rows,
+                    total_rows: Some(total_rows),
+                    offset,
+                })
+            });
+            return Some(result);
+        }
+        if let Some(idx) =
+            build_rowid_index(conn, state, generation, table, quoted_table, alias, limit)
+        {
             indexes.insert(table.to_string(), idx);
         } else if state.query_generation.load(Ordering::Relaxed) != generation {
             return Some(Err("Query cancelled by a newer request".to_string()));
@@ -294,12 +474,13 @@ fn query_with_rowid_index(
 /// newer request bumps the generation mid-build. SQLite materializes a
 /// non-indexed sort on the first `next()`, so cancellation only takes effect
 /// during row collection, not during that initial sort step.
-fn build_ordered_rows(
+pub fn build_ordered_rows(
     conn: &Connection,
     state: &DbState,
     generation: u64,
     sql: &str,
     params: &[String],
+    expected_rows: i64,
 ) -> Result<Option<Vec<i64>>, String> {
     let mut stmt = conn.prepare(sql).str_err()?;
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
@@ -307,7 +488,11 @@ fn build_ordered_rows(
         .map(|param| param as &dyn rusqlite::types::ToSql)
         .collect();
     let mut rows_iter = stmt.query(param_refs.as_slice()).str_err()?;
-    let mut rowids: Vec<i64> = Vec::new();
+    // Pre-sized from the table's own row count where the caller knows it holds
+    // (an unfiltered sort selects every row). Growing a `Vec` by doubling to
+    // 5M i64 ends up holding 67 MB for 40 MB of rowids, and that peak is live
+    // at the same moment SQLite's sorter is at ITS peak.
+    let mut rowids: Vec<i64> = preallocated(expected_rows);
     while let Some(row) = rows_iter.next().str_err()? {
         if state.query_generation.load(Ordering::Relaxed) != generation {
             return Ok(None);
@@ -319,21 +504,21 @@ fn build_ordered_rows(
 
 /// Materialize the rowids of the rows matching every compiled regex, with one
 /// scan. The regex engine is Rust's, not SQLite's, so the predicate can't be
-/// pushed into the WHERE clause and the scan has to carry each row's values
-/// alongside its rowid - hence `SELECT {alias}, *` rather than the bare
-/// `SELECT {alias}` its non-regex twin `build_ordered_rows` uses. Returns
-/// `Ok(None)` if a newer request bumps the generation mid-scan, matching
-/// `build_ordered_rows` so the caller reports cancellation the same way.
+/// pushed into the WHERE clause and the scan has to carry values alongside each
+/// rowid - but only the columns a pattern is tested against, which
+/// [`project_regex_columns`] selects and which `projected_filters` is indexed
+/// against. Returns `Ok(None)` if a newer request bumps the generation
+/// mid-scan, matching `build_ordered_rows` so the caller reports cancellation
+/// the same way.
 fn build_regex_matched_rows(
     conn: &Connection,
     state: &DbState,
     generation: u64,
     sql: &str,
     params: &[String],
-    regex_filters: &[(usize, Regex)],
+    projected_filters: &[(usize, Regex)],
 ) -> Result<Option<Vec<i64>>, String> {
     let mut stmt = conn.prepare(sql).str_err()?;
-    let col_count = stmt.column_count();
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
         .iter()
         .map(|param| param as &dyn rusqlite::types::ToSql)
@@ -344,21 +529,7 @@ fn build_regex_matched_rows(
         if state.query_generation.load(Ordering::Relaxed) != generation {
             return Ok(None);
         }
-        let values = read_row(row, col_count);
-        // `regex_filters` indexes the table's own column list, but the leading
-        // `{alias}` in this scan shifts every table column one place right -
-        // the same offset `fetch_rows_by_rowids` undoes when it drops index 0.
-        // Without the +1 each filter would test its left-hand neighbour, which
-        // silently returns a plausible-looking wrong match set rather than an
-        // error.
-        let matches = regex_filters.iter().all(|(idx, re)| {
-            values
-                .get(idx + 1)
-                .and_then(|v| v.as_ref())
-                .map(|s| re.is_match(s))
-                .unwrap_or(false)
-        });
-        if matches {
+        if row_matches_regexes(row, projected_filters) {
             rowids.push(row.get(0).str_err()?);
         }
     }
@@ -368,7 +539,7 @@ fn build_regex_matched_rows(
 /// Fetch the given rowids and return their rows in the requested order.
 /// `WHERE rowid IN (...)` doesn't preserve order, so we index by rowid and
 /// re-emit by the caller's sequence.
-fn fetch_rows_by_rowids(
+pub fn fetch_rows_by_rowids(
     conn: &Connection,
     quoted_table: &str,
     alias: &str,
@@ -408,10 +579,11 @@ fn fetch_rows_by_rowids(
         let mut rows_iter = stmt.query(params.as_slice()).str_err()?;
         while let Some(row) = rows_iter.next().str_err()? {
             let rid: i64 = row.get(0).str_err()?;
-            // read_row includes the leading rowid at index 0; drop it so the
-            // emitted row aligns with the table's declared columns.
-            let full = read_row(row, col_count);
-            by_rowid.insert(rid, full[1..].to_vec());
+            // Read from index 1: the leading rowid is not one of the table's
+            // columns. Reading the whole row and slicing `[1..].to_vec()`
+            // afterwards cloned every cell of every row on every page - the
+            // slice borrows, so the copy was of the Strings themselves.
+            by_rowid.insert(rid, read_row_from(row, 1, col_count));
         }
     }
 
@@ -463,16 +635,30 @@ fn query_with_ordered_rows(
             .map(|(idx, re)| (*idx, re.as_str().to_string()))
             .collect(),
     };
-    // A regex view has to read every column to test the pattern in Rust; a
-    // plain one only ever needs the rowid, so it stays on the narrower scan.
-    let sql = format!(
-        "SELECT {alias}{extra} FROM {table}{where}{order}",
-        alias = context.alias,
-        extra = if regex_filters.is_empty() { "" } else { ", *" },
-        table = context.quoted_table,
-        where = key.where_clause,
-        order = key.order_clause,
-    );
+    // A regex view has to carry the columns its patterns test, because the
+    // matching happens in Rust; a plain one only ever needs the rowid, so it
+    // stays on the narrower scan. The projection is the filtered columns only -
+    // `SELECT {alias}, *` read (and converted to `String`) every column of every
+    // row to test one of them.
+    let (projection, projected_filters) = project_regex_columns(&context.columns, regex_filters)?;
+    let sql = if regex_filters.is_empty() {
+        format!(
+            "SELECT {alias} FROM {table}{where}{order}",
+            alias = context.alias,
+            table = context.quoted_table,
+            where = key.where_clause,
+            order = key.order_clause,
+        )
+    } else {
+        format!(
+            "SELECT {alias}, {projection} FROM {table}{where}{order}",
+            alias = context.alias,
+            projection = projection,
+            table = context.quoted_table,
+            where = key.where_clause,
+            order = key.order_clause,
+        )
+    };
 
     let mut orders = context.state.ordered_rows.lock();
     let fresh = orders
@@ -480,12 +666,28 @@ fn query_with_ordered_rows(
         .is_some_and(|order| order.key == key);
     if !fresh {
         let built = if regex_filters.is_empty() {
+            // Only an unfiltered sort is guaranteed to return every row, so
+            // that is the only case the vector is pre-sized for; a selective
+            // filter would otherwise reserve the whole table for a handful of
+            // matches.
+            let expected_rows = if where_clause.is_empty() {
+                cached_total_rows(
+                    context.conn,
+                    context.state,
+                    context.table,
+                    context.quoted_table,
+                )
+                .unwrap_or(0)
+            } else {
+                0
+            };
             build_ordered_rows(
                 context.conn,
                 context.state,
                 context.generation,
                 &sql,
                 params,
+                expected_rows,
             )?
         } else {
             build_regex_matched_rows(
@@ -494,7 +696,7 @@ fn query_with_ordered_rows(
                 context.generation,
                 &sql,
                 params,
-                regex_filters,
+                &projected_filters,
             )?
         };
         let rowids = built.ok_or_else(|| "Query cancelled by a newer request".to_string())?;
@@ -531,7 +733,7 @@ fn query_with_ordered_rows(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn query_with_offset(
+pub fn query_with_offset(
     conn: &Connection,
     quoted_table: &str,
     where_clause: &str,
@@ -592,13 +794,19 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
     let offset = req.offset;
     let limit = req.limit;
     let quoted_table = quote_ident(table);
-    let columns = get_column_names(conn, &quoted_table)?;
+    // One `PRAGMA table_xinfo` per request, not two: the column list the grid
+    // gets, the declared types the filter builder needs, and the shadow check
+    // `rowid_alias` does all come out of this single read. It used to be read
+    // again inside `rowid_alias`, on every scroll chunk, for an answer that
+    // cannot change while the file is open.
+    let table_columns = table_columns(conn, &quoted_table)?;
+    let columns = table_columns.visible.clone();
 
     let WhereResult {
         clause: where_clause,
         params,
         regex_filters,
-    } = build_where_clause(&columns, &req.filters, &req.global_filter)?;
+    } = build_where_clause(&table_columns.info, &req.filters, &req.global_filter)?;
 
     let valid_sort_column = req
         .sort_column
@@ -618,7 +826,7 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
     // this table's real rowid - every fast path below needs it, and a table
     // with no usable alias (WITHOUT ROWID, or every alias shadowed by a user
     // column) must fall through to a scan-based path either way.
-    let alias = rowid_alias(conn, &quoted_table);
+    let alias = rowid_alias_for(conn, &quoted_table, &table_columns.declared);
 
     if !regex_filters.is_empty() {
         // Regex is evaluated in Rust and can't be pushed into SQL, but the
@@ -707,13 +915,12 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
             }
         }
 
-        let total_rows: i64 = conn
-            .query_row(
-                &format!("SELECT COUNT(*) FROM {}", quoted_table),
-                [],
-                |row| row.get(0),
-            )
-            .str_err()?;
+        // Unfiltered, and no usable rowid alias (WITHOUT ROWID, or a view): the
+        // page comes from LIMIT/OFFSET and the total from the per-session count
+        // cache. It used to re-run `COUNT(*)` on every single scroll chunk -
+        // 109 ms per page on a warm 5M-row table, for a number that cannot
+        // change while the file is open.
+        let total_rows = cached_total_rows(conn, state, table, &quoted_table)?;
 
         return query_with_offset(
             conn,
@@ -776,15 +983,21 @@ pub fn count_rows(
     let guard = state.conn.lock();
     let conn = guard.as_ref().ok_or("No database open")?;
     let quoted_table = quote_ident(table);
-    let columns = get_column_names(conn, &quoted_table)?;
+    let columns = table_columns(conn, &quoted_table)?;
 
     let WhereResult {
         clause: where_clause,
         params,
         regex_filters,
-    } = build_where_clause(&columns, filters, global_filter)?;
+    } = build_where_clause(&columns.info, filters, global_filter)?;
     if !regex_filters.is_empty() {
         return Err("count_rows does not support regex filters".to_string());
+    }
+
+    // An unfiltered count is the same number `query_table` and the open-time
+    // sweep already took, and the file cannot change under this connection.
+    if where_clause.is_empty() {
+        return cached_total_rows(conn, state, table, &quoted_table);
     }
 
     let sql = format!("SELECT COUNT(*) FROM {}{}", quoted_table, where_clause);
@@ -1822,6 +2035,351 @@ mod tests {
         assert!(err.contains("regex"), "got: {err}");
     }
 
+    fn page(table: &str, offset: i64, limit: i64) -> QueryRequest {
+        QueryRequest {
+            table: table.to_string(),
+            offset,
+            limit,
+            filters: vec![],
+            global_filter: String::new(),
+            sort_column: None,
+            sort_asc: true,
+        }
+    }
+
+    #[test]
+    fn first_chunk_is_served_without_building_the_rowid_index() {
+        // Opening a table used to read every rowid in it before showing the
+        // first row - 107 ms on 5M rows, 3.6 s at 30M - to compute an index
+        // whose only relevant entry, `boundaries[0]`, is the lowest rowid: where
+        // an ordered scan starts anyway. Chunk 0 must therefore serve from a
+        // plain LIMIT and leave the index unbuilt, and the first chunk that
+        // actually seeks must build it.
+        let dir = TempDir::new().unwrap();
+        let path = temp_db_with_items(&dir, "lazy.sqlite", 1_500);
+        let state = DbState::new();
+        open_database(&state, path.to_str().unwrap()).unwrap();
+
+        let first = query_table(&state, &page("items", 0, 500)).unwrap();
+
+        assert!(
+            state.rowid_indexes.lock().is_empty(),
+            "the rowid index must not be built to serve the first chunk"
+        );
+        assert_eq!(
+            first.total_rows,
+            Some(1_500),
+            "the total must still be right"
+        );
+        assert_eq!(first.rows.len(), 500);
+        assert_eq!(first.rows[0][1].as_deref(), Some("lazy.sqlite-0"));
+        assert_eq!(first.rows[499][1].as_deref(), Some("lazy.sqlite-499"));
+
+        // A deep chunk builds the index...
+        let deep = query_table(&state, &page("items", 1_000, 500)).unwrap();
+        assert!(
+            state.rowid_indexes.lock().contains_key("items"),
+            "a seeking chunk must build the index it needs"
+        );
+        assert_eq!(deep.rows[0][1].as_deref(), Some("lazy.sqlite-1000"));
+
+        // ...and chunk 0 served from the index afterwards must be byte-for-byte
+        // what the LIMIT path served. This is the equivalence the fast path
+        // rests on, so it is asserted rather than assumed.
+        let indexed_first = query_table(&state, &page("items", 0, 500)).unwrap();
+        assert_eq!(indexed_first.rows, first.rows);
+        assert_eq!(indexed_first.total_rows, first.total_rows);
+        assert_eq!(indexed_first.columns, first.columns);
+
+        crate::db::close_database(&state);
+    }
+
+    #[test]
+    fn open_seeds_the_row_count_cache_and_pages_read_it() {
+        // The count cache is only correct because the connection is
+        // `?immutable=1`. Two halves: `open_database` seeds it from the counts
+        // its own table sweep took, and the paging path READS it instead of
+        // counting again - which is asserted by poisoning the cache and
+        // watching the poisoned value come back, since a page that recounted
+        // would report the true 1,500.
+        let dir = TempDir::new().unwrap();
+        let path = temp_db_with_items(&dir, "counted.sqlite", 1_500);
+        let state = DbState::new();
+        open_database(&state, path.to_str().unwrap()).unwrap();
+
+        assert_eq!(
+            state.table_counts.lock().get("items").copied(),
+            Some(1_500),
+            "the open-time sweep already counted this table; the count must be kept"
+        );
+
+        state.table_counts.lock().insert("items".to_string(), 4_242);
+        assert_eq!(
+            query_table(&state, &page("items", 0, 10))
+                .unwrap()
+                .total_rows,
+            Some(4_242),
+            "chunk 0 must take its total from the cache, not re-count"
+        );
+        assert_eq!(
+            count_rows(&state, "items", &[], "").unwrap(),
+            4_242,
+            "an unfiltered count_rows must take the cached number too"
+        );
+
+        crate::db::close_database(&state);
+    }
+
+    #[test]
+    fn a_view_pages_without_recounting_every_chunk() {
+        // A view has no rowid alias, so every page goes through the OFFSET
+        // fallback - which re-ran `COUNT(*)` for each one: 109 ms per scroll
+        // chunk on a warm 5M-row table, for a number that cannot change while
+        // the file is open. The count is taken once and cached; poisoning it
+        // proves the second page did not take it again.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("view.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);
+                 CREATE VIEW v AS SELECT * FROM items;",
+            )
+            .unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            for idx in 0..600 {
+                tx.execute(
+                    "INSERT INTO items (name) VALUES (?)",
+                    params![format!("v-{idx}")],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let state = DbState::new();
+        open_database(&state, path.to_str().unwrap()).unwrap();
+
+        let first = query_table(&state, &page("v", 0, 500)).unwrap();
+        assert_eq!(first.total_rows, Some(600));
+        assert_eq!(first.rows.len(), 500);
+
+        state.table_counts.lock().insert("v".to_string(), 4_242);
+        let second = query_table(&state, &page("v", 500, 500)).unwrap();
+        assert_eq!(
+            second.total_rows,
+            Some(4_242),
+            "the second page must reuse the cached count rather than counting again"
+        );
+        assert_eq!(second.rows.len(), 100);
+
+        crate::db::close_database(&state);
+    }
+
+    #[test]
+    fn one_column_pragma_per_query() {
+        // `table_columns` used to run twice per scroll chunk: once for the grid's
+        // column list and once inside `rowid_alias`. Counted through an
+        // authorizer, which is where a PRAGMA becomes observable. (Installing one
+        // here replaces the read-only authorizer for this connection only, in
+        // this test only.)
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use std::sync::Arc;
+
+        let dir = TempDir::new().unwrap();
+        let path = temp_db_with_items(&dir, "pragma.sqlite", 20);
+        let state = DbState::new();
+        open_database(&state, path.to_str().unwrap()).unwrap();
+
+        let pragmas = Arc::new(AtomicUsize::new(0));
+        {
+            let guard = state.conn.lock();
+            let conn = guard.as_ref().unwrap();
+            let counter = Arc::clone(&pragmas);
+            conn.authorizer(Some(
+                move |ctx: rusqlite::hooks::AuthContext<'_>| -> rusqlite::hooks::Authorization {
+                    if let rusqlite::hooks::AuthAction::Pragma { pragma_name, .. } = ctx.action {
+                        if pragma_name.eq_ignore_ascii_case("table_xinfo") {
+                            counter.fetch_add(1, AtomicOrdering::Relaxed);
+                        }
+                    }
+                    rusqlite::hooks::Authorization::Allow
+                },
+            ))
+            .unwrap();
+        }
+
+        query_table(&state, &page("items", 0, 10)).unwrap();
+
+        assert_eq!(
+            pragmas.load(AtomicOrdering::Relaxed),
+            1,
+            "one query_table must read the column PRAGMA exactly once"
+        );
+
+        crate::db::close_database(&state);
+    }
+
+    #[test]
+    fn regex_filter_matches_the_named_column_when_it_is_not_the_first() {
+        // The scan projects only the filtered columns now, so every filter's
+        // index has to be rewritten against that projection. Get it wrong and
+        // the pattern tests a neighbouring column, which returns a
+        // plausible-looking wrong match set rather than an error. The values are
+        // chosen so a shift in either direction changes the answer.
+        let state = state_with_memory_db(
+            "CREATE TABLE t (a TEXT, b TEXT, c TEXT);
+             INSERT INTO t VALUES ('target', 'x', 'y'), ('x', 'target', 'y'), ('x', 'y', 'target');",
+        );
+
+        for (column, expected_row) in [("a", 0usize), ("b", 1), ("c", 2)] {
+            let mut request = page("t", 0, 10);
+            request.filters = vec![regex_filter(column, "^target$")];
+            let result = query_table(&state, &request).unwrap();
+            assert_eq!(
+                result.rows.len(),
+                1,
+                "regex on column {column} must match exactly one row"
+            );
+            assert_eq!(
+                result.rows[0][expected_row].as_deref(),
+                Some("target"),
+                "regex on column {column} matched the wrong row"
+            );
+        }
+    }
+
+    #[test]
+    fn two_regex_filters_apply_to_their_own_columns() {
+        // Two filters, and a row that satisfies each one separately but not
+        // both, so a projection that collapsed or mis-ordered the columns shows
+        // up as a wrong row count.
+        let state = state_with_memory_db(
+            "CREATE TABLE t (a TEXT, b TEXT);
+             INSERT INTO t VALUES ('yes', 'yes'), ('yes', 'no'), ('no', 'yes');",
+        );
+        let mut request = page("t", 0, 10);
+        request.filters = vec![regex_filter("a", "^yes$"), regex_filter("b", "^yes$")];
+
+        let result = query_table(&state, &request).unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.total_rows, Some(1));
+
+        // Two patterns on ONE column: the column is projected once and both
+        // patterns must still be tested against it.
+        let mut both_on_a = page("t", 0, 10);
+        both_on_a.filters = vec![regex_filter("a", "^y"), regex_filter("a", "s$")];
+        assert_eq!(query_table(&state, &both_on_a).unwrap().rows.len(), 2);
+    }
+
+    #[test]
+    fn regex_treats_null_as_the_empty_string() {
+        // The grid renders NULL as a blank cell, so `^$` finding nothing was
+        // indistinguishable from a broken filter. A NULL now matches the empty
+        // string - and, the other half of the same rule, does NOT match a
+        // pattern that requires a character.
+        let state = state_with_memory_db(
+            "CREATE TABLE t (a TEXT, b TEXT);
+             INSERT INTO t VALUES (NULL, 'x'), ('', 'y'), ('here', 'z');",
+        );
+
+        let mut empties = page("t", 0, 10);
+        empties.filters = vec![regex_filter("a", "^$")];
+        let result = query_table(&state, &empties).unwrap();
+        assert_eq!(
+            result.rows.len(),
+            2,
+            "^$ must find both the NULL cell and the empty string"
+        );
+
+        let mut any = page("t", 0, 10);
+        any.filters = vec![regex_filter("a", ".")];
+        assert_eq!(
+            query_table(&state, &any).unwrap().rows.len(),
+            1,
+            "a NULL must not match a pattern requiring a character"
+        );
+    }
+
+    #[test]
+    fn regex_never_matches_a_blob() {
+        // BLOB cells used to be tested against the grid's `[BLOB n bytes]`
+        // placeholder, so the pattern `bytes` matched every BLOB row in the
+        // table and `\d+` matched by their sizes. Neither is data the user can
+        // see, let alone search for.
+        let state = state_with_memory_db(
+            "CREATE TABLE t (a);
+             INSERT INTO t VALUES (x'0102030405'), ('bytes'), (42);",
+        );
+
+        for pattern in ["bytes", r"\d+", "BLOB", "."] {
+            let mut request = page("t", 0, 10);
+            request.filters = vec![regex_filter("a", pattern)];
+            let rows = query_table(&state, &request).unwrap().rows;
+            assert!(
+                rows.iter()
+                    .all(|row| row[0].as_deref() != Some("[BLOB 5 bytes]")),
+                "pattern {pattern:?} matched a BLOB through its placeholder text"
+            );
+        }
+
+        // The control: those patterns are not inert - they match the text and
+        // numeric rows, so the assertion above is about BLOBs and not about a
+        // filter that stopped working.
+        let mut text = page("t", 0, 10);
+        text.filters = vec![regex_filter("a", "bytes")];
+        assert_eq!(query_table(&state, &text).unwrap().rows.len(), 1);
+        let mut number = page("t", 0, 10);
+        number.filters = vec![regex_filter("a", r"^\d+$")];
+        assert_eq!(query_table(&state, &number).unwrap().rows.len(), 1);
+    }
+
+    #[test]
+    fn regex_on_a_numeric_column_matches_the_text_the_grid_shows() {
+        // A REAL is rendered `3.0`, not `3` (see `render_real`), and the regex
+        // has to test the same string the user is reading.
+        let state = state_with_memory_db(
+            "CREATE TABLE t (r REAL, i INTEGER);
+             INSERT INTO t VALUES (3.0, 17), (0.5, 18);",
+        );
+
+        let mut real = page("t", 0, 10);
+        real.filters = vec![regex_filter("r", r"^3\.0$")];
+        assert_eq!(query_table(&state, &real).unwrap().rows.len(), 1);
+
+        let mut integer = page("t", 0, 10);
+        integer.filters = vec![regex_filter("i", "^17$")];
+        assert_eq!(query_table(&state, &integer).unwrap().rows.len(), 1);
+    }
+
+    #[test]
+    fn regex_on_an_unknown_column_errors_instead_of_showing_every_row() {
+        // Reaches the same rule as the filters.rs unit test, but through
+        // `query_table`, because the failure it prevents is a UI state: an
+        // unfiltered grid under a filter chip that claims a filter.
+        let state = state_with_memory_db(
+            "CREATE TABLE t (a TEXT);
+             INSERT INTO t VALUES ('x'), ('y');",
+        );
+        let mut request = page("t", 0, 10);
+        request.filters = vec![regex_filter("ghost", "^x$")];
+
+        let err = query_table(&state, &request).unwrap_err();
+
+        assert!(err.contains("no such column: ghost"), "got: {err}");
+    }
+
+    #[test]
+    fn preallocated_bounds_a_crafted_row_count() {
+        // The row count driving the pre-size comes from `COUNT(*)` on a file
+        // dblitz did not write. Reserving what a crafted header claims would
+        // abort the process before a single row is read.
+        assert_eq!(preallocated::<i64>(10).capacity(), 10);
+        assert_eq!(preallocated::<i64>(0).capacity(), 0);
+        assert_eq!(preallocated::<i64>(-5).capacity(), 0);
+        assert_eq!(preallocated::<i64>(i64::MAX).capacity(), MAX_PREALLOC);
+    }
+
     #[test]
     fn rowid_index_build_cancels_when_generation_changes() {
         let state = state_with_memory_db("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);");
@@ -1842,7 +2400,7 @@ mod tests {
         let guard = state.conn.lock();
         let conn = guard.as_ref().unwrap();
 
-        let result = build_rowid_index(conn, &state, 0, "\"items\"", "rowid", 10);
+        let result = build_rowid_index(conn, &state, 0, "items", "\"items\"", "rowid", 10);
 
         assert!(result.is_none());
     }

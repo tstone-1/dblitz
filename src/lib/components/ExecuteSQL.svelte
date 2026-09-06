@@ -13,7 +13,8 @@
   import DataGrid from "./DataGrid.svelte";
   import { selectionColumnTypes, type SelectionData } from "./selectionData";
   import { createDbGenerationReset } from "./dbGenerationReset.svelte";
-  import SqlEditor from "./SqlEditor.svelte";
+  import { createSqlExecution } from "./sqlExecution";
+  import { currentModKeyLabel } from "./platformKeys";
   import { resolveResultColumnColors } from "./sqlTable";
 
   let sql = $state("");
@@ -23,6 +24,27 @@
   let executedSql = $state("");
   let running = $state(false);
   let showHistory = $state(false);
+
+  // CodeMirror is 370 kB of JavaScript — more than two thirds of the client
+  // bundle — and all three tab panels are mounted at startup (they are hidden
+  // with CSS, not unmounted), so a static import made every launch pay for an
+  // editor most sessions never open. It is pulled in on the first activation of
+  // the SQL tab instead; `sqlEditorLoad` is a plain `let` so the import fires
+  // exactly once.
+  let SqlEditorComponent = $state<typeof import("./SqlEditor.svelte").default | null>(null);
+  let sqlEditorLoad: Promise<unknown> | null = null;
+  $effect(() => {
+    if (appState.activeTab !== "sql" || sqlEditorLoad) return;
+    sqlEditorLoad = import("./SqlEditor.svelte").then((module) => {
+      SqlEditorComponent = module.default;
+    });
+  });
+
+  // Platform-correct name for the execute shortcut. The binding itself accepts
+  // both Ctrl+Enter and Cmd+Enter (see sqlEditorExtensions.ts); only the label
+  // has to pick one, and naming Ctrl on a Mac names the combination nobody
+  // presses there.
+  const modKey = currentModKeyLabel();
 
   // Schema for autocomplete: { tableName: [col1, col2, ...] }
   let sqlSchema = $derived(appState.tableColumns);
@@ -59,42 +81,22 @@
     checkDbReset();
   });
 
-  async function executeSql() {
-    // Re-entrancy guard: the CodeMirror Ctrl+Enter keymap calls onexecute
-    // unconditionally, so without this a second Ctrl+Enter (or Enter while the
-    // button is disabled) would fire a concurrent invoke and a duplicate
-    // history entry. Ctrl+Enter while running is simply ignored (not a cancel).
-    if (running) return;
-    const trimmed = sql.trim();
-    if (!trimmed) return;
-
-    running = true;
-    result = null;
-    try {
-      result = await executeSqlCmd(trimmed);
-      executedSql = trimmed;
-
-      appState.sqlHistory = [
-        {
-          sql: trimmed,
-          timestamp: Date.now(),
-          error: !!result.error,
-        },
-        ...appState.sqlHistory.slice(0, 99),
-      ];
+  // The execute action, including its publication guard, lives in
+  // sqlExecution.ts so the "does this answer still belong to the open session?"
+  // rule is testable. Everything reactive stays here and is injected.
+  const executeSql = createSqlExecution({
+    getGeneration: () => appState.dbOpenGeneration,
+    getSql: () => sql,
+    isRunning: () => running,
+    setRunning: (value) => { running = value; },
+    setResult: (value) => { result = value; },
+    setExecutedSql: (value) => { executedSql = value; },
+    executeSql: (statement) => executeSqlCmd(statement),
+    addHistoryEntry: (entry) => {
+      appState.sqlHistory = [entry, ...appState.sqlHistory.slice(0, 99)];
       persistSqlHistory();
-    } catch (e) {
-      result = {
-        columns: [],
-        rows: [],
-        column_types: [],
-        error: String(e),
-        truncated: false,
-      };
-    } finally {
-      running = false;
-    }
-  }
+    },
+  });
 
   async function cancelExecution() {
     // The backend cancel_queries command flips the cancellation token for the
@@ -132,11 +134,12 @@
       data.columnIndices,
       result?.column_types ?? [],
     );
-    await exportToXlsx({
+    const path = await exportToXlsx({
       headers: data.headers,
       rows: data.rows,
       columnTypes,
     });
+    appState.notice = `Excel export written to ${path}`;
   }
 </script>
 
@@ -146,7 +149,7 @@
   <div class="sql-layout">
     <div class="editor-area">
       <div class="editor-header">
-        <span class="hint">Read-only — Ctrl+Enter to execute</span>
+        <span class="hint">Read-only — {modKey}+Enter to execute</span>
         <button
           onclick={() => (showHistory = !showHistory)}
           class="history-btn"
@@ -163,12 +166,16 @@
           </button>
         {/if}
       </div>
-      <SqlEditor
-        bind:value={sql}
-        onexecute={executeSql}
-        schema={sqlSchema}
-        placeholder="Enter a SELECT query (read-only)..."
-      />
+      {#if SqlEditorComponent}
+        <SqlEditorComponent
+          bind:value={sql}
+          onexecute={executeSql}
+          schema={sqlSchema}
+          placeholder="Enter a SELECT query (read-only)..."
+        />
+      {:else}
+        <div class="editor-loading">Loading editor...</div>
+      {/if}
     </div>
 
     {#if showHistory}
@@ -272,6 +279,16 @@
     color: var(--text-muted);
     font-size: 11px;
     margin-right: auto;
+  }
+
+  .editor-loading {
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+    height: 120px;
+    color: var(--text-muted);
+    font-size: 12px;
+    border-bottom: 1px solid var(--border-color);
   }
 
   .history-btn {

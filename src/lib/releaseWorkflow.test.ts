@@ -168,3 +168,40 @@ describe("release instructions stage by explicit pathspec", () => {
     expect(blanket).toEqual([]);
   });
 });
+
+describe("workflow jobs are bounded and least-privileged", () => {
+  for (const file of WORKFLOWS) {
+    it(`gives every job in ${file} a timeout`, () => {
+      // Only the `jobs:` section: the `on:` block has two-space keys too
+      // (`push:`, `pull_request:`), and they are not jobs.
+      const text = readText(file).split(/^jobs:$/m)[1] ?? "";
+      const jobs = [...text.matchAll(/^ {2}([a-z][\w-]*):$/gm)].map((m) => m[1]);
+      expect(jobs.length).toBeGreaterThan(0);
+      const jobBlocks = text.split(/^ {2}(?=[a-z][\w-]*:$)/m).slice(1);
+      const untimed = jobBlocks.filter((b) => !/^\s{4}timeout-minutes: \d+$/m.test(b));
+      expect(untimed.map((b) => b.split(":")[0])).toEqual([]);
+    });
+
+    it(`${file} defaults to contents: read`, () => {
+      expect(readText(file)).toMatch(/^permissions:\n {2}contents: read$/m);
+    });
+  }
+
+  it("serializes releases on the workflow, not on the ref", () => {
+    const release = readText(".github/workflows/release.yml");
+    expect(release).toContain("group: ${{ github.workflow }}");
+    expect(release).toContain("cancel-in-progress: false");
+  });
+
+  it("installs Linux deps from the one shared list", () => {
+    // Command lines only: the comment above each install quotes the bad form.
+    const lines = WORKFLOWS.flatMap((f) => readText(f).split("\n")).filter(
+      (l) => !l.trimStart().startsWith("#"),
+    );
+    const installs = lines.filter((l) => /apt-get install/.test(l));
+    expect(installs.length).toBeGreaterThan(0);
+    const inline = installs.filter((l) => !/apt-get install -y \$deps\b/.test(l));
+    expect(inline).toEqual([]);
+    expect(readText(".github/tauri-linux-deps.txt")).toContain("libayatana-appindicator3-dev");
+  });
+});

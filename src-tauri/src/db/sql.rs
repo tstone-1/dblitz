@@ -80,7 +80,14 @@ fn is_attach_or_detach(sql: &str) -> bool {
 }
 
 pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
-    let guard = state.conn.lock();
+    // The SQL tab runs on the SECONDARY connection, not the Browse Data one.
+    // Every command used to share one connection, so an ad-hoc `SELECT 1`
+    // issued while a sort or a global filter was paging queued behind it for
+    // the whole of that page - measured at 736-748 ms on an ~800 ms 5M-row
+    // sort, against 19-39 us here. Both
+    // connections are the same frozen `immutable=1` snapshot with the same
+    // authorizer, so this changes nothing a query can observe.
+    let guard = state.aux_conn.lock();
     let conn = match guard.as_ref() {
         Some(c) => c,
         None => return SqlResult::error("No database open".to_string()),
@@ -416,11 +423,50 @@ mod tests {
 
     #[test]
     fn execute_sql_rejects_write_pragma() {
-        // `journal_mode=wal` requires writing to the database header. The
-        // connection is opened with SQLITE_OPEN_READ_ONLY + immutable=1, so
-        // the write must be refused.
+        // `journal_mode=wal` is refused by the PRAGMA ALLOWLIST, before it ever
+        // reaches the file. This comment used to say it was refused because the
+        // header write fails on a READ_ONLY connection - true of the engine, but
+        // not what actually happens here, and believing it would make the
+        // allowlist look like belt-and-braces rather than the layer doing the
+        // work. What is being tested is that the allowlist covers write
+        // PRAGMAs; `read_only_connection_refuses_a_write_the_allowlist_does_not_stop`
+        // below tests the layer this comment used to credit.
         let (state, path) = setup_temp_db_with_table();
         assert_rejected(&state, "PRAGMA journal_mode = wal");
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_only_connection_refuses_a_write_the_allowlist_does_not_stop() {
+        // The connection layer on its own, with the two layers above it
+        // deliberately bypassed: an INSERT is not a PRAGMA, so the allowlist
+        // has no opinion on it, and going straight to the connection skips
+        // `execute_sql`'s `stmt.readonly()` gate. Until this test existed,
+        // nothing here exercised the connection alone.
+        //
+        // "The connection layer" means both of its halves together, and that is
+        // measured rather than assumed: swapping `SQLITE_OPEN_READ_ONLY` for
+        // `SQLITE_OPEN_READ_WRITE` leaves this test GREEN, and so does removing
+        // `?immutable=1` on its own - each refuses the write by itself. Only
+        // removing both makes it red. So this pins that dblitz cannot write,
+        // not which of the two flags stops it; the flags are not independently
+        // covered and a change to either one needs its own argument.
+        let (state, path) = setup_temp_db_with_table();
+        {
+            let guard = state.conn.lock();
+            let conn = guard.as_ref().unwrap();
+            let err = conn
+                .execute("INSERT INTO users (name) VALUES ('mallory')", [])
+                .expect_err("a READ_ONLY connection must refuse an INSERT");
+            assert!(
+                err.to_string().to_ascii_lowercase().contains("readonly"),
+                "expected a read-only refusal from SQLite, got: {err}"
+            );
+        }
+        // And the write really did not land.
+        let result = execute_sql(&state, "SELECT COUNT(*) FROM users");
+        assert_eq!(result.rows[0][0].as_deref(), Some("1"));
         close_database(&state);
         let _ = std::fs::remove_file(&path);
     }
@@ -550,23 +596,6 @@ mod tests {
     }
 
     #[test]
-    fn execute_sql_allows_read_only_pragma() {
-        // PRAGMA table_info is read-only and must work — it's used by the
-        // schema browser and dblitz's own column lookup.
-        let (state, path) = setup_temp_db_with_table();
-        let result = execute_sql(&state, "PRAGMA table_info(users)");
-        assert!(
-            result.error.is_none(),
-            "read-only PRAGMA should succeed, got: {:?}",
-            result.error
-        );
-        // table_info returns one row per column — users has id + name.
-        assert_eq!(result.rows.len(), 2);
-        close_database(&state);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
     fn opening_database_creates_no_wal_or_shm_sidecars() {
         // The README and module docs promise that opening a database with
         // ?immutable=1 leaves no `-wal` / `-shm` files next to the file.
@@ -615,7 +644,16 @@ mod tests {
     }
 
     #[test]
-    fn cancel_interrupts_long_running_sql() {
+    fn cancel_interrupts_the_secondary_connection() {
+        // `execute_sql` runs on `DbState::aux_conn`, so this is the test that
+        // pins `cancel_queries` interrupting the SECOND interrupt handle:
+        // delete the `aux_interrupt_handle` arm of `cancel_queries` and this
+        // hangs rather than fails, because nothing else can stop the query.
+        // (`cancel_interrupts_the_browse_connection` in `schema.rs` is the
+        // mirror for the first handle. Both are needed - one handle cannot see
+        // a statement running on the other connection, and either arm deleted
+        // on its own leaves the other test green.)
+        //
         // A grinding recursive CTE has no natural end and no per-row cheap
         // point to check the generation counter from outside — the only way
         // to stop it is `InterruptHandle::interrupt()`, which forces the next
@@ -693,17 +731,27 @@ mod tests {
     fn authorizer_allows_introspection_pragma() {
         // The read-only introspection allowlist must still let schema PRAGMAs
         // through - dblitz's own column lookup and the schema browser depend on
-        // PRAGMA table_info reaching the engine.
+        // them reaching the engine. This absorbed a second test
+        // (`execute_sql_allows_read_only_pragma`) that asserted the identical
+        // thing about `table_info` in identical words; two names for one
+        // assertion make the suite look broader than it is.
+        //
+        // Both PRAGMAs dblitz itself issues are checked, not just one:
+        // `table_xinfo` is the one every column list goes through
+        // (`schema::table_columns`), so it is the one whose removal from the
+        // allowlist would break Browse Data.
         let (state, path) = setup_temp_db_with_table();
 
-        let result = execute_sql(&state, "PRAGMA table_info(users)");
-        assert!(
-            result.error.is_none(),
-            "an allowlisted introspection PRAGMA must succeed, got: {:?}",
-            result.error
-        );
-        // table_info returns one row per column - users has id + name.
-        assert_eq!(result.rows.len(), 2);
+        for pragma in ["PRAGMA table_info(users)", "PRAGMA table_xinfo(users)"] {
+            let result = execute_sql(&state, pragma);
+            assert!(
+                result.error.is_none(),
+                "an allowlisted introspection PRAGMA must succeed, got: {:?}",
+                result.error
+            );
+            // One row per column - users has id + name.
+            assert_eq!(result.rows.len(), 2, "unexpected row count from {pragma}");
+        }
 
         close_database(&state);
         let _ = std::fs::remove_file(&path);
@@ -736,6 +784,100 @@ mod tests {
         assert_eq!(result.columns, vec!["id", "name"]);
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][1].as_deref(), Some("alice"));
+
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Run `body` while another thread holds the Browse Data connection's lock
+    /// for `hold`, and return how long `body` took.
+    ///
+    /// The holder signals once it actually owns the lock, so the measurement
+    /// never starts before the contention it is measuring exists.
+    fn time_while_browse_connection_is_held<T>(
+        state: &std::sync::Arc<DbState>,
+        hold: std::time::Duration,
+        body: impl FnOnce() -> T,
+    ) -> (T, std::time::Duration) {
+        use std::sync::mpsc;
+        use std::time::Instant;
+
+        let holder_state = std::sync::Arc::clone(state);
+        let (tx, rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let guard = holder_state.conn.lock();
+            tx.send(()).expect("the test thread is still waiting");
+            std::thread::sleep(hold);
+            drop(guard);
+        });
+        rx.recv()
+            .expect("the holder thread should acquire the lock");
+
+        let started = Instant::now();
+        let out = body();
+        let elapsed = started.elapsed();
+        holder.join().expect("the holder thread should not panic");
+        (out, elapsed)
+    }
+
+    #[test]
+    fn execute_sql_does_not_wait_for_the_browse_connection() {
+        // The finding this fixes, reproduced as a unit test: every command used
+        // to lock `state.conn` for its whole duration, so the SQL tab queued
+        // behind whatever Browse Data was doing. On the 870 MB / 5M-row table a
+        // `SELECT 1` issued during a sort-by-name page waited 704 ms - the
+        // whole sort. Here the wait is manufactured with an explicit lock hold
+        // instead of a 5M-row sort, which is the same contention without the
+        // fixture.
+        //
+        // The control is the second half: `query_table` DOES still wait, so a
+        // green first assertion means "execute_sql uses a different
+        // connection", not "the lock was never held" or "300 ms elapsed
+        // instantly". Route `execute_sql` back to `state.conn` and the first
+        // assertion fails; make the holder not take the lock and the second one
+        // does.
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let (state, path) = setup_temp_db_with_table();
+        let state = Arc::new(state);
+        let hold = Duration::from_millis(300);
+
+        let (sql_result, sql_wait) =
+            time_while_browse_connection_is_held(&state, hold, || execute_sql(&state, "SELECT 1"));
+        assert!(
+            sql_result.error.is_none(),
+            "the SQL tab query should succeed, got: {:?}",
+            sql_result.error
+        );
+        assert!(
+            sql_wait < Duration::from_millis(150),
+            "execute_sql must not queue behind the browse connection; it took {sql_wait:?} \
+             while that lock was held for {hold:?}"
+        );
+
+        let (browse_result, browse_wait) =
+            time_while_browse_connection_is_held(&state, hold, || {
+                crate::db::query_table(
+                    &state,
+                    &crate::db::QueryRequest {
+                        table: "users".to_string(),
+                        offset: 0,
+                        limit: 10,
+                        filters: vec![],
+                        global_filter: String::new(),
+                        sort_column: None,
+                        sort_asc: true,
+                    },
+                )
+            });
+        assert!(browse_result.is_ok(), "the control query should succeed");
+        assert!(
+            browse_wait >= Duration::from_millis(200),
+            "control: query_table shares the browse connection and must wait out the \
+             {hold:?} hold, but returned in {browse_wait:?} - which would mean the holder \
+             never took the lock and the assertion above proved nothing"
+        );
 
         close_database(&state);
         let _ = std::fs::remove_file(&path);

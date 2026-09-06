@@ -1,7 +1,7 @@
 use regex::Regex;
 
-use super::types::ColumnFilter;
-use super::util::quote_ident;
+use super::types::{ColumnFilter, ColumnInfo};
+use super::util::{quote_ident, render_real};
 
 #[derive(Debug)]
 pub(super) struct WhereResult {
@@ -21,8 +21,36 @@ fn contains_pattern(value: &str) -> String {
     format!("%{}%", escape_like(value))
 }
 
+/// Whether a declared type names a BLOB.
+///
+/// SQLite's affinity rules say a column whose declared type contains "BLOB" -
+/// *or* which declares no type at all - has BLOB affinity, i.e. no affinity.
+/// This asks only about the first half, deliberately: the global filter uses it
+/// to decide which columns to leave out of its `LIKE` sweep, and an
+/// undeclared-type column (every expression column of a view, every column of
+/// `CREATE TABLE t(a, b)`) usually holds exactly the text a user is searching
+/// for. Wrongly including a BLOB column costs a slow comparison that could
+/// never match; wrongly excluding a text column silently loses rows, which is
+/// the worse failure, so the two are not treated alike.
+fn declares_blob(declared_type: &str) -> bool {
+    declared_type.to_ascii_uppercase().contains("BLOB")
+}
+
+/// Whether a column has no numeric affinity, so SQLite will not convert a bound
+/// text operand to a number when comparing against it. See the numeric-equality
+/// arm in [`build_where_clause`].
+fn has_no_affinity(declared_type: &str) -> bool {
+    declared_type.trim().is_empty() || declares_blob(declared_type)
+}
+
+/// Build the `WHERE` clause for one view.
+///
+/// `columns` is the table's visible column list with its declared types, in
+/// `SELECT *` order - the types decide two things below that a bare name list
+/// cannot: which columns the global filter may sweep, and whether `=` needs a
+/// numeric arm to reach a numeric cell.
 pub(super) fn build_where_clause(
-    columns: &[String],
+    columns: &[ColumnInfo],
     filters: &[ColumnFilter],
     global_filter: &str,
 ) -> Result<WhereResult, String> {
@@ -31,14 +59,36 @@ pub(super) fn build_where_clause(
     let mut regex_filters: Vec<(usize, Regex)> = Vec::new();
 
     if !global_filter.is_empty() {
-        let or_conditions: Vec<String> = columns
+        // BLOB columns are left out of the sweep. `LIKE` against a BLOB never
+        // matches anything a user typed - SQLite compares it byte-wise against
+        // the pattern, and the grid does not even show the bytes, it shows
+        // `[BLOB n bytes]` - so every one of them was a full column scan
+        // guaranteed to contribute nothing. Measured on the 5M-row / 870 MB
+        // fixture, one BLOB column among twelve: 1.48 s -> 1.30 s per global
+        // filter, about 12%. (The gap between a 12-column sweep and a
+        // single-column one is much larger - 1.48 s against 0.23 s - but the
+        // other eleven columns can match, so only the BLOB is free to drop.)
+        // A column with no declared type stays in (see `declares_blob`).
+        let searchable: Vec<&ColumnInfo> = columns
             .iter()
-            .map(|c| format!("{} LIKE ? ESCAPE '\\'", quote_ident(c)))
+            .filter(|c| !declares_blob(&c.col_type))
             .collect();
-        where_parts.push(format!("({})", or_conditions.join(" OR ")));
-        let pattern = contains_pattern(global_filter);
-        for _ in columns {
-            params.push(pattern.clone());
+        // Every column excluded would leave `()` - an empty group is a syntax
+        // error, and silently dropping the filter would show unfiltered rows as
+        // though they matched. A filter that can match nothing must match
+        // nothing.
+        if searchable.is_empty() {
+            where_parts.push("0".to_string());
+        } else {
+            let or_conditions: Vec<String> = searchable
+                .iter()
+                .map(|c| format!("{} LIKE ? ESCAPE '\\'", quote_ident(&c.name)))
+                .collect();
+            where_parts.push(format!("({})", or_conditions.join(" OR ")));
+            let pattern = contains_pattern(global_filter);
+            for _ in &searchable {
+                params.push(pattern.clone());
+            }
         }
     }
 
@@ -46,14 +96,25 @@ pub(super) fn build_where_clause(
         if f.value.is_empty() {
             continue;
         }
+        let column = columns.iter().position(|c| c.name == f.column);
         if f.is_regex {
-            if let Some(idx) = columns.iter().position(|c| c == &f.column) {
-                match Regex::new(&f.value) {
-                    Ok(re) => regex_filters.push((idx, re)),
-                    Err(e) => return Err(format!("Invalid regex '{}': {}", f.column, e)),
-                }
+            // A regex naming a column this table does not have used to be
+            // dropped in silence, which showed the user an unfiltered grid
+            // under a filter chip that said otherwise. The LIKE path below
+            // interpolates the name and lets SQLite refuse it; a regex never
+            // reaches SQL, so the refusal has to happen here. Same wording
+            // SQLite uses, because to the user it is the same mistake.
+            let Some(idx) = column else {
+                return Err(format!("no such column: {}", f.column));
+            };
+            match Regex::new(&f.value) {
+                Ok(re) => regex_filters.push((idx, re)),
+                Err(e) => return Err(format!("Invalid regex '{}': {}", f.column, e)),
             }
         } else {
+            let no_affinity = column
+                .map(|idx| has_no_affinity(&columns[idx].col_type))
+                .unwrap_or(false);
             let col_escaped = quote_ident(&f.column);
 
             // Split on semicolon for multi-criteria: exclusions=AND, inclusions=OR
@@ -104,7 +165,28 @@ pub(super) fn build_where_clause(
                     and_parts.push(format!("{} < ?", col_escaped));
                     and_params.push(rest.to_string());
                 } else if let Some(rest) = val.strip_prefix('=') {
-                    or_parts.push(format!("{} = ?", col_escaped));
+                    // On a column with no affinity, SQLite compares a bound
+                    // text operand against a numeric cell across storage
+                    // classes, where a number is always less than any text - so
+                    // `=3` against a REAL 3.0 matched nothing at all, and the
+                    // user had no spelling that would. Add a second arm holding
+                    // the value as a number whenever it parses as one. It is
+                    // interpolated rather than bound because the parameter list
+                    // is text-only; `render_real` emits digits, a point, `e`
+                    // and a sign, so nothing else can reach the SQL. Only added
+                    // where plain `=` provably cannot match: on a column with
+                    // numeric affinity SQLite converts the operand itself, and
+                    // an extra OR arm there would cost the index.
+                    match rest.parse::<f64>() {
+                        Ok(number) if no_affinity && number.is_finite() => {
+                            or_parts.push(format!(
+                                "({col} = ? OR {col} = {literal})",
+                                col = col_escaped,
+                                literal = render_real(number)
+                            ));
+                        }
+                        _ => or_parts.push(format!("{} = ?", col_escaped)),
+                    }
                     or_params.push(rest.to_string());
                 } else {
                     or_parts.push(format!("{} LIKE ? ESCAPE '\\'", col_escaped));
@@ -148,8 +230,25 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    fn cols(names: &[&str]) -> Vec<String> {
-        names.iter().map(|s| s.to_string()).collect()
+    /// Columns with no declared type - the shape most of these tests want,
+    /// since the clause they assert does not depend on affinity.
+    fn cols(names: &[&str]) -> Vec<ColumnInfo> {
+        typed_cols(&names.iter().map(|n| (*n, "TEXT")).collect::<Vec<_>>())
+    }
+
+    fn typed_cols(columns: &[(&str, &str)]) -> Vec<ColumnInfo> {
+        columns
+            .iter()
+            .enumerate()
+            .map(|(cid, (name, col_type))| ColumnInfo {
+                cid: cid as i64,
+                name: name.to_string(),
+                col_type: col_type.to_string(),
+                notnull: false,
+                default_value: None,
+                pk: false,
+            })
+            .collect()
     }
 
     fn filter(column: &str, value: &str) -> ColumnFilter {
@@ -390,6 +489,88 @@ mod tests {
              prefixes build_where_clause parses (note: bare \"<>\" is complete on its own \
              and is correctly absent from the frontend list)"
         );
+    }
+
+    #[test]
+    fn global_filter_skips_blob_columns() {
+        // A BLOB column can never match what a user typed - the grid shows it
+        // as `[BLOB n bytes]`, and SQLite compares the pattern against the raw
+        // bytes - so sweeping it was a guaranteed-empty full column scan.
+        // Measured 1.48 s -> 1.30 s on a 5M-row table with one BLOB column of
+        // twelve.
+        let columns = typed_cols(&[("name", "TEXT"), ("payload", "BLOB"), ("n", "INTEGER")]);
+        let r = build_where_clause(&columns, &[], "x").unwrap();
+        assert_eq!(
+            r.clause, " WHERE (\"name\" LIKE ? ESCAPE '\\' OR \"n\" LIKE ? ESCAPE '\\')",
+            "the BLOB column must not appear in the sweep, and the numeric one must"
+        );
+        assert_eq!(
+            r.params,
+            vec!["%x%", "%x%"],
+            "one bound pattern per swept column, not per declared column"
+        );
+    }
+
+    #[test]
+    fn global_filter_keeps_untyped_columns() {
+        // The control for the exclusion above: a column with no declared type
+        // has BLOB affinity by SQLite's rules but usually holds text (every
+        // expression column of a view is like this). Dropping those would lose
+        // rows silently, which is the failure the exclusion must not cause.
+        let columns = typed_cols(&[("a", ""), ("b", "blob")]);
+        let r = build_where_clause(&columns, &[], "x").unwrap();
+        assert_eq!(r.clause, " WHERE (\"a\" LIKE ? ESCAPE '\\')");
+        assert_eq!(r.params, vec!["%x%"]);
+    }
+
+    #[test]
+    fn global_filter_over_only_blob_columns_matches_nothing() {
+        // Excluding every column would otherwise emit `WHERE ()` (a syntax
+        // error) or no clause at all (every row shown as a match under a filter
+        // chip that says otherwise).
+        let columns = typed_cols(&[("a", "BLOB"), ("b", "BLOB")]);
+        let r = build_where_clause(&columns, &[], "x").unwrap();
+        assert_eq!(r.clause, " WHERE 0");
+        assert!(r.params.is_empty());
+    }
+
+    #[test]
+    fn regex_on_an_unknown_column_is_an_error() {
+        // It used to be dropped in silence, leaving an unfiltered grid under a
+        // filter chip claiming a filter. The LIKE path errors on the same
+        // mistake because SQLite refuses the name.
+        let columns = cols(&["name"]);
+        let err = build_where_clause(&columns, &[regex_filter("ghost", "^x")], "").unwrap_err();
+        assert_eq!(err, "no such column: ghost");
+    }
+
+    #[test]
+    fn exact_match_on_a_column_with_no_affinity_also_compares_numerically() {
+        // `=3` against a REAL 3.0 in a column with no declared type compares
+        // text to number across storage classes and can never match, so the
+        // clause carries a numeric arm as well. `render_real` writes the
+        // literal, which is why it reads `3.0` rather than `3`.
+        let columns = typed_cols(&[("v", "")]);
+        let r = build_where_clause(&columns, &[filter("v", "=3")], "").unwrap();
+        assert_eq!(r.clause, " WHERE (\"v\" = ? OR \"v\" = 3.0)");
+        assert_eq!(r.params, vec!["3"]);
+    }
+
+    #[test]
+    fn exact_match_on_a_typed_column_stays_a_single_comparison() {
+        // The control: SQLite applies the column's affinity to the bound
+        // operand here, so plain `=` already matches - and a second OR arm
+        // would cost the index for nothing. Non-numeric operands get no arm
+        // either, even with no affinity, or a search for text would start
+        // matching numeric zeros.
+        let typed = typed_cols(&[("v", "REAL")]);
+        let r = build_where_clause(&typed, &[filter("v", "=3")], "").unwrap();
+        assert_eq!(r.clause, " WHERE \"v\" = ?");
+
+        let untyped = typed_cols(&[("v", "")]);
+        let r = build_where_clause(&untyped, &[filter("v", "=abc")], "").unwrap();
+        assert_eq!(r.clause, " WHERE \"v\" = ?");
+        assert_eq!(r.params, vec!["abc"]);
     }
 
     #[test]

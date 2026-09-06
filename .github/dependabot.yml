@@ -10,6 +10,26 @@ version: 2
 # rewrites the SHA and the trailing `# vX.Y.Z` comment together, which keeps
 # `src/lib/releaseWorkflow.test.ts` satisfied and keeps the comment honest.
 #
+# The promise above only holds for a SHA that names a TAG. Dependabot resolves
+# a pinned SHA against the action's releases, so a SHA that is merely a branch
+# head is invisible to it and stays frozen forever while the comment beside it
+# goes stale -- which is the failure this file exists to prevent, wearing the
+# costume of the fix.
+#
+# `dtolnay/rust-toolchain` was pinned that way until 2026-09-06: at
+# 4360b52 (`stable` branch head), with a `# stable branch @ 2026-08-23` comment
+# no tool could ever advance. The repository has exactly one tag, `v1`, so the
+# workflows now pin its SHA and pass `toolchain: stable` explicitly. That
+# `with:` is load-bearing, not decoration: the `stable` branch IS a one-commit
+# patch setting `default: stable` on that input, and at the v1 tag the input is
+# `required: true` with no default -- so pinning to the tag without it makes
+# every Setup Rust step exit 1 with "'toolchain' is a required input". Anyone
+# tidying the `with:` away will find that out in CI.
+#
+# Before adding a new action, check `gh api repos/<owner>/<repo>/tags`. If it
+# has none, its SHA pin is a manual chore, and it belongs in a comment here
+# saying so rather than in a group that silently never fires.
+#
 # Actions only. npm and cargo updates are applied by hand during release prep
 # (AGENTS.md, "Dependency Management"), where a held-back major is a decision
 # rather than a PR to merge.

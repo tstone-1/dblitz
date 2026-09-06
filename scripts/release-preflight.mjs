@@ -14,6 +14,11 @@
  * in CI, from a shell before tagging, and under vitest against synthetic files.
  */
 
+// Node builtins only, so the "dependency-free" property above still holds: an
+// npm install failure cannot take this gate out.
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 /** CalVer `YY.M.MICRO`, the scheme declared in BUILD.md and AGENTS.md. */
 const CALVER = /^(\d{2})\.(\d{1,2})\.(\d+)$/;
 
@@ -207,8 +212,49 @@ export function readReleaseFiles(root, readText) {
   };
 }
 
+/**
+ * Is this module the program the user ran, rather than an import under vitest?
+ *
+ * This answer decides whether the gate runs at all, so it is the one place in
+ * the script where being wrong is silent: a false negative means node exits 0
+ * having printed nothing, and `release.yml` reads that as "the tag matches
+ * every version file".
+ *
+ * The idiom this replaces -- `import.meta.url === `file://${process.argv[1]}`
+ * -- is wrong twice over, and both were measured on 2026-09-06 rather than
+ * reasoned about, by running the script with a tag that disagrees with all six
+ * version sites and watching it exit 0:
+ *
+ *   1. `import.meta.url` is percent-ENCODED. A checkout path containing a
+ *      space, `#`, `%` or any non-ASCII character makes the two strings differ.
+ *      Copied under a directory named `dblitz ci`, the old guard exited 0 with
+ *      no output; from a path with no space the same tag exited 1 and listed
+ *      seven failures. Path was the only variable.
+ *   2. `import.meta.url` is the REALPATH, while `process.argv[1]` is the path
+ *      as typed. Any symlink anywhere in the invocation disarms it -- on macOS
+ *      `node /tmp/x.mjs` is already enough, because /tmp is a symlink to
+ *      /private/tmp. This one survived the first fix and was caught only by
+ *      writing the regression test.
+ *
+ * `import.meta.main` (Node >= 24.2; .nvmrc pins 24) answers directly, with no
+ * path comparison to get wrong. The fallback is kept for an off-pin runtime and
+ * compares REAL paths, which is the closest a string comparison gets to right.
+ */
+function isMainModule() {
+  if (typeof import.meta.main === "boolean") return import.meta.main;
+  if (!process.argv[1]) return false;
+  try {
+    return (
+      realpathSync(process.argv[1]) ===
+      realpathSync(fileURLToPath(import.meta.url))
+    );
+  } catch {
+    return false;
+  }
+}
+
 // CLI: `node scripts/release-preflight.mjs v26.8.2`
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule()) {
   const { readFileSync } = await import("node:fs");
   const { dirname, join } = await import("node:path");
   const { fileURLToPath } = await import("node:url");

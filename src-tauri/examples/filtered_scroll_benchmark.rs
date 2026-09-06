@@ -3,27 +3,36 @@
 // Reproduces the two code paths that `query_table` chooses between when a view
 // has an active (non-regex) filter and a sort:
 //
-//   BEFORE (un-cached, query_with_offset): every scroll chunk re-runs
+//   BEFORE (un-cached, `query_with_offset`): every scroll chunk re-runs
 //     SELECT * FROM t WHERE <filter> ORDER BY <col> LIMIT P OFFSET k
 //   so each page re-scans, re-sorts, and skips `k` rows — cost grows with k.
 //
-//   AFTER (query_with_ordered_rows): materialize the matching rowids in view
-//     order ONCE, then serve each chunk as a WHERE rowid IN (...) lookup.
+//   AFTER (`build_ordered_rows` + `fetch_rows_by_rowids`): materialize the
+//     matching rowids in view order ONCE, then serve each chunk as a
+//     WHERE rowid IN (...) lookup.
 //
 // Run: cargo run --release --example filtered_scroll_benchmark [rows] [page] [repeats]
 // (Release mode matters — the offset path's cost is in SQLite's C core.)
-
+//
+// Both paths are the SHIPPED functions, called through `dblitz_lib::db` and its
+// `bench_api` re-exports, against a database opened by `open_database` — so
+// these numbers describe the code that runs, not a copy of it that can drift
+// away from it.
 use std::env;
-use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use rusqlite::types::ValueRef;
+use dblitz_lib::db::bench_api::{
+    build_ordered_rows, fetch_rows_by_rowids, query_with_offset, quote_ident,
+};
+use dblitz_lib::db::{open_database, DbState};
 use rusqlite::{params, Connection};
 
 const DEFAULT_ROWS: i64 = 500_000;
 const DEFAULT_PAGE: i64 = 200;
 const DEFAULT_REPEATS: usize = 5;
-const BATCH: usize = 900; // mirror fetch_rows_by_rowids' variable-cap batching
+const TABLE: &str = "items";
+const WHERE_CLAUSE: &str = " WHERE \"name\" = ? AND \"tag\" = ?";
+const ORDER_CLAUSE: &str = " ORDER BY \"n\" ASC";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rows = arg_i64(1).unwrap_or(DEFAULT_ROWS);
@@ -31,11 +40,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let repeats = arg_usize(3).unwrap_or(DEFAULT_REPEATS);
 
     let temp = tempfile::NamedTempFile::new()?;
-    let mut conn = Connection::open(temp.path())?;
-    // Match the production read-only connection's sort tuning so the BEFORE
-    // numbers aren't unfairly penalised by on-disk temp-file sort spills.
-    conn.execute_batch("PRAGMA temp_store=MEMORY;")?;
-    let matched = seed_database(&mut conn, rows)?;
+    let matched = {
+        let mut conn = Connection::open(temp.path())?;
+        seed_database(&mut conn, rows)?
+    };
+
+    let state = DbState::new();
+    open_database(&state, temp.path().to_str().expect("temp path is UTF-8"))?;
+    let guard = state.conn.lock();
+    let conn = guard
+        .as_ref()
+        .expect("open_database published a connection");
+    let quoted = quote_ident(TABLE);
+    let params: Vec<String> = vec!["keep".to_string(), "SOT".to_string()];
 
     // Deep scroll targets into the *matched* set (page-aligned).
     let targets = [
@@ -46,8 +63,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         align((matched - page).max(0), page),
     ];
 
-    // AFTER: one-time materialization of the ordered rowid list.
-    let (order, build_ms) = timed(|| build_filtered_order(&conn))?;
+    // AFTER: one-time materialization of the ordered rowid list, exactly as
+    // `query_with_ordered_rows` does it.
+    let build_sql = format!("SELECT rowid FROM {quoted}{WHERE_CLAUSE}{ORDER_CLAUSE}");
+    let generation = state.current_query_generation();
+    let start = Instant::now();
+    let order = build_ordered_rows(conn, &state, generation, &build_sql, &params, 0)?
+        .expect("the build must not be cancelled here");
+    let build_ms = duration_ms(start.elapsed());
     assert_eq!(order.len() as i64, matched);
 
     println!("Rows: {rows}  (matched by filter: {matched})  page: {page}  repeats: {repeats}");
@@ -60,9 +83,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut after_total = build_ms;
     for &target in &targets {
         let expected = ((matched - target).min(page)).max(0) as usize;
-        let before_ms = median_ms(repeats, expected, || query_offset(&conn, page, target))?;
+        let before_ms = median_ms(repeats, expected, || {
+            offset_page(conn, &quoted, &params, page, target)
+        })?;
         let after_ms = median_ms(repeats, expected, || {
-            fetch_page_by_rowids(&conn, &order, target, page)
+            rowid_page(conn, &quoted, &order, target, page)
         })?;
         before_total += before_ms;
         after_total += after_ms;
@@ -128,70 +153,42 @@ fn seed_database(conn: &mut Connection, rows: i64) -> rusqlite::Result<i64> {
     Ok((rows + 1) / 2)
 }
 
-/// AFTER path, build step: WHERE <filter> ORDER BY <col> projected to rowids.
-fn build_filtered_order(conn: &Connection) -> rusqlite::Result<Vec<i64>> {
-    let mut stmt =
-        conn.prepare("SELECT rowid FROM items WHERE name = 'keep' AND tag = 'SOT' ORDER BY n ASC")?;
-    let mut rows = stmt.query([])?;
-    let mut out = Vec::new();
-    while let Some(row) = rows.next()? {
-        out.push(row.get(0)?);
-    }
-    Ok(out)
-}
-
-/// BEFORE path: a fresh filtered+sorted scan that skips `offset` rows per page.
-fn query_offset(conn: &Connection, limit: i64, offset: i64) -> rusqlite::Result<usize> {
-    let mut stmt = conn.prepare(
-        "SELECT * FROM items WHERE name = 'keep' AND tag = 'SOT' ORDER BY n ASC LIMIT ? OFFSET ?",
-    )?;
-    let col_count = stmt.column_count();
-    let mut rows = stmt.query(params![limit, offset])?;
-    count_rows_and_read(&mut rows, col_count)
-}
-
-/// AFTER path, per-page: rowid lookup of one window of the cached order.
-fn fetch_page_by_rowids(
+/// BEFORE path: the shipped `query_with_offset`, a fresh filtered+sorted scan
+/// that skips `offset` rows per page.
+fn offset_page(
     conn: &Connection,
+    quoted_table: &str,
+    params: &[String],
+    limit: i64,
+    offset: i64,
+) -> Result<usize, String> {
+    let result = query_with_offset(
+        conn,
+        quoted_table,
+        WHERE_CLAUSE,
+        ORDER_CLAUSE,
+        params,
+        offset,
+        limit,
+        None,
+        Vec::new(),
+    )?;
+    Ok(result.rows.len())
+}
+
+/// AFTER path, per page: the shipped `fetch_rows_by_rowids` over one window of
+/// the cached order (it batches to stay under SQLite's bound-parameter cap).
+fn rowid_page(
+    conn: &Connection,
+    quoted_table: &str,
     order: &[i64],
     offset: i64,
     limit: i64,
-) -> rusqlite::Result<usize> {
+) -> Result<usize, String> {
     let start = (offset as usize).min(order.len());
     let end = (offset as usize + limit as usize).min(order.len());
-    let page = &order[start..end];
-    let mut total = 0usize;
-    for batch in page.chunks(BATCH) {
-        let placeholders = vec!["?"; batch.len()].join(",");
-        let sql = format!("SELECT rowid, * FROM items WHERE rowid IN ({placeholders})");
-        let mut stmt = conn.prepare(&sql)?;
-        let col_count = stmt.column_count();
-        let params: Vec<&dyn rusqlite::types::ToSql> = batch
-            .iter()
-            .map(|r| r as &dyn rusqlite::types::ToSql)
-            .collect();
-        let mut rows = stmt.query(params.as_slice())?;
-        total += count_rows_and_read(&mut rows, col_count)?;
-    }
-    Ok(total)
-}
-
-fn count_rows_and_read(rows: &mut rusqlite::Rows<'_>, col_count: usize) -> rusqlite::Result<usize> {
-    let mut count = 0usize;
-    let mut payload_len = 0usize;
-    while let Some(row) = rows.next()? {
-        for col in 0..col_count {
-            payload_len += match row.get_ref(col)? {
-                ValueRef::Null => 0,
-                ValueRef::Integer(_) => size_of::<i64>(),
-                ValueRef::Real(_) => size_of::<f64>(),
-                ValueRef::Text(value) | ValueRef::Blob(value) => value.len(),
-            };
-        }
-        count += 1;
-    }
-    black_box(payload_len);
-    Ok(count)
+    let rows = fetch_rows_by_rowids(conn, quoted_table, "rowid", &order[start..end])?;
+    Ok(rows.len())
 }
 
 fn median_ms<F>(
@@ -200,7 +197,7 @@ fn median_ms<F>(
     mut f: F,
 ) -> Result<f64, Box<dyn std::error::Error>>
 where
-    F: FnMut() -> rusqlite::Result<usize>,
+    F: FnMut() -> Result<usize, String>,
 {
     let mut durations = Vec::with_capacity(repeats);
     for _ in 0..repeats {
@@ -211,15 +208,6 @@ where
     }
     durations.sort();
     Ok(duration_ms(durations[durations.len() / 2]))
-}
-
-fn timed<F, T>(f: F) -> Result<(T, f64), Box<dyn std::error::Error>>
-where
-    F: FnOnce() -> rusqlite::Result<T>,
-{
-    let start = Instant::now();
-    let value = f()?;
-    Ok((value, duration_ms(start.elapsed())))
 }
 
 fn duration_ms(duration: Duration) -> f64 {

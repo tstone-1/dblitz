@@ -47,19 +47,70 @@ const DRIVER_STARTUP_TIMEOUT_MS = 30_000;
 // anything can render; a loaded CI runner can take a while to get there.
 const RENDER_TIMEOUT_MS = 60_000;
 const POLL_INTERVAL_MS = 500;
+// Hard deadline for the whole script. The CI job's `timeout-minutes` is the
+// outer bound, but a job that hits it is killed with no diagnostic and its logs
+// are the last thing that printed, which for a wedged session is "tauri-driver
+// is up" and nothing else. Failing here instead prints why, and prints the
+// driver's own stderr. Well inside the job's 25 minutes, and roughly 2.5x the
+// slowest run observed to date (10 min 6 s, 2026-08-14, cold Rust cache -- and
+// most of that was the build, which happens in an earlier step).
+const OVERALL_TIMEOUT_MS = 10 * 60_000;
+// No individual WebDriver call may hang forever. `fetch` has no default
+// timeout, so without this a native driver that accepts the connection and
+// never answers -- the classic wedged-session shape -- blocks the script
+// outside any of the deadline loops above, which only advance between calls.
+const REQUEST_TIMEOUT_MS = 120_000;
 
 const log = (msg) => console.log(`[smoke] ${msg}`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// tauri-driver's output is forwarded to this process's log AND kept, so a
+// failure message can quote it. Inheriting the fd would put it in the CI log
+// too, but only interleaved somewhere above the failure -- and the reason a
+// session never comes up is almost always in these lines ("WebKitWebDriver not
+// found", a port already bound, the app exiting at startup).
+const DRIVER_LOG_LINES = 40;
+/** @type {string[]} */
+const driverLog = [];
+// Module scope so the whole-script deadline below can reap the child. That path
+// calls process.exit and therefore skips main()'s finally block, which is the
+// only other place the driver is killed.
+/** @type {import("node:child_process").ChildProcess | null} */
+let driverProcess = null;
+function recordDriverOutput(stream, chunk) {
+  for (const line of String(chunk).split(/\r?\n/)) {
+    if (line === "") continue;
+    console.log(`[driver:${stream}] ${line}`);
+    driverLog.push(`${stream}: ${line}`);
+    if (driverLog.length > DRIVER_LOG_LINES) driverLog.shift();
+  }
+}
+function driverDiagnostic() {
+  if (driverLog.length === 0) return "tauri-driver printed nothing.";
+  return `last ${driverLog.length} line(s) from tauri-driver:\n  ${driverLog.join("\n  ")}`;
+}
 
 const appPath =
   process.argv[2] ?? join(root, "src-tauri", "target", "debug", "dblitz");
 
 async function webdriver(method, path, body) {
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers: { "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let res;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      method,
+      headers: { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (e) {
+    if (e?.name === "TimeoutError") {
+      throw new Error(
+        `${method} ${path} did not answer within ${REQUEST_TIMEOUT_MS / 1000}s; ` +
+          driverDiagnostic(),
+      );
+    }
+    throw e;
+  }
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(
@@ -101,11 +152,25 @@ async function main() {
   const driver = spawn(
     "tauri-driver",
     ["--port", String(DRIVER_PORT), "--native-port", String(NATIVE_PORT)],
-    { stdio: ["ignore", "inherit", "inherit"] },
+    { stdio: ["ignore", "pipe", "pipe"] },
   );
+  driverProcess = driver;
+  driver.stdout.on("data", (c) => recordDriverOutput("out", c));
+  driver.stderr.on("data", (c) => recordDriverOutput("err", c));
+
   let driverExited = false;
-  driver.on("exit", () => {
+  /** @type {string} */
+  let driverExitReason = "";
+  driver.on("exit", (code, signal) => {
     driverExited = true;
+    driverExitReason = signal ? `killed by ${signal}` : `exit code ${code}`;
+  });
+  // Without this, a missing `tauri-driver` binary raises an unhandled 'error'
+  // event rather than a failed check, and the message ("spawn tauri-driver
+  // ENOENT") never reaches the [FAIL] line the CI log is read for.
+  driver.on("error", (e) => {
+    driverExited = true;
+    driverExitReason = `could not be spawned: ${e.message}`;
   });
 
   let sessionId = null;
@@ -113,13 +178,20 @@ async function main() {
     // Wait for the driver's HTTP endpoint to come up.
     const driverDeadline = Date.now() + DRIVER_STARTUP_TIMEOUT_MS;
     for (;;) {
-      if (driverExited) throw new Error("tauri-driver exited during startup");
+      if (driverExited) {
+        throw new Error(
+          `tauri-driver ${driverExitReason} during startup; ${driverDiagnostic()}`,
+        );
+      }
       try {
         await webdriver("GET", "/status");
         break;
       } catch {
         if (Date.now() > driverDeadline) {
-          throw new Error("tauri-driver did not become ready in time");
+          throw new Error(
+            `tauri-driver did not answer /status within ` +
+              `${DRIVER_STARTUP_TIMEOUT_MS / 1000}s; ${driverDiagnostic()}`,
+          );
         }
         await sleep(POLL_INTERVAL_MS);
       }
@@ -138,7 +210,10 @@ async function main() {
     });
     sessionId = session.value?.sessionId;
     if (!sessionId) {
-      throw new Error(`no sessionId in response: ${JSON.stringify(session)}`);
+      throw new Error(
+        `no sessionId in response: ${JSON.stringify(session)}; ` +
+          driverDiagnostic(),
+      );
     }
     log(`session ${sessionId} started, app launched`);
 
@@ -168,7 +243,8 @@ async function main() {
       if (Date.now() > deadline) {
         throw new Error(
           "grid never rendered the fixture row; last observed state: " +
-            JSON.stringify(state, null, 2),
+            JSON.stringify(state, null, 2) +
+            `\n${driverDiagnostic()}`,
         );
       }
       await sleep(POLL_INTERVAL_MS);
@@ -199,7 +275,30 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  console.error(`[FAIL] ${e?.message ?? e}`);
-  process.exitCode = 1;
-});
+// The whole-script deadline. `unref()` so the timer never keeps a successful
+// run alive, and `process.exit` rather than `exitCode` because at this point
+// something is stuck: a pending fetch or a live child would otherwise hold the
+// event loop open until the job timeout kills it -- which is the outcome this
+// exists to replace with a message.
+const deadline = setTimeout(() => {
+  console.error(
+    `[FAIL] smoke test exceeded its ${OVERALL_TIMEOUT_MS / 60_000} minute ` +
+      `deadline and made no verdict; ${driverDiagnostic()}`,
+  );
+  driverProcess?.kill("SIGKILL");
+  process.exit(1);
+}, OVERALL_TIMEOUT_MS);
+deadline.unref();
+
+main()
+  .then(() => {
+    clearTimeout(deadline);
+  })
+  .catch((e) => {
+    clearTimeout(deadline);
+    console.error(`[FAIL] ${e?.message ?? e}`);
+    // Explicit, not `exitCode`: the finally block kills the driver, but a
+    // socket left open by an aborted fetch can still keep the loop alive, and
+    // an exit-code-only failure that never exits reads in CI as a hang.
+    process.exit(1);
+  });

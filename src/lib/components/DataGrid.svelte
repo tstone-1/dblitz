@@ -28,8 +28,15 @@
     | {
         kind: "virtual";
         totalRows: number;
+        /** Render read: a miss schedules a background chunk fetch. */
         getRow: (index: number) => (string | null)[] | null;
+        /** Cached-only read: never fetches. Used by the statistics bar. */
+        peekRow: (index: number) => (string | null)[] | null;
         getRows: (start: number, end: number) => Promise<(string | null)[][]>;
+        /** Rows this pass rendered, so a chunk scrolled past is not fetched. */
+        setVisibleWindow: (firstRow: number, lastRow: number) => void;
+        /** Bumped when a chunk lands; the statistics bar recomputes on it. */
+        rowsVersion: number;
       };
 
   // Props. The grid runs in two modes: mode.kind === "virtual" (BrowseData,
@@ -129,18 +136,41 @@
     return mode.rows[index] ?? null;
   }
 
+  /** Cached-only read. MUST be what any non-render computation uses: see the
+   *  selection-statistics block below. */
+  function peekRowData(index: number): (string | null)[] | null {
+    if (mode.kind === "virtual") return mode.peekRow(index);
+    return mode.rows[index] ?? null;
+  }
+
   // Scroll state
   let scrollTop = $state(0);
   let viewportHeight = $state(600);
   let scrollContainer: HTMLDivElement | undefined = $state();
 
+  // Scroll is coalesced to one frame. A trackpad or a smooth-scrolling wheel
+  // fires scroll events far faster than the grid can render, and each one wrote
+  // `scrollTop` -- a `$state` every visible row depends on -- so the whole
+  // virtual window (and every getRow miss under it) was recomputed per event
+  // rather than per frame.
+  let scrollFrame: number | null = null;
+  let pendingScrollTop = 0;
+
   function handleScroll(e: Event) {
-    const el = e.target as HTMLDivElement;
-    scrollTop = el.scrollTop;
+    pendingScrollTop = (e.target as HTMLDivElement).scrollTop;
+    if (scrollFrame !== null) return;
+    const schedule =
+      typeof requestAnimationFrame === "function"
+        ? requestAnimationFrame
+        : (fn: FrameRequestCallback) => setTimeout(() => fn(0), 16) as unknown as number;
+    scrollFrame = schedule(() => {
+      scrollFrame = null;
+      scrollTop = pendingScrollTop;
+    });
   }
 
   function visibleRowIndices(): number[] {
-    return getVisibleRowIndices({
+    const indices = getVisibleRowIndices({
       rowCount,
       rowHeight: ROW_HEIGHT,
       scrollTop: virtualScrollTopToDataScroll(scrollTop, scrollGeometry, viewportHeight),
@@ -148,6 +178,13 @@
       viewportHeight,
       overscan: OVERSCAN,
     });
+    // Tell the row source what is actually on screen. Called from the render
+    // pass and writes only plain (non-reactive) state on the other side, the
+    // same discipline `touchRecency` follows there.
+    if (mode.kind === "virtual" && indices.length > 0) {
+      mode.setVisibleWindow(indices[0], indices[indices.length - 1]);
+    }
+    return indices;
   }
 
   // Column widths — plain object, not reactive. The `$effect` below seeds
@@ -199,14 +236,42 @@
   const selection = createCellSelection();
   const sel = $derived(selection.sel);
 
-  const selStats = $derived(buildSelectionStats({
-    selection: sel,
-    getRow: getRowData,
-    isSelected: selection.isSelected,
-    selectedRowCount: selection.selectedRowCount,
-    selectedColumnCount: selection.selectedColumnCount,
-    hasMultipleSelectedCells: selection.hasMultipleSelectedCells,
-  }));
+  // Selection statistics are an explicit, debounced computation over CACHED
+  // rows -- never a `$derived` reading `getRowData`.
+  //
+  // As a derived it called `getRow`, which starts an IPC fetch on a cache miss.
+  // So Ctrl+A on a numeric table walked: derived runs, misses at the first
+  // unloaded row, fires a fetch, returns "pending"; the chunk lands, the
+  // derived re-runs, walks to the next missing chunk, fires again -- up to 200
+  // chunks serially, rescanning up to 100k rows each time, to produce a
+  // Sum/Avg the user did not ask to wait for. `peekRowData` cannot do that:
+  // it reports `numericPending` for a row that is not loaded and stops.
+  //
+  // `selStats` is written from a timer callback, which is outside the effect's
+  // tracked scope, and the effect never reads it -- so this cannot become the
+  // self-triggering shape that produced `effect_update_depth_exceeded` in
+  // 26.7.5.
+  const STATS_DEBOUNCE_MS = 80;
+  let selStats = $state<ReturnType<typeof buildSelectionStats>>(null);
+  let statsTimer: ReturnType<typeof setTimeout> | null = null;
+
+  $effect(() => {
+    // Recompute when the selection changes, and again as chunks arrive.
+    void selection.sel;
+    void (mode.kind === "virtual" ? mode.rowsVersion : mode.rows);
+    if (statsTimer) clearTimeout(statsTimer);
+    statsTimer = setTimeout(() => {
+      statsTimer = null;
+      selStats = buildSelectionStats({
+        selection: selection.sel,
+        getRow: peekRowData,
+        isSelected: selection.isSelected,
+        selectedRowCount: selection.selectedRowCount,
+        selectedColumnCount: selection.selectedColumnCount,
+        hasMultipleSelectedCells: selection.hasMultipleSelectedCells,
+      });
+    }, STATS_DEBOUNCE_MS);
+  });
 
   function fmtNum(n: number): string {
     return Number.isInteger(n) ? n.toLocaleString() : n.toLocaleString(undefined, { maximumFractionDigits: 6 });
@@ -330,6 +395,10 @@
     selection.cleanup();
     reorder.destroy();
     if (flashTimer) clearTimeout(flashTimer);
+    if (statsTimer) clearTimeout(statsTimer);
+    if (scrollFrame !== null && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(scrollFrame);
+    }
   });
 
   function getColor(col: string): string {
@@ -415,7 +484,7 @@
     <div class="sticky-header">
       <div class="grid-row header-row" role="row">
         <div class="grid-cell row-num-header" role="columnheader">#</div>
-        {#each columns as col}
+        {#each columns as col, colIdx}
           <div class="grid-cell col-header"
             role="columnheader"
             tabindex={onSort ? 0 : -1}
@@ -424,7 +493,7 @@
             class:has-active-filter={(filtering?.columnFilters?.[col]?.value ?? '').trim() !== ''}
             class:drag-over-header={reorder.reorderOverCol === col && reorder.reorderCol !== col}
             class:dragging={reorder.reorderCol === col}
-            data-colidx={columns.indexOf(col)}
+            data-colidx={colIdx}
             onclick={() => { if (reorder.consumeReorder()) return; onSort?.(col); }}
             onkeydown={(e) => handleHeaderKeydown(e, col)}
             oncontextmenu={(e) => handleHeaderContextMenu(e, col)}
@@ -500,16 +569,16 @@
           onmousedown={(e) => selection.onCellMouseDown(e, rowIdx)}>
           <div class="grid-cell row-num" role="gridcell" tabindex="-1">{rowIdx + 1}</div>
           {#each columns as col, vi}
-            {@const inSel = selection.isSelected(rowIdx, vi)}
+            {@const cell = selection.cellFlags(rowIdx, vi)}
             <div class="grid-cell data-cell"
               role="gridcell"
               tabindex="-1"
               data-col={vi}
-              class:selected={inSel}
-              class:sel-top={inSel && !selection.isSelected(rowIdx - 1, vi)}
-              class:sel-bottom={inSel && !selection.isSelected(rowIdx + 1, vi)}
-              class:sel-left={inSel && !selection.isSelected(rowIdx, vi - 1)}
-              class:sel-right={inSel && !selection.isSelected(rowIdx, vi + 1)}
+              class:selected={cell.selected}
+              class:sel-top={cell.top}
+              class:sel-bottom={cell.bottom}
+              class:sel-left={cell.left}
+              class:sel-right={cell.right}
               style={getColor(col) ? `background: ${getColor(col)};` : ''}
               onmouseenter={() => selection.onCellMouseEnter(rowIdx, vi)}>
               {#if !row}{:else if row[vi] === null}<span class="null-value">NULL</span>{:else}{row[vi]}{/if}

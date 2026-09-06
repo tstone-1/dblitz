@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege by default: nothing in this workflow writes to the
+# repository. Jobs that need more must ask for it explicitly, so a step added
+# later cannot silently inherit a write token.
+permissions:
+  contents: read
+
 # Cancel superseded runs when a branch is pushed twice in quick succession.
 concurrency:
   group: checks-${{ github.ref }}
@@ -15,6 +21,12 @@ jobs:
   frontend:
     name: Frontend (check + test)
     runs-on: ubuntu-latest
+    # Observed max 26 s across the last 8 runs (2026-08-14 .. 2026-09-01).
+    # 2x that is under a minute, which would redden on a slow npm registry
+    # rather than on a defect, so this is a hang bound and not a budget: the
+    # job installs from the network, and the value only has to be far below
+    # GitHub's 6-hour default.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -43,6 +55,10 @@ jobs:
   backend:
     name: Backend (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Observed max 22 min 39 s (windows-latest, 2026-08-14, cold Rust cache);
+    # a warm cache is 2-4 min on every OS. One value covers all three legs, so
+    # it is set from the slowest.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -50,9 +66,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Pinned to the v1 TAG, not to the `stable` branch. Both install the same
+      # toolchain, but only a tag is a ref dependabot can advance -- see the
+      # note in .github/dependabot.yml. `toolchain:` is required at the v1 tag:
+      # the `stable` branch's whole mechanism is a one-commit patch that sets
+      # `default: stable` on that input, and the tag carries no such default.
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable branch @ 2026-08-23
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Cache Rust build artifacts
@@ -63,16 +85,22 @@ jobs:
       # Tauri 2 on Linux pulls in webkit2gtk-4.1 (Ubuntu 24.04+) and a few
       # X11/glib helpers via its build deps. Required for `cargo check`,
       # `cargo clippy`, and `cargo test` to compile the lib crate.
+      # The package list is shared with release.yml -- see the header of
+      # .github/tauri-linux-deps.txt for why it is one file.
       - name: Install Tauri Linux build deps
         if: runner.os == 'Linux'
         run: |
+          set -euo pipefail
+          # Assigned to a variable, not inlined into the apt command. With
+          # `set -e` a failed command substitution in an ASSIGNMENT aborts,
+          # whereas `apt-get install -y $(grep ...)` would swallow a missing or
+          # renamed list file: apt-get with no package arguments exits 0, so the
+          # step would go green having installed nothing and the failure would
+          # surface later as an unrelated compile error.
+          deps=$(grep -vE '^\s*(#|$)' .github/tauri-linux-deps.txt)
+          [ -n "$deps" ] || { echo "::error::.github/tauri-linux-deps.txt resolved to no packages"; exit 1; }
           sudo apt-get update
-          sudo apt-get install -y \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf
+          sudo apt-get install -y $deps
 
       - name: Format check
         if: runner.os == 'Linux'
@@ -106,6 +134,11 @@ jobs:
   smoke:
     name: Smoke (packaged app)
     runs-on: ubuntu-latest
+    # Observed max 10 min 6 s (2026-08-14, cold Rust cache + `cargo install
+    # tauri-driver`); 2-8 min warm. The script carries its own 10-minute
+    # deadline so a wedged WebDriver session fails with a diagnostic well
+    # inside this bound -- this is only the outer stop.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -118,27 +151,35 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # See the backend job for why this is the v1 tag with an explicit
+      # `toolchain:` rather than the `stable` branch head.
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable branch @ 2026-08-23
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri -> target
 
-      # Same Tauri build deps as the backend job, plus the WebDriver host for
-      # webkit2gtk and a virtual display for the headless runner.
+      # The shared Tauri build list, plus the two extras only this job needs:
+      # the WebDriver host tauri-driver proxies to, and a virtual display for
+      # the headless runner. Extras go on the command line rather than into the
+      # shared file, which stays the Tauri prerequisites and nothing else.
       - name: Install Tauri Linux build deps and WebDriver host
         run: |
+          set -euo pipefail
+          # Assigned to a variable, not inlined into the apt command. With
+          # `set -e` a failed command substitution in an ASSIGNMENT aborts,
+          # whereas `apt-get install -y $(grep ...)` would swallow a missing or
+          # renamed list file: apt-get with no package arguments exits 0, so the
+          # step would go green having installed nothing and the failure would
+          # surface later as an unrelated compile error.
+          deps=$(grep -vE '^\s*(#|$)' .github/tauri-linux-deps.txt)
+          [ -n "$deps" ] || { echo "::error::.github/tauri-linux-deps.txt resolved to no packages"; exit 1; }
           sudo apt-get update
-          sudo apt-get install -y \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            webkit2gtk-driver \
-            xvfb
+          sudo apt-get install -y $deps webkit2gtk-driver xvfb
 
       - name: Install tauri-driver
         run: cargo install tauri-driver --locked

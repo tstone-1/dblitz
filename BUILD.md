@@ -36,7 +36,13 @@ Starts the Tauri dev server with hot-reload for frontend changes. Rust backend c
 
 ### Code Quality Commands
 
+`npm run quality` runs all of the below in the order CI does. Use it before a
+release; use the individual commands while iterating.
+
 ```bash
+# Everything CI runs, in one command
+npm run quality
+
 # Frontend type-check
 npm run check
 
@@ -59,6 +65,14 @@ cd src-tauri && cargo fmt
 cd src-tauri && cargo fmt --check
 ```
 
+**There is no Windows cross-check from macOS.**
+`cargo check --target x86_64-pc-windows-msvc` cannot run there: `ring` and
+`libsqlite3-sys` have C build scripts and the MSVC toolchain does not exist on
+macOS. `cfg(windows)` code edited on a Mac is verified by reading plus the
+Windows leg of `.github/workflows/checks.yml`, and nothing else - push the
+branch and read that job before tagging. On Windows, WSL covers the Linux leg
+the same way (see AGENTS.md).
+
 ## Build Output
 
 ### Windows
@@ -69,6 +83,28 @@ cd src-tauri && cargo fmt --check
 **Installers** (in `src-tauri/target/release/bundle/`):
 - `nsis/dblitz_x.y.z_x64-setup.exe` - NSIS installer (registers file associations)
 - `msi/dblitz_x.y.z_x64_en-US.msi` - MSI installer
+
+### macOS
+
+In `src-tauri/target/release/bundle/`:
+- `macos/dblitz.app` - the application bundle (what gets signed, notarized and stapled)
+- `dmg/dblitz_x.y.z_<arch>.dmg` - the disk image users download
+- `macos/dblitz.app.tar.gz` (+ `.sig`) - the updater payload, from `createUpdaterArtifacts`
+
+`<arch>` is `aarch64` or `x64`. CI builds each arch with an explicit
+`--target`, which inserts the triple into the path:
+`src-tauri/target/<triple>/release/bundle/...`. A local build with no `--target`
+uses the plain `release/` path above.
+
+### Linux
+
+In `src-tauri/target/release/bundle/`, one x86_64 artifact per subdirectory:
+- `deb/*.deb`
+- `rpm/*.rpm`
+- `appimage/*.AppImage`
+
+Only the AppImage can self-update; `.deb` and `.rpm` are owned by the package
+manager.
 
 ## Updater
 
@@ -549,13 +585,14 @@ cd src-tauri && cargo update && cd ..
 npm update && npm outdated
 npm audit
 cd src-tauri && cargo audit && cd ..
-npm run check
-cd src-tauri && cargo clippy --all-targets --all-features -- -D warnings && cd ..
+npm run quality
 # Update version: npm version <v> --no-git-tag-version covers package.json +
-# package-lock.json; edit Cargo.toml and tauri.conf.json by hand
-# Verify all four version files match
-rg -n '"version"|^version =' package.json package-lock.json src-tauri/Cargo.toml src-tauri/tauri.conf.json | head
-# Update CHANGELOG.md
+# package-lock.json; edit Cargo.toml and tauri.conf.json by hand, then
+# `cd src-tauri && cargo check` to rewrite Cargo.lock's own dblitz entry
+# Update CHANGELOG.md (dated heading -- preflight rejects "Unreleased")
+# Verify all five version files and the changelog heading -- the same script
+# CI's preflight job runs, so a green answer here means the tag is accepted
+node scripts/release-preflight.mjs vYY.M.MICRO
 npx tauri build
 cp src-tauri/target/release/dblitz.exe /path/to/shared/tools/dblitz.exe
 git status --porcelain && git diff --stat   # review the whole tree before staging
@@ -582,8 +619,12 @@ Versions follow [CalVer](https://calver.org/) using the `YY.M.MICRO` format:
 
 Examples: `26.4.0` (first April 2026 release), `26.4.1` (second), `26.5.0` (first May release).
 
-Version must be updated in four files:
+Version must be updated in five files:
 - `src-tauri/Cargo.toml` - Rust package version
+- `src-tauri/Cargo.lock` - the crate's own entry. Not hand-edited: `cargo check`
+  after the `Cargo.toml` bump rewrites it. Nothing fails when it drifts, because
+  the next build regenerates it - which is how it was still on 26.8.1 while
+  26.8.2 was being staged.
 - `src-tauri/tauri.conf.json` - Tauri app version
 - `package.json` - npm package version
 - `package-lock.json` - npm lockfile, in **two** places (top-level `"version"`
@@ -591,17 +632,25 @@ Version must be updated in four files:
   drifted: `npm install` silently rewrites it, so a stale lockfile version
   surfaces as an unrelated dirty file in some later session's diff.
 
-Before publishing, the exact same `YY.M.MICRO` value must appear in all four
+Before publishing, the exact same `YY.M.MICRO` value must appear in all five
 files, the local tag must be `vYY.M.MICRO`, and the GitHub release must point to
 that tag. Do not leave a tag, release, or version file behind on an older patch.
+`node scripts/release-preflight.mjs vYY.M.MICRO` checks all five plus a dated
+`CHANGELOG.md` heading, and CI runs the same script before it creates the draft
+release.
 
 ## Icons
 
-Application icons are in `src-tauri/icons/`. To regenerate from a source PNG:
+Application icons are in `src-tauri/icons/`. **The source is
+`src-tauri/icons/sqlite.svg`**, not one of the generated PNGs - `.gitignore`
+says so, and regenerating from a raster output would resample it:
 
 ```bash
-npm run tauri icon src-tauri/icons/icon.png
+npx tauri icon src-tauri/icons/sqlite.svg
 ```
+
+That writes every size plus `icon.ico` and `icon.icns`. The Android and iOS
+output and `64x64.png` are gitignored, since no build target uses them.
 
 ## Troubleshooting
 
@@ -632,20 +681,39 @@ dblitz/
 │   │   └── +page.svelte          # App shell
 │   ├── lib/
 │   │   ├── store.svelte.ts       # Global reactive state
-│   │   └── components/          # UI components plus tested feature helpers
+│   │   ├── ipc.ts                # Every Tauri command wrapper + its DTOs
+│   │   ├── updateState.svelte.ts # Updater UI state
+│   │   ├── updaterCommands.ts    # Updater plugin calls
+│   │   ├── openOutcome.ts        # "Did this open succeed?" predicate
+│   │   └── components/           # UI components plus tested feature helpers
+│   │       ├── browseQuery.svelte.ts     # Browse tab query state machine
+│   │       ├── virtualRows.svelte.ts     # Chunked virtual row source
+│   │       ├── cellSelection.svelte.ts   # Grid selection rectangles
+│   │       ├── sqlEditorExtensions.ts    # CodeMirror setup (keymaps, dialect)
+│   │       ├── sqlExecution.ts           # Session-owned SQL execution
+│   │       ├── clipboardTable.ts         # HTML + RFC 4180 clipboard payloads
+│   │       └── platformKeys.ts           # Cmd vs Ctrl labels
 │   ├── app.css                   # Global styles + theme vars
 │   └── app.html                  # HTML template
 ├── src-tauri/                    # Rust backend
 │   ├── src/
 │   │   ├── main.rs               # Entry point
-│   │   ├── lib.rs                # Tauri commands & setup
-│   │   ├── db.rs                 # Database facade
-│   │   ├── db/                   # Schema/query/export/SQL modules
-│   │   └── config.rs             # Per-DB config persistence
-│   ├── icons/                    # App icons
+│   │   ├── lib.rs                # Tauri commands, setup, Windows/macOS glue
+│   │   ├── db.rs                 # Database facade + db::bench_api
+│   │   ├── db/                   # schema, query, filters, sql, export, types, util
+│   │   ├── config.rs             # Per-DB and app config persistence
+│   │   └── updates.rs            # Pure update/provenance logic
+│   ├── examples/                 # rowid_seek + filtered_scroll benchmarks
+│   ├── capabilities/             # Tauri capability declarations
+│   ├── icons/                    # App icons (source: sqlite.svg)
 │   ├── Cargo.toml                # Rust dependencies
+│   ├── Cargo.lock                # Carries the crate's own version
 │   └── tauri.conf.json           # Tauri config
+├── scripts/                      # release-preflight.mjs, smoke-test.mjs
+├── .github/                      # Workflows, dependabot, tauri-linux-deps.txt
 ├── package.json                  # npm config
+├── AGENTS.md                     # Architecture and project conventions
+├── SECURITY.md                   # Reporting policy
 ├── CHANGELOG.md                  # Version history
 └── BUILD.md                      # This file
 ```

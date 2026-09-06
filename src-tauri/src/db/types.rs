@@ -5,16 +5,24 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 
 /// Sparse rowid index: maps chunk_index -> starting rowid for O(log n) seeks.
-/// Built once per table on first query, invalidated on table switch.
+///
+/// Built lazily, on the first page request that actually needs it - chunk 0 is
+/// served with a plain `LIMIT` instead, so opening a table never pays for the
+/// full rowid scan. Entries live until the database is closed or another one is
+/// opened (`clear_caches`); they are NOT dropped when the user switches table,
+/// so scrolling back to a table already visited in this session keeps its index.
 /// Valid only under dblitz's open-time promise that the file is not modified
 /// while this immutable connection is alive.
-pub(super) struct RowidIndex {
+///
+/// `pub` because the benchmark examples under `src-tauri/examples/` measure the
+/// shipped index build through [`crate::db::bench_api`].
+pub struct RowidIndex {
     /// chunk_index -> rowid of first row in that chunk
-    pub(super) boundaries: Vec<i64>,
+    pub boundaries: Vec<i64>,
     /// total row count at time of index build
-    pub(super) total_rows: i64,
+    pub total_rows: i64,
     /// row count interval used to sample boundaries
-    pub(super) chunk_size: i64,
+    pub chunk_size: i64,
 }
 
 /// Complete identity of an ordered view. Keeping the SQL fragments and bound
@@ -50,10 +58,47 @@ pub(super) struct OrderedRows {
 }
 
 pub struct DbState {
+    /// The Browse Data connection. `query_table` and `count_rows` hold this
+    /// lock for their whole duration - a sort or a filter on a large table can
+    /// grind for seconds - and they are the only readers that build or consult
+    /// the table-keyed caches below, which is why the caches are keyed to this
+    /// connection alone.
     pub conn: Mutex<Option<Connection>>,
+    /// A SECOND read-only connection to the same file, so the SQL tab and the
+    /// Structure tab do not queue behind a grinding Browse Data page.
+    ///
+    /// This is correct only because of `?immutable=1`. Both connections open
+    /// the same URI with the same flags, the same open batch and the same
+    /// authorizer (one function, [`crate::db::schema::open_read_only_connection`],
+    /// builds both so they cannot drift), and the file is a frozen snapshot for
+    /// their lifetime - so two connections cannot disagree about its contents
+    /// and no transaction or snapshot coordination is needed between them. Drop
+    /// `immutable=1` and that stops being true: the two connections would then
+    /// be able to observe different states of a file another process is
+    /// writing, and every "the count cannot go stale" argument in this module
+    /// would need re-arguing.
+    ///
+    /// Measured on the 870 MB / 5M-row table (macOS, M5, release build, three
+    /// rounds each): an `execute_sql("SELECT 1")` issued 50 ms into a
+    /// sort-by-name page waited **736-748 ms** on the shared connection - the
+    /// rest of the ~800 ms sort - and **19-39 us** on this one. The same
+    /// applies to the Structure tab and to any other command that does not
+    /// need the browse caches.
+    pub aux_conn: Mutex<Option<Connection>>,
     pub current_path: Mutex<Option<String>>,
     pub(super) rowid_indexes: Mutex<HashMap<String, RowidIndex>>,
     pub(super) ordered_rows: Mutex<HashMap<String, OrderedRows>>,
+    /// Unfiltered `COUNT(*)` per table, for the lifetime of one open file.
+    ///
+    /// The connection is `?immutable=1`, so the file is a frozen snapshot and a
+    /// count taken at open cannot go stale - which is what makes caching it
+    /// correct rather than merely convenient. Seeded at open from the counts
+    /// `get_tables_inner` already took, and filled in on demand for anything it
+    /// could not count (a view, or a table whose count errored). Without it,
+    /// every page of a WITHOUT ROWID table or a view re-counted the whole
+    /// object: 109 ms per scroll chunk on a warm 5M-row table here.
+    /// Cleared alongside the other table-keyed caches on open and close.
+    pub(super) table_counts: Mutex<HashMap<String, i64>>,
     pub(super) query_generation: AtomicU64,
     /// Handle to interrupt whatever statement is currently executing on
     /// `conn`. Independent of `conn`'s own mutex, so calling `.interrupt()`
@@ -62,17 +107,43 @@ pub struct DbState {
     /// `None` when no database is open; replaced on every `open_database`
     /// and cleared on `close_database`.
     pub(super) interrupt_handle: Mutex<Option<rusqlite::InterruptHandle>>,
+    /// The same, for [`Self::aux_conn`]. `cancel_queries` must interrupt BOTH
+    /// handles: a statement grinding on one connection is invisible to the
+    /// other's handle, so cancelling only the browse connection would leave a
+    /// runaway recursive CTE in the SQL tab running forever.
+    pub(super) aux_interrupt_handle: Mutex<Option<rusqlite::InterruptHandle>>,
+}
+
+/// Delegates to [`DbState::new`]. Required now that `db` is a public module:
+/// a public type with a no-argument `new` and no `Default` is a clippy error
+/// (`new_without_default`), and the two must not drift apart.
+impl Default for DbState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DbState {
+    /// The generation a query must still be under for its result to be
+    /// published; bumped by every open and every cancel. `pub` only so the
+    /// benchmark examples can call the shipped build functions, which take it
+    /// as a parameter - passing a stale value makes them report cancellation.
+    pub fn current_query_generation(&self) -> u64 {
+        self.query_generation
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn new() -> Self {
         Self {
             conn: Mutex::new(None),
+            aux_conn: Mutex::new(None),
             current_path: Mutex::new(None),
             rowid_indexes: Mutex::new(HashMap::new()),
             ordered_rows: Mutex::new(HashMap::new()),
+            table_counts: Mutex::new(HashMap::new()),
             query_generation: AtomicU64::new(0),
             interrupt_handle: Mutex::new(None),
+            aux_interrupt_handle: Mutex::new(None),
         }
     }
 }

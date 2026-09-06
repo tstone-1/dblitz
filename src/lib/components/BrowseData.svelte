@@ -1,13 +1,11 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { tick, untrack } from "svelte";
   import {
     queryTable,
     cancelQueries,
     countRows,
     exportToXlsx,
-    type ColumnFilter,
     type ColumnFilterValue,
-    type QueryResult,
   } from "$lib/ipc";
   import {
     appState,
@@ -21,16 +19,15 @@
   import { createPinnedFilters } from "./pinnedFilters.svelte";
   import { createAutoSelectFirstTable } from "./autoSelectFirstTable.svelte";
   import { createDbGenerationReset } from "./dbGenerationReset.svelte";
-  import { createVirtualRows } from "./virtualRows.svelte";
+  import { createBrowseQuery } from "./browseQuery.svelte";
   import {
-    buildActiveFilters,
     colorPresetsForTheme,
     orderColumns,
+    stableColumnList,
     visibleColumns,
   } from "./columnView";
   import { computeAutoWidths } from "./columnWidths";
-  import { shouldAutoFitWidths } from "./autoFitWidths";
-  import { hasIncompleteOperator, stripIncompleteSegments } from "./filterOperators";
+  import { currentModKeyLabel } from "./platformKeys";
   import type { SelectionData } from "./selectionData";
   import { pinGlyphPath } from "./pinGlyph";
   import ContextMenu from "./ContextMenu.svelte";
@@ -38,6 +35,11 @@
 
   const CHUNK_SIZE = 500;
   const FILTER_DEBOUNCE_MS = 500;
+
+  // The Find-column shortcut accepts Ctrl+F and Cmd+F alike (see
+  // onWindowKeydown); only the on-screen hint has to pick one, and naming Ctrl
+  // on a Mac names the combination nobody presses there.
+  const modKey = currentModKeyLabel();
 
   let selectedTable = $state<string | null>(null);
   let columns = $state<string[]>([]);
@@ -53,7 +55,6 @@
   // Bumping `n` re-triggers the locate effect inside DataGrid even when the
   // user picks the same column twice in a row.
   let locateRequest = $state<{ col: string; n: number } | null>(null);
-  let filterDebounce: ReturnType<typeof setTimeout> | null = null;
   let sidebarCollapsed = $state(false);
 
   // Auto-select the lone table when opening a single-table DB. The helper
@@ -87,104 +88,106 @@
   // always runs BEFORE checkAutoSelect() for the same open, so a single-table
   // DB's auto-selected table is never clobbered by the reset that opening it
   // triggered.
+  // Both callbacks WRITE the state they also read back (selectTable() sets
+  // selectedTable/columns/filters and then reloadData() reads all of it through
+  // makeSnapshot). Left tracked, that is the shape that produced
+  // `effect_update_depth_exceeded` in 26.7.5; it converged here only because
+  // every one of those helpers carries its own "did I already fire?" latch,
+  // which is a property of the helpers rather than of this effect. The two
+  // signals this effect must actually re-run on are read explicitly, and the
+  // callbacks run untracked, so nothing they touch can re-trigger it.
   $effect(() => {
-    checkDbReset();
-    checkAutoSelect();
+    void appState.dbOpenGeneration;
+    void appState.dbPath;
+    void appState.tables;
+    untrack(() => {
+      checkDbReset();
+      checkAutoSelect();
+    });
+  });
+
+  // Both lists are `$derived` with a structural-equality memo, and both facts
+  // are load-bearing.
+  //
+  // They used to be plain functions called from the template, so they rebuilt
+  // on every reactive read -- and `virtualRows.projectVisible` called visCols()
+  // once PER ROW, which meant a Ctrl+A copy over 100k rows rebuilt two arrays
+  // 100k times.
+  //
+  // The memo is what keeps the identity stable. `commitTableConfig` replaces a
+  // table's config entry wholesale, so a colour change, a filter pin or a width
+  // save invalidates anything reading it -- and handing DataGrid a fresh array
+  // with identical contents re-runs its width-reseed `$effect` (which resets
+  // every column width from `initialColumnWidths`) and re-diffs every header.
+  const stableAllCols = stableColumnList();
+  const stableVisCols = stableColumnList();
+
+  let allColsOrderedList = $derived.by(() => {
+    if (!selectedTable) return stableAllCols(columns);
+    return stableAllCols(orderColumns(columns, getTableConfig(selectedTable).column_order));
+  });
+
+  let visColsList = $derived.by(() => {
+    if (!selectedTable) return stableVisCols(columns);
+    return stableVisCols(
+      visibleColumns(allColsOrderedList, getTableConfig(selectedTable).hidden_columns),
+    );
   });
 
   function allColsOrdered(): string[] {
-    if (!selectedTable) return columns;
-    const cfg = getTableConfig(selectedTable);
-    return orderColumns(columns, cfg.column_order);
+    return allColsOrderedList;
   }
 
   function visCols(): string[] {
-    if (!selectedTable) return columns;
-    const cfg = getTableConfig(selectedTable);
-    return visibleColumns(allColsOrdered(), cfg.hidden_columns);
-  }
-
-  function buildFilters(): ColumnFilter[] {
-    // Drop filters for columns that no longer exist in the schema
-    // (e.g. a pinned filter on a column that was renamed externally), and
-    // strip bare half-typed operator segments (">" with no operand) from
-    // non-regex values so a reload triggered by a discrete action (a sort
-    // click) queries with the still-valid segments instead of a broken filter.
-    const cleaned: Record<string, ColumnFilterValue> = {};
-    for (const [col, f] of Object.entries(columnFilters)) {
-      cleaned[col] = f.is_regex
-        ? f
-        : { ...f, value: stripIncompleteSegments(f.value) };
-    }
-    return buildActiveFilters(columns, cleaned);
-  }
-
-  // An immutable snapshot of the query state (table + filters + sort) taken at
-  // reload time. virtualRows pins it per-epoch and feeds it back to loadChunk
-  // so a background chunk fetch queries the epoch's state, never whatever the
-  // component holds by the time the fetch fires (see W2 / the protocol comment
-  // in virtualRows.svelte.ts).
-  interface QuerySnapshot {
-    table: string | null;
-    filters: ColumnFilter[];
-    globalFilter: string;
-    sortColumn: string | null;
-    sortAsc: boolean;
-  }
-
-  function makeSnapshot(): QuerySnapshot {
-    return {
-      table: selectedTable,
-      filters: buildFilters(),
-      globalFilter: globalFilter.trim(),
-      sortColumn,
-      sortAsc,
-    };
+    return visColsList;
   }
 
   // Precomputed column name -> index for O(1) lookups
   let colIndexMap = $derived(new Map(columns.map((c, i) => [c, i])));
 
-  function loadChunk(
-    offset: number,
-    limit: number,
-    snapshot: QuerySnapshot,
-  ): Promise<QueryResult> {
-    // virtualRows also captures a snapshot when it resets with no table
-    // selected, and a render pass in flight at that moment can still ask for a
-    // row. `query_table`'s Rust `table` is a plain `String`, so forwarding the
-    // null would fail Tauri's argument deserialization and surface as an opaque
-    // error toast; an empty page is the honest answer. `total_rows: null` so
-    // the caller's row count is left alone rather than being zeroed by a chunk
-    // fetch belonging to no table.
-    const table = snapshot.table;
-    if (table === null) {
-      return Promise.resolve({ columns: [], rows: [], total_rows: null, offset });
-    }
-    return queryTable({
-      table,
-      offset,
-      limit,
-      filters: snapshot.filters,
-      globalFilter: snapshot.globalFilter,
-      sortColumn: snapshot.sortColumn,
-      sortAsc: snapshot.sortAsc,
-    });
-  }
-
-  const virtualRows = createVirtualRows<QuerySnapshot>({
+  // The query state machine (snapshot/reload/debounce/sort/select plus the row
+  // cache) lives in browseQuery.svelte.ts, in the same fully-injected style as
+  // createPinnedFilters above: this component keeps every `$state` declaration
+  // and hands over a getter/setter for each, so the machine's post-await
+  // ownership rules are reachable by a test instead of being locked inside a
+  // component nothing can mount.
+  const query = createBrowseQuery({
     chunkSize: CHUNK_SIZE,
+    filterDebounceMs: FILTER_DEBOUNCE_MS,
     getSelectedTable: () => selectedTable,
-    makeSnapshot,
-    loadChunk,
-    cancelQueries: () => cancelQueries(),
-    getVisibleColumns: () => visCols(),
-    getColumnIndex: (col) => colIndexMap.get(col),
-    hasColumns: () => columns.length > 0,
-    setColumns: (nextColumns) => { columns = nextColumns; },
-    setTotalRows: (nextTotalRows) => { totalRows = nextTotalRows; },
+    setSelectedTable: (value) => { selectedTable = value; },
+    getColumns: () => columns,
+    setColumns: (value) => { columns = value; },
+    setTotalRows: (value) => { totalRows = value; },
+    getGlobalFilter: () => globalFilter,
+    setGlobalFilter: (value) => { globalFilter = value; },
+    getColumnFilters: () => columnFilters,
+    setColumnFilters: (value) => { columnFilters = value; },
+    getSortColumn: () => sortColumn,
+    setSortColumn: (value) => { sortColumn = value; },
+    getSortAsc: () => sortAsc,
+    setSortAsc: (value) => { sortAsc = value; },
+    setLoading: (value) => { loading = value; },
+    setCountPending: (value) => { countPending = value; },
     setError: (message) => { appState.error = message; },
+    getVisibleColumns: () => visColsList,
+    getColumnIndex: (col) => colIndexMap.get(col),
+    getCachedTableColumns: (table) => appState.tableColumns[table],
+    getTableConfig,
+    ensureTableConfig,
+    updateTableConfig,
+    queryTable,
+    countRows,
+    cancelQueries,
+    tick,
+    applyAutoWidths: () => applyAutoWidths(),
   });
+
+  const virtualRows = query.virtualRows;
+  const reloadData = query.reloadData;
+  const debouncedReload = query.debouncedReload;
+  const handleSort = query.handleSort;
+  const selectTable = query.selectTable;
 
   /**
    * Clears every piece of per-database local state BrowseData caches about
@@ -210,153 +213,7 @@
     globalFilter = "";
     sortColumn = null;
     sortAsc = true;
-    lastFilterState = "";
-    if (filterDebounce) { clearTimeout(filterDebounce); filterDebounce = null; }
-    virtualRows.reset();
-  }
-
-  async function selectTable(name: string) {
-    // Cancel any pending debounced reload from the outgoing table so it can't
-    // fire against the incoming one and waste a round-trip.
-    if (filterDebounce) { clearTimeout(filterDebounce); filterDebounce = null; }
-    selectedTable = name;
-    // Pre-populate columns from the openDatabase-time autocomplete cache
-    // so buildFilters() (called by reloadData below) sees the schema BEFORE
-    // the first query result arrives. Without this, filters are dropped on
-    // the very first query after a table switch because `valid` is empty.
-    columns = appState.tableColumns[name] ?? [];
-    const cfg = ensureTableConfig(name);
-    if (cfg.sort_column && !columns.includes(cfg.sort_column)) {
-      updateTableConfig(name, (tableCfg) => {
-        tableCfg.sort_column = null;
-        tableCfg.sort_asc = true;
-      });
-    }
-    sortColumn = cfg.sort_column;
-    sortAsc = cfg.sort_asc;
-    // Hydrate ephemeral filter state from pinned defaults.
-    // Orphaned filters (pinned column no longer in schema) are silently
-    // dropped at query time by buildFilters() against the live `columns`.
-    columnFilters = Object.fromEntries(
-      Object.entries(cfg.pinned_filters).map(([col, pf]) => [
-        col,
-        { value: pf.value, is_regex: pf.is_regex },
-      ]),
-    );
-    globalFilter = cfg.pinned_global_filter ?? "";
-    lastFilterState = globalFilter.trim() + JSON.stringify(columnFilters);
-
-    await reloadData();
-
-    // Auto-fit column widths on first open (no saved widths for this table),
-    // but only while this call is still the current selection. selectTable()
-    // can run again while the await above is in flight -- click table A (no
-    // saved widths, slow first load), then table B before A's first chunk
-    // lands -- and applyAutoWidths() measures and persists through the LIVE
-    // `selectedTable`, not `name`. A's resumed tail therefore wrote auto-fit
-    // widths taken from B's grid (or from B's bare headers, if B's own chunk
-    // had not arrived either) into B's config, silently discarding the widths
-    // the user had hand-tuned there. Every other post-await consumer in this
-    // file is epoch-guarded via virtualRows.isCurrent(); this tail has no
-    // epoch, so it re-reads the selection instead.
-    if (
-      !shouldAutoFitWidths({
-        requestedTable: name,
-        currentTable: selectedTable,
-        savedWidths: getTableConfig(name).column_widths,
-      })
-    ) {
-      return;
-    }
-    applyAutoWidths();
-  }
-
-  async function reloadData() {
-    if (!selectedTable) return;
-    loading = true;
-    const reload = await virtualRows.beginReload();
-    if (reload === null) return;
-    const { epoch: myEpoch, snapshot } = reload;
-    // beginReload() captures the snapshot synchronously, before its first
-    // await, so it pins the non-null selectedTable guarded above. This branch
-    // is therefore unreachable; it exists to hand countRows the plain `string`
-    // its Rust signature requires without an assertion (see ipc.ts).
-    const table = snapshot.table;
-    if (table === null) {
-      loading = false;
-      return;
-    }
-    try {
-      // Use the epoch's pinned snapshot for the first chunk AND the row count
-      // so both agree with the background chunk fetches virtualRows will run.
-      const result = await loadChunk(0, CHUNK_SIZE, snapshot);
-      if (!virtualRows.applyFirstChunk(myEpoch, result)) return;
-
-      if (result.total_rows !== null) {
-        totalRows = result.total_rows;
-        countPending = false;
-      } else {
-        totalRows = result.rows.length < CHUNK_SIZE ? result.rows.length : CHUNK_SIZE;
-        countPending = true;
-        countRows({
-          table, filters: snapshot.filters, globalFilter: snapshot.globalFilter,
-        }).then((count) => {
-          if (virtualRows.isCurrent(myEpoch)) {
-            totalRows = count;
-            countPending = false;
-          }
-        }).catch((e) => {
-          if (virtualRows.isCurrent(myEpoch)) {
-            countPending = false;
-            appState.error = String(e);
-          }
-        });
-      }
-
-      await tick();
-    } catch (e) {
-      if (virtualRows.isCurrent(myEpoch)) appState.error = String(e);
-    } finally {
-      if (virtualRows.isCurrent(myEpoch)) loading = false;
-    }
-  }
-
-  // Plain `let` on purpose — this is a deduplication memo for debouncedReload,
-  // not reactive state. Tracking it via `$state` would defeat the dedup (every
-  // read/write would trigger downstream effects).
-  let lastFilterState = "";
-
-  function hasIncompleteFilter(): boolean {
-    // Segment/regex logic lives in filterOperators.ts (pure + tested).
-    return Object.values(columnFilters).some((f) =>
-      hasIncompleteOperator(f.value, f.is_regex),
-    );
-  }
-
-  function debouncedReload() {
-    if (hasIncompleteFilter()) return;
-    const filterSnapshot = globalFilter.trim() + JSON.stringify(columnFilters);
-    if (filterSnapshot === lastFilterState) return;
-    if (filterDebounce) clearTimeout(filterDebounce);
-    filterDebounce = setTimeout(() => {
-      lastFilterState = filterSnapshot;
-      reloadData();
-    }, FILTER_DEBOUNCE_MS);
-  }
-
-  function handleSort(col: string) {
-    if (sortColumn === col) { sortAsc = !sortAsc; }
-    else { sortColumn = col; sortAsc = true; }
-    if (selectedTable) {
-      updateTableConfig(selectedTable, (cfg) => {
-        cfg.sort_column = sortColumn;
-        cfg.sort_asc = sortAsc;
-      });
-    }
-    // Always reload after a sort click. buildFilters() strips any half-typed
-    // operator segment, so a bare operator in a filter cell can't leave the
-    // grid persistently ordered one way while the header shows the other.
-    reloadData();
+    query.resetForNewDatabase();
   }
 
   function toggleColumnHidden(col: string) {
@@ -416,11 +273,12 @@
     const types = data.headers.map((h) =>
       selectedTable ? (appState.tableColumnTypes[selectedTable]?.[h] ?? "") : "",
     );
-    await exportToXlsx({
+    const path = await exportToXlsx({
       headers: data.headers,
       rows: data.rows,
       columnTypes: types,
     });
+    appState.notice = `Excel export written to ${path}`;
   }
 
   function getColumnColor(col: string): string {
@@ -579,7 +437,7 @@
           <button
             class="reset-filters-btn"
             onclick={pinned.handleResetClick}
-            title="Reset filters to saved defaults (Shift+click: also clear pinned)"
+            title="Reset filters to their saved (pinned) defaults — Shift+click also clears the pinned defaults themselves"
             aria-label="Reset filters"
           >Reset</button>
           <div class="filter-help-wrap">
@@ -615,7 +473,7 @@
           <button
             onclick={() => (showFinder = !showFinder)}
             class="settings-btn find-col-btn"
-            title="Find column by name"
+            title="Find column by name ({modKey}+F)"
             aria-label="Find column"
           >
             <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
@@ -623,7 +481,7 @@
               <line x1="10.5" y1="10.5" x2="14" y2="14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
             </svg>
             <span>Find column</span>
-            <kbd class="kbd-hint">Ctrl+F</kbd>
+            <kbd class="kbd-hint">{modKey}+F</kbd>
           </button>
           <span class="row-info">{countPending ? 'counting...' : `${totalRows.toLocaleString()} rows`}</span>
           {#if loading}<span class="loading-indicator">Loading...</span>{/if}
@@ -644,12 +502,15 @@
         {/if}
 
         <DataGrid
-          columns={visCols()}
+          columns={visColsList}
           mode={{
             kind: "virtual",
             totalRows,
             getRow: virtualRows.getVisibleRow,
+            peekRow: virtualRows.peekVisibleRow,
             getRows: virtualRows.getVisibleRows,
+            setVisibleWindow: virtualRows.setVisibleWindow,
+            rowsVersion: virtualRows.cacheVersion,
           }}
           columnColors={visColColors}
           sortColumn={sortColumn}
@@ -682,7 +543,7 @@
         />
 
         <ColumnFinder
-          columns={allColsOrdered()}
+          columns={allColsOrderedList}
           hiddenColumns={selectedTable ? getTableConfig(selectedTable).hidden_columns : []}
           open={showFinder}
           onClose={() => (showFinder = false)}

@@ -89,6 +89,17 @@ export interface ViewConfig {
   column_order: string[];
   pinned_filters: Record<string, PinnedFilter>;
   pinned_global_filter: string | null;
+  /**
+   * Persisted column widths in pixels, keyed by column name.
+   *
+   * Values must be NON-NEGATIVE INTEGERS. The Rust side is a
+   * `HashMap<String, u32>`, and serde rejects the whole map -- and therefore
+   * the whole `save_view_config` call -- on the first fractional or negative
+   * value. There is no partial save: one `120.5` silently loses the user's
+   * colours, pins, hidden columns and sort for that file too. DataGrid rounds
+   * on drag-end (`Math.round`) and `computeAutoWidths` returns integers; any
+   * new writer has to do the same.
+   */
   column_widths: Record<string, number>;
 }
 
@@ -150,11 +161,10 @@ export interface ExportXlsxArgs {
 // Thin passthroughs: the value here is the typed signature, not added logic.
 //
 // This does NOT mirror every `#[tauri::command]`, and used to claim it did.
-// `get_tables` and `get_current_path` are registered on the Rust side but
-// unused from the frontend (`open_database` already returns the table list, and
-// the toolbar reads the path out of `appState`), and the paging benchmark is
-// `cfg(debug_assertions)` only. Wrappers exist for the commands the frontend
-// calls; a command with no wrapper here is a command nothing calls.
+// Wrappers exist for the commands the frontend calls, and only those; a Rust
+// command with no wrapper here is a command nothing in `src/` invokes. Adding a
+// wrapper "for completeness" is how the previous dead ones (`get_tables`,
+// `get_current_path`, the paging benchmark) came to exist and then rot.
 
 /** Path of the file the app was launched with (CLI arg / file association). */
 export function getInitialFile(): Promise<string | null> {
@@ -234,9 +244,15 @@ export function executeSql(sql: string): Promise<SqlResult> {
   return invoke<SqlResult>("execute_sql", { sql });
 }
 
-/** Export a selection to XLSX and open it. */
-export function exportToXlsx(args: ExportXlsxArgs): Promise<void> {
-  return invoke("export_to_xlsx", { ...args });
+/**
+ * Export a selection to XLSX, open it, and return the path that was written.
+ *
+ * The Rust command is `Result<String, String>` and always has been; typing this
+ * `Promise<void>` threw the filename away, so the app opened a workbook in Excel
+ * and could not tell the user where it had put it.
+ */
+export function exportToXlsx(args: ExportXlsxArgs): Promise<string> {
+  return invoke<string>("export_to_xlsx", { ...args });
 }
 
 /** Current Excel export directory (null-coalesced to "" by callers). */

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { tick, untrack } from "svelte";
 
   interface Props {
     columns: string[];
@@ -35,10 +35,17 @@
     return columns.filter((c) => c.toLowerCase().includes(q)).slice(0, MAX_RESULTS);
   });
 
-  // Clamp selection if matches shrink
+  // Clamp selection if matches shrink.
+  //
+  // The effect READS `selectedIdx` and WRITES it -- the same self-invalidating
+  // shape that produced `effect_update_depth_exceeded` in 26.7.5, converging
+  // here only because the clamp happens to be idempotent. `matches` is the one
+  // signal it must re-run on; the clamp itself runs untracked.
   $effect(() => {
     void matches;
-    if (selectedIdx >= matches.length) selectedIdx = Math.max(0, matches.length - 1);
+    untrack(() => {
+      if (selectedIdx >= matches.length) selectedIdx = Math.max(0, matches.length - 1);
+    });
   });
 
   // Keep the selected row visible inside the result list

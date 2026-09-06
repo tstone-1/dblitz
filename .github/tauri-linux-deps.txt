@@ -1,0 +1,33 @@
+# Tauri 2 Linux build prerequisites -- the single source of truth for every
+# apt-get step in .github/workflows/.
+#
+# This list is verbatim https://v2.tauri.app/start/prerequisites/ (Debian /
+# Ubuntu), checked 2026-09-06. It used to be maintained four times in two
+# different spellings: checks.yml installed `libappindicator3-dev` while
+# release.yml installed `libayatana-appindicator3-dev`, so the job that gates
+# main and the job that ships installers were compiling against different
+# system libraries. `libayatana-appindicator3-dev` is the current name --
+# libappindicator3 is the retired Canonical library that Ayatana forked and
+# replaced, and it is gone from newer Ubuntu images.
+#
+# `libgtk-3-dev` and `patchelf` are deliberately NOT here. libwebkit2gtk-4.1-dev
+# depends on libgtk-3-dev, and the release `quality` job has compiled this crate
+# with exactly this list and no libgtk-3-dev on every release since 26.7.0;
+# patchelf is an AppImage bundling tool and the release ubuntu leg bundles an
+# AppImage without it.
+#
+# Jobs that need more than this (the smoke test needs a WebDriver host and a
+# virtual display) append their extras on the install line, not here.
+#
+# Consumed with:  sudo apt-get install -y $(grep -vE '^\s*(#|$)' .github/tauri-linux-deps.txt)
+# so `#` comments and blank lines are stripped and the rest is word-split.
+
+libwebkit2gtk-4.1-dev
+build-essential
+curl
+wget
+file
+libxdo-dev
+libssl-dev
+libayatana-appindicator3-dev
+librsvg2-dev
