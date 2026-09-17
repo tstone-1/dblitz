@@ -6,6 +6,7 @@ import {
   INCOMPLETE_OPS,
   OPERAND_REQUIRED_OPS,
   stripIncompleteSegments,
+  filterAfterListPaste,
 } from "./filterOperators";
 
 describe("filter operator metadata", () => {
@@ -96,5 +97,53 @@ describe("stripIncompleteSegments", () => {
 
   it("keeps <> and plain contains segments", () => {
     expect(stripIncompleteSegments("<>;hello")).toBe("<>;hello");
+  });
+});
+
+describe("filterAfterListPaste", () => {
+  it("turns a pasted multi-line list into an alternation and switches to regex", () => {
+    const pasted = "GAN111-650WSB\n  GAN041-650WSB\n  GAN039-650NTB\n  GAN039-650NBB";
+    expect(filterAfterListPaste(undefined, 0, 0, pasted)).toEqual({
+      value: "GAN111-650WSB|GAN041-650WSB|GAN039-650NTB|GAN039-650NBB",
+      is_regex: true,
+    });
+  });
+
+  it("handles CRLF, a trailing newline, blank lines and duplicates from a spreadsheet copy", () => {
+    expect(filterAfterListPaste(undefined, 0, 0, "A\r\n\r\nB\r\nA\r\n")).toEqual({
+      value: "A|B",
+      is_regex: true,
+    });
+  });
+
+  it("escapes regex metacharacters so each line matches literally", () => {
+    const f = filterAfterListPaste(undefined, 0, 0, "a.b\n(c)|d\nx+y")!;
+    expect(f.value).toBe("a\\.b|\\(c\\)\\|d|x\\+y");
+    const re = new RegExp(f.value);
+    expect(re.test("a.b")).toBe(true);
+    expect(re.test("axb")).toBe(false);
+    expect(re.test("(c)|d")).toBe(true);
+    expect(re.test("d")).toBe(false);
+    expect(filterAfterListPaste(undefined, 0, 0, "C:\\dir\n$5")!.value).toBe("C:\\\\dir|\\$5");
+  });
+
+  it("leaves a single line to the browser's own paste", () => {
+    expect(filterAfterListPaste(undefined, 0, 0, "GAN111-650WSB")).toBeNull();
+    expect(filterAfterListPaste(undefined, 0, 0, "GAN111-650WSB\r\n")).toBeNull();
+    expect(filterAfterListPaste(undefined, 0, 0, "")).toBeNull();
+  });
+
+  it("replaces a text-mode filter, whose text would change meaning as a regex", () => {
+    expect(filterAfterListPaste({ value: "foo;bar", is_regex: false }, 3, 3, "A\nB")).toEqual({
+      value: "A|B",
+      is_regex: true,
+    });
+  });
+
+  it("replaces only the selection in a regex-mode filter", () => {
+    expect(filterAfterListPaste({ value: "^(X)$", is_regex: true }, 2, 3, "A\nB")).toEqual({
+      value: "^(A|B)$",
+      is_regex: true,
+    });
   });
 });

@@ -16,6 +16,7 @@
   import { pinGlyphPath } from "./pinGlyph";
   import ContextMenu from "./ContextMenu.svelte";
   import { pinToggleLabel, type PinState } from "./pinLabel";
+  import { filterAfterListPaste } from "./filterOperators";
 
   const ROW_HEIGHT = 26;
   const HEADER_HEIGHT = 26;
@@ -55,6 +56,8 @@
     columnFilters?: Record<string, { value: string; is_regex: boolean }>;
     onFilterInput?: (col: string, value: string) => void;
     onToggleRegex?: (col: string) => void;
+    /** Replaces a column's filter outright (value and mode), e.g. after a list paste. */
+    onSetFilter?: (col: string, filter: { value: string; is_regex: boolean }) => void;
   }
   /** Column management: hide/color/reorder plus persisted widths (px). */
   interface ColumnOpsProps {
@@ -115,6 +118,23 @@
 
   function pinStateOf(col: string): PinState {
     return pinning?.pinStates?.[col] ?? "none";
+  }
+
+  // A pasted multi-line list becomes a regex matching any of its lines; see
+  // filterAfterListPaste. Anything else is left to the input's own paste.
+  function handleFilterPaste(e: ClipboardEvent, col: string) {
+    const onSetFilter = filtering?.onSetFilter;
+    if (!onSetFilter) return;
+    const input = e.currentTarget as HTMLInputElement;
+    const next = filterAfterListPaste(
+      filtering?.columnFilters?.[col],
+      input.selectionStart,
+      input.selectionEnd,
+      e.clipboardData?.getData("text/plain") ?? "",
+    );
+    if (next === null) return;
+    e.preventDefault();
+    onSetFilter(col, next);
   }
 
   let showFilters = $derived(filtering?.columnFilters != null);
@@ -522,11 +542,12 @@
                 placeholder="Filter..."
                 value={f?.value ?? ''}
                 oninput={(e) => filtering?.onFilterInput?.(col, (e.target as HTMLInputElement).value)}
+                onpaste={(e) => handleFilterPaste(e, col)}
               />
               <button
                 class="regex-toggle"
                 class:active={f?.is_regex ?? false}
-                title={f?.is_regex ? 'Regex mode (e.g. foo|bar matches either)' : 'Text mode — use ; for OR (foo;bar). Toggle for regex (foo|bar).'}
+                title={f?.is_regex ? 'Regex mode (e.g. foo|bar matches either). Pasting a multi-line list matches any line.' : 'Text mode — use ; for OR (foo;bar). Toggle for regex (foo|bar). Pasting a multi-line list switches to regex and matches any line.'}
                 onclick={() => filtering?.onToggleRegex?.(col)}
               >.*</button>
               {#if pinning?.onTogglePinFilter}

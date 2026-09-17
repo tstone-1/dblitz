@@ -292,6 +292,11 @@
     debouncedReload();
   }
 
+  function setFilter(col: string, filter: { value: string; is_regex: boolean }) {
+    columnFilters[col] = filter;
+    debouncedReload();
+  }
+
   function toggleRegex(col: string) {
     if (!columnFilters[col]) columnFilters[col] = { value: "", is_regex: true };
     else columnFilters[col] = { ...columnFilters[col], is_regex: !columnFilters[col].is_regex };
@@ -520,6 +525,7 @@
             columnFilters,
             onFilterInput: handleFilterInput,
             onToggleRegex: toggleRegex,
+            onSetFilter: setFilter,
           }}
           columnOps={{
             onHideColumn: toggleColumnHidden,

@@ -42,3 +42,45 @@ export function stripIncompleteSegments(value: string): string {
     })
     .join(";");
 }
+
+// Characters with a meaning in Rust's `regex` crate outside a character class.
+// `-` is only special inside `[...]`, so a part number like GAN111-650WSB is
+// left readable in the resulting pattern.
+const REGEX_META = /[\\^$.*+?()[\]{}|]/g;
+
+export function escapeRegex(text: string): string {
+  return text.replace(REGEX_META, "\\$&");
+}
+
+/**
+ * A column filter after pasting clipboard text, or null when the paste should
+ * be left to the browser.
+ *
+ * An `<input>` silently deletes the line breaks of a pasted list, so a column
+ * copied out of Excel would become one long run-together string that matches
+ * nothing. Two or more non-empty lines are instead turned into a regex that
+ * matches any of them: each line trimmed, escaped and joined with `|`,
+ * duplicates dropped. In regex mode the pattern replaces the selection, like
+ * any paste. In text mode the existing text would change meaning under regex
+ * mode, so the pasted list becomes the whole filter.
+ */
+export function filterAfterListPaste(
+  current: { value: string; is_regex: boolean } | undefined,
+  selectionStart: number | null,
+  selectionEnd: number | null,
+  pasted: string,
+): { value: string; is_regex: boolean } | null {
+  const lines = pasted
+    .split(/\r\n|\r|\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  if (lines.length < 2) return null;
+  const pattern = [...new Set(lines)].map(escapeRegex).join("|");
+  if (!current?.is_regex) return { value: pattern, is_regex: true };
+  const start = selectionStart ?? current.value.length;
+  const end = selectionEnd ?? start;
+  return {
+    value: current.value.slice(0, start) + pattern + current.value.slice(end),
+    is_regex: true,
+  };
+}

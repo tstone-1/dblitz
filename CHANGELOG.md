@@ -5,6 +5,23 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.9.1] - 2026-09-17
+
+### Added
+- **Pasting a list into a column filter matches any line of it.** A text input
+  drops the line breaks of pasted text, so a column copied out of Excel became
+  one run-together string that matched nothing. Two or more non-empty lines now
+  become a regex alternation (`A|B|C`) and the column switches to regex mode.
+  Lines are trimmed, blank lines and duplicates are dropped, and regex
+  metacharacters are escaped so each line matches literally. In regex mode the
+  list replaces only the selected text; in text mode it replaces the filter.
+  Pasting a single line behaves as before.
+
+### Internal
+- vitest 4 -> 5 and `dirs` 6 -> 7, with vitest's transform cache persisted
+  across runs. No stored config path moves.
+- Rust and npm dependencies updated within their semver ranges.
+
 ## [26.9.0] - 2026-09-06
 
 ### Fixed
