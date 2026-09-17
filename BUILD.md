@@ -522,16 +522,14 @@ locally — CI does. `npx tauri build` is only for a local desktop artifact.
 > not rebuilt: `gh run rerun <run-id> --failed`, then re-watch. (Seen on both
 > `26.7.1` publish attempts, 2026-07-09.)
 
-### 4. Deploy locally / to shared tools
+### 4. Deploy locally
 
-**Windows** — copy the portable exe to a shared tools folder (stable filename, no version suffix):
+**Windows** — nothing to copy. An installed copy picks the release up through
+the in-app updater; a fresh machine installs from the release's
+`dblitz_<version>_x64-setup.exe`.
 
-```bash
-cp src-tauri/target/release/dblitz.exe /path/to/shared/tools/dblitz.exe
-```
-
-**macOS** — there is no shared-exe step; deploy the just-released build to this
-machine through the Homebrew cask. Run `brew update` first so brew's tap clone
+**macOS** — deploy the just-released build to this machine through the
+Homebrew cask. Run `brew update` first so brew's tap clone
 picks up the `update-tap` commit CI just pushed:
 
 ```bash
@@ -594,7 +592,6 @@ npm run quality
 # CI's preflight job runs, so a green answer here means the tag is accepted
 node scripts/release-preflight.mjs vYY.M.MICRO
 npx tauri build
-cp src-tauri/target/release/dblitz.exe /path/to/shared/tools/dblitz.exe
 git status --porcelain && git diff --stat   # review the whole tree before staging
 # Explicit pathspec, never `git add -A` -- this repo is public (see step 3)
 git add package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock \
