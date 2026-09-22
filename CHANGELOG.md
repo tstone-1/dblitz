@@ -5,6 +5,23 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.9.2] - 2026-09-22
+
+### Added
+- **Right-clicking a column header offers "Copy column name".** It puts the
+  name on the clipboard exactly as the header shows it, unquoted. The item is
+  there in every grid, including SQL results, whose header menu was empty
+  until now.
+- **The selection is marked across the whole grid (crosshair).** The rows and
+  columns a selection spans get a light accent tint, and their column headers
+  and row numbers are highlighted, so after scrolling the selected cell out of
+  view it is still clear which row and column it was in. The tint is laid over
+  column colors rather than replacing them.
+
+### Internal
+- Dependency updates within their current ranges, among them `tauri` 2.11.6
+  and `tauri-plugin-updater` 2.12.0.
+
 ## [26.9.1] - 2026-09-17
 
 ### Added

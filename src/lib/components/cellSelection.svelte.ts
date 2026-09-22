@@ -125,6 +125,19 @@ export function createCellSelection() {
     return false;
   }
 
+  /** True when any selection rectangle spans this row / this column. DataGrid
+   *  uses them for the crosshair: the tinted row and column bands, header and
+   *  row number that stay visible once the selected cell is scrolled away. */
+  function rowSelected(row: number): boolean {
+    for (const b of bounds) if (row >= b.r0 && row <= b.r1) return true;
+    return false;
+  }
+
+  function colSelected(col: number): boolean {
+    for (const b of bounds) if (col >= b.c0 && col <= b.c1) return true;
+    return false;
+  }
+
   /**
    * Membership AND the four selection-border edges for one cell, in one call.
    *
@@ -249,6 +262,8 @@ export function createCellSelection() {
     get selectedColumnCount() { return selectedColumnCount; },
     get hasMultipleSelectedCells() { return hasMultipleSelectedCells; },
     isSelected,
+    rowSelected,
+    colSelected,
     cellFlags,
     onCellMouseDown,
     onCellMouseEnter,

@@ -436,6 +436,17 @@
 
   function closeHeaderCtx() { headerCtx = null; }
 
+  // Copies the name exactly as the header shows it, unquoted: the usual target
+  // is a filter, a spreadsheet or a message, not an SQL identifier.
+  async function copyColumnName(col: string) {
+    closeHeaderCtx();
+    try {
+      await navigator.clipboard.writeText(col);
+    } catch (e) {
+      onError?.(String(e));
+    }
+  }
+
   // Header mouse-based reorder (extracted to dragReorder.ts)
   const reorder = createDragReorder(() => columns, () => columnOps?.onReorderColumn);
 
@@ -511,6 +522,7 @@
             aria-sort={sortColumn === col ? (sortAsc ? 'ascending' : 'descending') : 'none'}
             class:sortable={onSort != null}
             class:has-active-filter={(filtering?.columnFilters?.[col]?.value ?? '').trim() !== ''}
+            class:crosshair={selection.colSelected(colIdx)}
             class:drag-over-header={reorder.reorderOverCol === col && reorder.reorderCol !== col}
             class:dragging={reorder.reorderCol === col}
             data-colidx={colIdx}
@@ -582,13 +594,14 @@
     <div class="scroll-spacer" style="height: {scrollGeometry.spacerHeight}px;">
       {#each visibleRowIndices() as rowIdx (rowIdx)}
         {@const row = getRowData(rowIdx)}
+        {@const rowInSel = selection.rowSelected(rowIdx)}
         <div class="grid-row data-row"
           role="row"
           tabindex="-1"
           style="position: absolute; top: {rowIndexToVirtualTop(rowIdx, ROW_HEIGHT, scrollGeometry, viewportHeight, scrollTop)}px; height: {ROW_HEIGHT}px; width: 100%;"
           oncontextmenu={(e) => handleContextMenu(e, rowIdx)}
           onmousedown={(e) => selection.onCellMouseDown(e, rowIdx)}>
-          <div class="grid-cell row-num" role="gridcell" tabindex="-1">{rowIdx + 1}</div>
+          <div class="grid-cell row-num" class:crosshair={rowInSel} role="gridcell" tabindex="-1">{rowIdx + 1}</div>
           {#each columns as col, vi}
             {@const cell = selection.cellFlags(rowIdx, vi)}
             <div class="grid-cell data-cell"
@@ -596,6 +609,7 @@
               tabindex="-1"
               data-col={vi}
               class:selected={cell.selected}
+              class:crosshair={rowInSel || selection.colSelected(vi)}
               class:sel-top={cell.top}
               class:sel-bottom={cell.bottom}
               class:sel-left={cell.left}
@@ -656,6 +670,10 @@
 
 {#if headerCtx}
   <ContextMenu x={headerCtx.x} y={headerCtx.y} onClose={closeHeaderCtx}>
+    <button class="ctx-item" onclick={() => copyColumnName(headerCtx!.col)}>Copy column name</button>
+    {#if columnOps?.onResetColumnWidths || columnOps?.onHideColumn}
+      <div class="ctx-sep"></div>
+    {/if}
     {#if columnOps?.onResetColumnWidths}
       <button class="ctx-item" onclick={() => { columnOps?.onResetColumnWidths?.(); closeHeaderCtx(); }}>Auto-fit column widths</button>
     {/if}
@@ -865,6 +883,28 @@
   .data-cell {
     padding: 3px 8px 3px 4px;
     user-select: none;
+  }
+
+  /* Crosshair: the rows and columns the selection spans stay marked after the
+   * selected cell scrolls out of view. The tint is an inset shadow painted
+   * over the cell's background, not a background of its own, so a user
+   * column color (set inline) still shows through. Selected cells keep their
+   * own, stronger styling below. */
+  .data-row .data-cell.crosshair:not(.selected) {
+    box-shadow:
+      inset 0 -1px 0 0 color-mix(in srgb, var(--border-color) 40%, transparent),
+      inset 0 0 0 999px color-mix(in srgb, var(--accent) 7%, transparent);
+  }
+  .data-row .row-num.crosshair,
+  .col-header.crosshair {
+    color: var(--accent);
+    font-weight: 600;
+    box-shadow: inset 0 0 0 999px color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+  .col-header.crosshair.has-active-filter {
+    box-shadow:
+      inset 0 -3px 0 var(--accent),
+      inset 0 0 0 999px color-mix(in srgb, var(--accent) 18%, transparent);
   }
 
   .null-value {

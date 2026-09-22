@@ -173,3 +173,28 @@ describe("cellFlags", () => {
     expect(selection.cellFlags(2, 2).right).toBe(false);
   });
 });
+
+describe("rowSelected / colSelected (crosshair)", () => {
+  it("marks exactly the rows and columns a single cell sits in", () => {
+    const selection = createCellSelection();
+    selection.onCellMouseDown(makeCellEvent(3), 5);
+
+    expect([0, 1, 2, 3, 4, 5].map(selection.colSelected)).toEqual([false, false, false, true, false, false]);
+    expect([3, 4, 5, 6].map(selection.rowSelected)).toEqual([false, false, true, false]);
+  });
+
+  it("covers every row and column of each disjoint rectangle, and nothing between them", () => {
+    const selection = createCellSelection();
+    selection.setSelection({ row: 1, col: 0 }, { row: 2, col: 1 });
+    selection.onCellMouseDown(makeCellEvent(4, { ctrlKey: true }), 6);
+
+    expect([0, 1, 2, 3, 4, 5].map(selection.colSelected)).toEqual([true, true, false, false, true, false]);
+    expect([0, 1, 2, 3, 5, 6, 7].map(selection.rowSelected)).toEqual([false, true, true, false, false, true, false]);
+  });
+
+  it("marks nothing without a selection", () => {
+    const selection = createCellSelection();
+    expect(selection.rowSelected(0)).toBe(false);
+    expect(selection.colSelected(0)).toBe(false);
+  });
+});
