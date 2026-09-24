@@ -531,7 +531,7 @@
             oncontextmenu={(e) => handleHeaderContextMenu(e, col)}
             onmousedown={(e) => columnOps?.onReorderColumn ? reorder.onMouseDown(e, col) : undefined}
             style={getColor(col) ? `background: ${getColor(col)};` : ''}>
-            {col}{#if pinStateOf(col) !== "none"}<span class="header-pin-glyph" class:modified={pinStateOf(col) === "modified"} title={pinStateOf(col) === "modified" ? "Pinned filter (modified)" : "Pinned filter"}>
+            <span class="cell-text">{col}</span>{#if pinStateOf(col) !== "none"}<span class="header-pin-glyph" class:modified={pinStateOf(col) === "modified"} title={pinStateOf(col) === "modified" ? "Pinned filter (modified)" : "Pinned filter"}>
               <svg viewBox="0 0 16 16" width="9" height="9" aria-hidden="true"><path d={pinGlyphPath} fill="currentColor" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
             </span>{/if}{#if sortColumn === col}<span class="sort-indicator">{sortAsc ? ' \u25B2' : ' \u25BC'}</span>{/if}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -616,7 +616,7 @@
               class:sel-right={cell.right}
               style={getColor(col) ? `background: ${getColor(col)};` : ''}
               onmouseenter={() => selection.onCellMouseEnter(rowIdx, vi)}>
-              {#if !row}{:else if row[vi] === null}<span class="null-value">NULL</span>{:else}{row[vi]}{/if}
+              {#if !row}{:else if row[vi] === null}<span class="null-value">NULL</span>{:else}<span class="cell-text">{row[vi]}</span>{/if}
             </div>
           {/each}
         </div>
@@ -734,6 +734,18 @@
     display: flex;
     align-items: center;
   }
+
+  /* `text-overflow` on .grid-cell itself does nothing: a flex container never
+     draws an ellipsis, so an over-long value was cut mid-glyph and looked like
+     the window clipped the column. The text sits in its own box instead. The
+     header's pin glyph and sort arrow keep their size and the name shrinks. */
+  .cell-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .col-header > :not(.cell-text) { flex-shrink: 0; }
 
   .sticky-header {
     position: sticky;

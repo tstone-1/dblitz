@@ -119,6 +119,28 @@
     showRecents = false;
   }
 
+  // The label swaps to a confirmation for a moment, because a copy has no
+  // other visible effect and the path looks like plain text.
+  let pathCopied = $state(false);
+  let pathCopiedTimer: ReturnType<typeof setTimeout> | null = null;
+
+  async function copyPath() {
+    const path = appState.dbPath;
+    if (!path) return;
+    try {
+      await navigator.clipboard.writeText(path);
+    } catch (e) {
+      appState.error = `Could not copy the path: ${e}`;
+      return;
+    }
+    pathCopied = true;
+    if (pathCopiedTimer) clearTimeout(pathCopiedTimer);
+    pathCopiedTimer = setTimeout(() => {
+      pathCopied = false;
+      pathCopiedTimer = null;
+    }, 1200);
+  }
+
   function handleClickOutside(e: MouseEvent) {
     const target = e.target as HTMLElement;
     if (!target.closest(".settings-dropdown") && !target.closest(".settings-toggle")) {
@@ -186,9 +208,16 @@
     <span class="window-label-pill" style={pillStyle}>{appState.fileConfig.label}</span>
   {/if}
 
-  <span class="file-path" title={appState.dbPath ?? ""}>
-    {appState.dbPath ?? ""}
-  </span>
+  {#if appState.dbPath}
+    <button
+      class="file-path"
+      class:copied={pathCopied}
+      onclick={copyPath}
+      title={`${appState.dbPath}\nClick to copy the path`}
+    >{pathCopied ? "Path copied to clipboard" : appState.dbPath}</button>
+  {:else}
+    <span class="file-path"></span>
+  {/if}
 
   {#if appState.dbPath}
     <span class="table-count">{appState.tables.length} table{appState.tables.length !== 1 ? 's' : ''}</span>
@@ -451,6 +480,20 @@
     flex: 1;
     min-width: 0;
   }
+  /* The path is a button only so it can be clicked and focused; it keeps the
+     look of the plain label it replaced. */
+  button.file-path {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+    text-align: left;
+    cursor: copy;
+    transition: none;
+  }
+  button.file-path:hover { color: var(--text-primary); background: transparent; }
+  button.file-path:active { background: transparent; color: var(--text-primary); }
+  button.file-path.copied { color: var(--accent); }
 
   .table-count { color: var(--text-muted); font-size: 11px; }
 

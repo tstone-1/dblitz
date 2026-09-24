@@ -5,6 +5,25 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.9.3] - 2026-09-24
+
+### Added
+- **Clicking the database path in the toolbar copies it to the clipboard.**
+  The path briefly reads "Path copied to clipboard" to confirm.
+
+### Fixed
+- **Text too long for its column now ends in "…".** Grid cells and column
+  headers cut an over-long value off mid-character with no sign that more
+  text followed, which at the right edge of the grid looked like the window
+  clipping the last column.
+- **Right-click menus stay inside the window.** A menu opened near the right
+  or bottom edge, such as the header menu of the last column, now opens to the
+  left of or above the pointer instead of running past the window border.
+
+### Internal
+- Dependency updates within their current ranges, among them
+  `@sveltejs/vite-plugin-svelte` 7.3.1 and `thiserror` 2.0.21.
+
 ## [26.9.2] - 2026-09-22
 
 ### Added
