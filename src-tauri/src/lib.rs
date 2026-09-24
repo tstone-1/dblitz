@@ -477,13 +477,32 @@ fn get_initial_file(pending: State<'_, PendingOpen>) -> Option<String> {
 /// `dblitz inventory.db` from the file's own directory opened a second window on
 /// a file already open.
 fn launch_argument() -> Option<String> {
-    resolve_launch_argument(std::env::args().nth(1))
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    resolve_launch_argument(&args, |path| std::path::Path::new(path).is_file())
 }
 
 /// The half of [`launch_argument`] that does not read the process environment,
-/// so it can be tested.
-fn resolve_launch_argument(raw: Option<String>) -> Option<String> {
-    raw.map(|path| absolutize_launch_path(&path))
+/// so it can be tested. `args` excludes the program name.
+///
+/// A path containing spaces can arrive split into several arguments, and the
+/// in-app updater is what does it on Windows: Tauri's NSIS template relaunches
+/// the updated app with `${GetOptions} $CMDLINE "/ARGS" $R0` followed by
+/// `RunAsUser "...\dblitz.exe" "$R0"`. `GetOptions` strips the quotes the
+/// updater plugin put around the path, so `...\Shared Files - Archive\x.sqlite`
+/// came back as `...\Shared`, `Files`, `-`, `Archive\x.sqlite`, and dblitz
+/// opened the directory `...\Shared`. When the first argument is not a file but all
+/// of them joined by single spaces are, the joined path wins. A path holding a
+/// run of two or more spaces cannot be recovered this way: the split already
+/// lost how many there were.
+fn resolve_launch_argument(args: &[String], is_file: impl Fn(&str) -> bool) -> Option<String> {
+    let first = absolutize_launch_path(args.first()?);
+    if args.len() > 1 && !is_file(&first) {
+        let joined = absolutize_launch_path(&args.join(" "));
+        if is_file(&joined) {
+            return Some(joined);
+        }
+    }
+    Some(first)
 }
 
 /// Resolve a launch-argument path against the process working directory.
@@ -1080,14 +1099,58 @@ mod open_request_tests {
         // one resolver, which is what stops them drifting apart again.
         let cwd = std::env::current_dir().expect("a working directory");
 
-        let resolved = resolve_launch_argument(Some("inventory.sqlite".to_string()))
+        let resolved = resolve_launch_argument(&["inventory.sqlite".to_string()], |_| true)
             .expect("a present argument stays present");
         assert_eq!(
             std::path::Path::new(&resolved),
             cwd.join("inventory.sqlite")
         );
 
-        assert_eq!(resolve_launch_argument(None), None, "no argument, no path");
+        assert_eq!(
+            resolve_launch_argument(&[], |_| true),
+            None,
+            "no argument, no path"
+        );
+    }
+
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_path_split_at_its_spaces_is_joined_back_together() {
+        // The regression: after an in-app update, Tauri's NSIS installer
+        // relaunched dblitz with the path unquoted, so a file under
+        // "Shared Files - Archive" opened the directory "Shared" instead.
+        let cwd = std::env::current_dir().expect("a working directory");
+        let real = cwd.join("Shared Files - Archive").join("inventory.sqlite");
+        let real = real.to_string_lossy().into_owned();
+        let split: Vec<String> = real.split(' ').map(str::to_string).collect();
+        assert_eq!(split.len(), 4, "the fixture must actually be split");
+
+        let resolved = resolve_launch_argument(&split, |p| p == real);
+        assert_eq!(resolved.as_deref(), Some(real.as_str()));
+    }
+
+    #[test]
+    fn extra_arguments_are_not_joined_when_the_first_one_is_a_file() {
+        // Control: a first argument that exists is the path, whatever follows.
+        let cwd = std::env::current_dir().expect("a working directory");
+        let first = cwd.join("a.sqlite").to_string_lossy().into_owned();
+        let joined = format!("{first} extra");
+        let resolved =
+            resolve_launch_argument(&args(&[&first, "extra"]), |p| p == first || p == joined);
+        assert_eq!(resolved.as_deref(), Some(first.as_str()));
+    }
+
+    #[test]
+    fn a_missing_path_is_reported_as_given_when_joining_finds_nothing() {
+        // Neither spelling exists: keep the first argument, so the open fails
+        // with SQLite's error about the path the user can see, as before.
+        let cwd = std::env::current_dir().expect("a working directory");
+        let first = cwd.join("missing.sqlite").to_string_lossy().into_owned();
+        let resolved = resolve_launch_argument(&args(&[&first, "more"]), |_| false);
+        assert_eq!(resolved.as_deref(), Some(first.as_str()));
     }
 
     #[test]

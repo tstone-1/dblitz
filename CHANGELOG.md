@@ -5,7 +5,14 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
-## [26.9.4] - Unreleased
+## [26.9.4] - 2026-09-24
+
+### Fixed
+- **After an in-app update on Windows, the database reopens even when its
+  path contains spaces.** The installer restarts dblitz with the path
+  unquoted, so a file in a folder such as `Shared Files - Archive` failed with
+  "unable to open database file" naming only the part before the first
+  space. dblitz now puts such a split path back together.
 
 ### Internal
 - **Type-checking uses TypeScript 7.** `npm run check` runs
