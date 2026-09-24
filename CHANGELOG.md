@@ -5,6 +5,17 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.9.4] - Unreleased
+
+### Internal
+- **Type-checking uses TypeScript 7.** `npm run check` runs
+  `svelte-check --tsgo` against TypeScript 7.0.2; TypeScript 6 remains
+  installed because svelte-check still needs its JavaScript API.
+- **`npm run check` fails when svelte-check crashes.** svelte-check exits 0
+  after a crash, for example when TypeScript 7 is missing, so the check
+  passed without checking anything. A wrapper now requires the finished
+  summary line.
+
 ## [26.9.3] - 2026-09-24
 
 ### Added
