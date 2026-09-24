@@ -49,6 +49,7 @@ public_safe_fallback() {
             "eu-$(printf '%s' 'rdc01')" \
             "eurdc01$(printf '%s' 'scm001')" \
             "OneDrive - Nex$(printf '%s' 'peria')" \
+            "\\bnex$(printf '%s' 'peria')\\b" \
             "\\bnx016$(printf '%s' '023')\\b" \
             "timo\\.stein@nex$(printf '%s' 'peria')\\.com" \
             "--user[[:space:]]+timo-$(printf '%s' 'stein')\\b" \
@@ -57,6 +58,7 @@ public_safe_fallback() {
             "github\\.com/timo-$(printf '%s' 'stein')" \
             "\\beco$(printf '%s' 'products')\\b" \
             "eco-$(printf '%s' 'products')@" \
+            "\\beco-$(printf '%s' 'products')\\b" \
             "github\\.com/eco$(printf '%s' 'products')" \
             "eco-$(printf '%s' 'fmd')" \
             "eco-$(printf '%s' 'imds')" \
