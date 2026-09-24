@@ -74,7 +74,8 @@ public_safe_fallback() {
             "chem-contents-$(printf '%s' 'server')" \
             "nexdoc-$(printf '%s' 'creator')" \
             "customer_$(printf '%s' 'reply')" \
-            "ticket-$(printf '%s' 'creator2')"
+            "ticket-$(printf '%s' 'creator2')" \
+            "atr-$(printf '%s' 'viewer')"
     )
 
     scan_file() {
