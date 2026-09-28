@@ -55,13 +55,11 @@ jobs:
   backend:
     name: Backend (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Observed max 22 min 39 s (windows-latest, 2026-08-14, cold Rust cache)
-    # before DuckDB. With DuckDB and C++ debug info, macOS took 37 min 18 s
-    # cold (2026-09-28) - DuckDB compiled once for clippy and again for tests -
-    # and Linux and Windows hit the old 45-minute limit. Debug info is now off
-    # for libduckdb-sys; update this with the next cold observation. A warm
-    # cache is 2-4 min on every OS. One value covers all three legs, so it is
-    # set from the slowest.
+    # Observed max 55 min 30 s (windows-latest, 2026-09-28, cold Rust cache;
+    # Linux 34 min 41 s, macOS 31 min 26 s). DuckDB's C++ is compiled once for
+    # clippy and again for the tests; with its debug info on, Linux and Windows
+    # hit the previous 45-minute limit. A warm cache is 2-4 min on every OS.
+    # One value covers all three legs, so it is set from the slowest.
     timeout-minutes: 75
     strategy:
       fail-fast: false
@@ -138,12 +136,13 @@ jobs:
   smoke:
     name: Smoke (packaged app)
     runs-on: ubuntu-latest
-    # Observed max 10 min 6 s (2026-08-14, cold Rust cache + `cargo install
-    # tauri-driver`) before DuckDB, whose C++ now compiles in the app build;
-    # the old 25-minute limit was hit on the first cold run (2026-09-28).
-    # Update this with the next cold observation. 2-8 min warm. The script
-    # carries its own 10-minute deadline so a wedged WebDriver session fails
-    # with a diagnostic well inside this bound -- this is only the outer stop.
+    # Observed max 17 min 29 s (2026-09-28, cold Rust cache + `cargo install
+    # tauri-driver`, DuckDB's C++ compiled in the app build). The first cold
+    # run with DuckDB also ran the fixture's Rust example, which compiled
+    # DuckDB a second time and hit the previous 25-minute limit. 2-8 min warm.
+    # The script carries its own 10-minute deadline so a wedged WebDriver
+    # session fails with a diagnostic well inside this bound -- this is only
+    # the outer stop.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

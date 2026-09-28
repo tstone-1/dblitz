@@ -87,9 +87,9 @@ jobs:
   # release leg after the tag was already pushed.
   quality:
     runs-on: ubuntu-latest
-    # Observed max 18 min 52 s (2026-07-24, cold Rust cache) before DuckDB,
-    # whose C++ is compiled for clippy and again for the tests; the same gate
-    # in checks.yml took 37 min cold on macOS (2026-09-28). 10-15 min warm.
+    # Observed max 39 min 45 s (v26.9.5, 2026-09-28, cold Rust cache): DuckDB's
+    # C++ is compiled for clippy and again for the tests. The previous limit
+    # was 40 minutes. 10-15 min warm.
     # `npm run quality` is the full frontend + clippy + cargo test gate.
     timeout-minutes: 75
     # Compiles and tests only. Inherits `contents: read`.
@@ -192,7 +192,8 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     # Observed max 42 min 56 s (ubuntu-latest, 2026-08-05, cold Rust cache);
-    # 4-10 min per leg warm. AGENTS.md warns that a cold cache alone can push a
+    # the first legs with DuckDB took 17-30 min cold (v26.9.5, windows-latest
+    # slowest). 4-10 min per leg warm. AGENTS.md warns that a cold cache alone can push a
     # release leg past 20 minutes, so this is deliberately generous -- it exists
     # to stop a hung notarization submission or a wedged runner, not to police
     # build time. Note this bounds ONE leg: the matrix is max-parallel: 1, so

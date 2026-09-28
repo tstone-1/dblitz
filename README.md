@@ -127,7 +127,7 @@ cd src-tauri
 cargo run --release --example parquet_benchmark -- 50000000
 ```
 
-Measured 2026-09-28 on macOS 27.0, Apple M5, rustc 1.98.1, DuckDB 1.5.5, on a
+Measured 2026-09-28 at `ab4386a` on macOS 27.0, Apple M5, rustc 1.98.1, DuckDB 1.5.5, on a
 3.02 GB file of 50,000,000 rows. Median of five reads, 500-row pages. The
 one-time build is a single measurement: it runs once per view, and later pages
 are served from what it built.
@@ -155,7 +155,7 @@ cd src-tauri
 cargo run --release --example format_comparison_benchmark -- <dir> 50000000
 ```
 
-Measured 2026-09-28, same machine as above. Both files in the OS page cache.
+Measured 2026-09-28 at `ab4386a`, same machine as above. Both files in the OS page cache.
 First pages are single measurements, other pages the median of five reads,
 SQL queries the median of three.
 
