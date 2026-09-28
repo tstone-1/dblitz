@@ -5,7 +5,7 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
-## [26.9.6] - Unreleased
+## [26.9.6] - 2026-09-28
 
 ### Added
 - **Sorting a large Parquet file shows how far it has got.** While the sort
