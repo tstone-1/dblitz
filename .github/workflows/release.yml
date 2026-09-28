@@ -87,9 +87,10 @@ jobs:
   # release leg after the tag was already pushed.
   quality:
     runs-on: ubuntu-latest
-    # Observed max 39 min 45 s (v26.9.5, 2026-09-28, cold Rust cache): DuckDB's
-    # C++ is compiled for clippy and again for the tests. The previous limit
-    # was 40 minutes. 10-15 min warm.
+    # Observed max 39 min 45 s (v26.9.5, 2026-09-28, cold Rust cache), when
+    # DuckDB's C++ was compiled for clippy and again for the tests (fixed by
+    # `[profile.dev.build-override]` in Cargo.toml). The previous limit was
+    # 40 minutes. 10-15 min warm.
     # `npm run quality` is the full frontend + clippy + cargo test gate.
     timeout-minutes: 75
     # Compiles and tests only. Inherits `contents: read`.

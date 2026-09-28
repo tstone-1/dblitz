@@ -84,3 +84,12 @@ opt-level = 3
 # every backend job past its 45-minute limit.
 [profile.dev.package.libduckdb-sys]
 debug = false
+
+# Build scripts are compiled without debug info, stated explicitly. Left to
+# the default, `cargo check`/`cargo clippy` and `cargo build`/`cargo test`
+# compiled libduckdb-sys's build script in two profiles, so it ran twice and
+# DuckDB's C++ was compiled twice - measured 2026-09-28: clippy and check
+# linked one libduckdb-sys output, build and test another. Every CI backend job
+# paid for both (clippy, then tests). With this line all four share one build.
+[profile.dev.build-override]
+debug = false
