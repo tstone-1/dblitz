@@ -20,6 +20,8 @@ Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
   18 s at that size) and then pages in about 5 ms.
 
 ### Internal
+- Tauri 2.12 (the `tauri` crate, its plugins and the JS API and CLI),
+  Vite 8.3.1 and Vitest 5.0.2.
 - The filter grammar is parsed once and shared by the SQLite and Parquet
   query builders.
 - The packaged-app smoke test opens a Parquet file as well as a SQLite
