@@ -21,27 +21,18 @@
 //! `classifying_on_the_locked_instance_writes_nothing` pins this.
 //!
 //! duckdb-rs keeps the prepared-statement type private, so the database is
-//! opened through the C API: one raw connection classifies, and the same
-//! database is handed to the wrapper with `Connection::open_from_raw`, which
-//! does NOT take ownership of it - hence the hand-written `Drop`.
+//! a [`RawDb`] and its side connection is the classifier.
 
 use duckdb::{ffi, Connection};
 use std::ffi::{CStr, CString};
 use std::sync::Arc;
 
+use super::raw::RawDb;
 use super::sql_literal;
 
 pub(crate) struct LockedDb {
-    /// `Option` only so `Drop` can release it before the database it borrows.
-    conn: Option<Connection>,
-    classifier: ffi::duckdb_connection,
-    db: ffi::duckdb_database,
+    raw: RawDb,
 }
-
-// SAFETY: the raw handles are used only through `&mut self` or while the
-// owning `Mutex` in `ParquetSession` is held, never from two threads at once.
-// DuckDB database and connection handles may move between threads.
-unsafe impl Send for LockedDb {}
 
 /// Why a statement was refused before it ran.
 #[derive(Debug, PartialEq, Eq)]
@@ -69,36 +60,8 @@ impl LockedDb {
     }
 
     fn open_inner(path: &str, temp_dir: &str, lock: bool) -> Result<Self, String> {
-        let mut db: ffi::duckdb_database = std::ptr::null_mut();
-        let mut classifier: ffi::duckdb_connection = std::ptr::null_mut();
-        let memory = CString::new(":memory:").expect("no NUL");
-        // SAFETY: plain C API calls with out-pointers we own; each failure path
-        // releases what was already created.
-        unsafe {
-            if ffi::duckdb_open(memory.as_ptr(), &mut db) != ffi::duckdb_state_DuckDBSuccess {
-                return Err("could not start the Parquet query engine".to_string());
-            }
-            if ffi::duckdb_connect(db, &mut classifier) != ffi::duckdb_state_DuckDBSuccess {
-                ffi::duckdb_close(&mut db);
-                return Err("could not connect to the Parquet query engine".to_string());
-            }
-        }
-        // SAFETY: `db` is a valid, open database. `open_from_raw` borrows it
-        // (not owned), so our `Drop` closes it after the wrapper is gone.
-        let conn = match unsafe { Connection::open_from_raw(db) } {
-            Ok(c) => c,
-            Err(e) => {
-                unsafe {
-                    ffi::duckdb_disconnect(&mut classifier);
-                    ffi::duckdb_close(&mut db);
-                }
-                return Err(e.to_string());
-            }
-        };
         let locked = LockedDb {
-            conn: Some(conn),
-            classifier,
-            db,
+            raw: RawDb::open_in_memory()?,
         };
         let file = sql_literal(path);
         let tmp = sql_literal(temp_dir);
@@ -129,7 +92,7 @@ impl LockedDb {
     }
 
     pub(crate) fn conn(&self) -> &Connection {
-        self.conn.as_ref().expect("connection lives until drop")
+        self.raw.conn()
     }
 
     pub(crate) fn interrupt_handle(&self) -> Arc<duckdb::InterruptHandle> {
@@ -142,11 +105,12 @@ impl LockedDb {
     pub(crate) fn classify(&self, sql: &str) -> Result<(), Refusal> {
         let c = CString::new(sql)
             .map_err(|_| Refusal::Invalid("the query contains a NUL byte".into()))?;
+        let classifier = self.raw.side();
         // SAFETY: `classifier` is a live connection on a live database; every
         // extracted/prepared handle is destroyed before returning.
         unsafe {
             let mut extracted: ffi::duckdb_extracted_statements = std::ptr::null_mut();
-            let n = ffi::duckdb_extract_statements(self.classifier, c.as_ptr(), &mut extracted);
+            let n = ffi::duckdb_extract_statements(classifier, c.as_ptr(), &mut extracted);
             let verdict = if n == 0 {
                 let e = ffi::duckdb_extract_statements_error(extracted);
                 if e.is_null() {
@@ -160,12 +124,8 @@ impl LockedDb {
                 Err(Refusal::NotOne(n))
             } else {
                 let mut stmt: ffi::duckdb_prepared_statement = std::ptr::null_mut();
-                let ok = ffi::duckdb_prepare_extracted_statement(
-                    self.classifier,
-                    extracted,
-                    0,
-                    &mut stmt,
-                );
+                let ok =
+                    ffi::duckdb_prepare_extracted_statement(classifier, extracted, 0, &mut stmt);
                 let v = if ok != ffi::duckdb_state_DuckDBSuccess {
                     let e = ffi::duckdb_prepare_error(stmt);
                     Err(Refusal::Invalid(if e.is_null() {
@@ -185,18 +145,6 @@ impl LockedDb {
             };
             ffi::duckdb_destroy_extracted(&mut extracted);
             verdict
-        }
-    }
-}
-
-impl Drop for LockedDb {
-    fn drop(&mut self) {
-        // The wrapper connection first: it borrows `db` and must not outlive it.
-        self.conn.take();
-        // SAFETY: both handles were created in `open` and are released once.
-        unsafe {
-            ffi::duckdb_disconnect(&mut self.classifier);
-            ffi::duckdb_close(&mut self.db);
         }
     }
 }

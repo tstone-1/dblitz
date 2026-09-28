@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::filters::{build_where, Where};
+use super::raw::RawDb;
 use super::{check_table, quote_ident, render_expr, sql_literal, ParquetSession};
 use crate::db::{ColumnFilter, QueryRequest, QueryResult};
 
@@ -63,7 +64,7 @@ impl Views {
 }
 
 /// Detaches and deletes the sort cache. Called when the session drops.
-pub(crate) fn drop_sort_cache(conn: &mut Connection, views: &mut Views) {
+pub(crate) fn drop_sort_cache(conn: &Connection, views: &mut Views) {
     views.active = None;
     if views.attached {
         let _ = conn.execute_batch("DETACH sc;");
@@ -110,23 +111,24 @@ pub fn query_table(
         .collect::<Vec<_>>()
         .join(", ");
 
-    let conn = s.browse.lock();
+    let browse = s.browse.lock();
+    let conn = browse.conn();
     let (rows, total) = if !s.row_numbers {
-        offset_page(&conn, &proj, &filter, sort.as_ref(), req, gen, generation)?
+        offset_page(conn, &proj, &filter, sort.as_ref(), req, gen, generation)?
     } else if sort.is_none() && filter.clause.is_empty() {
         let end = req.offset.saturating_add(req.limit);
         let sql = format!(
             "SELECT {proj} FROM data_rn WHERE file_row_number >= {} AND file_row_number < {end} ORDER BY file_row_number",
             req.offset
         );
-        (fetch(&conn, &sql, &[], gen, generation)?, s.total_rows)
+        (fetch(conn, &sql, &[], gen, generation)?, s.total_rows)
     } else {
         let key = ViewKey { filter, sort };
         let mut views = s.views.lock();
         if key.sort.is_some() {
-            sorted_page(s, &conn, &mut views, key, &proj, req, gen, generation)?
+            sorted_page(s, &browse, &mut views, key, &proj, req, gen, generation)?
         } else {
-            filtered_page(&conn, &mut views, key, &proj, req, gen, generation)?
+            filtered_page(conn, &mut views, key, &proj, req, gen, generation)?
         }
     };
     if generation.load(Ordering::Relaxed) != gen {
@@ -152,14 +154,15 @@ pub(crate) fn count_rows(
     if filter.clause.is_empty() {
         return Ok(s.total_rows);
     }
-    let conn = s.browse.lock();
+    let browse = s.browse.lock();
+    let conn = browse.conn();
     let gen = generation.load(Ordering::Relaxed);
     if !s.row_numbers {
-        return count_where(&conn, &filter);
+        return count_where(conn, &filter);
     }
     let key = ViewKey { filter, sort: None };
     let mut views = s.views.lock();
-    ensure_filtered(&conn, &mut views, key, gen, generation).map(|rows| rows.len() as i64)
+    ensure_filtered(conn, &mut views, key, gen, generation).map(|rows| rows.len() as i64)
 }
 
 fn count_where(conn: &Connection, filter: &Where) -> Result<i64, String> {
@@ -270,7 +273,7 @@ fn filtered_page(
 #[allow(clippy::too_many_arguments)]
 fn sorted_page(
     s: &ParquetSession,
-    conn: &Connection,
+    browse: &RawDb,
     views: &mut Views,
     key: ViewKey,
     proj: &str,
@@ -278,6 +281,7 @@ fn sorted_page(
     gen: u64,
     generation: &AtomicU64,
 ) -> Result<Page, String> {
+    let conn = browse.conn();
     let fresh = matches!(&views.active, Some(View::Sorted { key: k, .. }) if *k == key);
     if !fresh {
         views.active = None;
@@ -303,8 +307,6 @@ fn sorted_page(
             .map(|c| quote_ident(&c.name))
             .collect::<Vec<_>>()
             .join(", ");
-        // Prepared rather than batched: the filter's params are values the
-        // user typed, and `execute_batch` cannot bind.
         conn.execute_batch("DROP TABLE IF EXISTS sc.v;")
             .map_err(|e| e.to_string())?;
         let create = format!(
@@ -312,15 +314,18 @@ fn sorted_page(
             key.filter.clause,
             order_by(sort, ", file_row_number")
         );
-        let built = conn
-            .prepare(&create)
-            .and_then(|mut st| st.execute(params_from_iter(&key.filter.params)));
+        // Built on the side connection, which is the one `view_progress` can
+        // ask DuckDB about while this runs. The filter's params are values the
+        // user typed, so they are bound, never spliced.
+        s.building.store(true, Ordering::Release);
+        let built = browse.execute_side(&create, &key.filter.params);
+        s.building.store(false, Ordering::Release);
         if let Err(e) = built {
             let _ = conn.execute_batch("DROP TABLE IF EXISTS sc.v; CHECKPOINT sc;");
             return Err(if generation.load(Ordering::Relaxed) != gen {
                 CANCELLED.to_string()
             } else {
-                e.to_string()
+                e
             });
         }
         let count: i64 = conn
@@ -567,6 +572,88 @@ mod tests {
         let mut q = req(0, 10);
         q.filters = vec![filter("id", ">abc", false)];
         assert!(query_table(&s, &q, &AtomicU64::new(0)).is_err());
+    }
+
+    /// A sort over enough rows that its build takes a visible while, run on
+    /// another thread; returns the session and the join handle.
+    fn start_big_sort(
+        rows: u64,
+    ) -> (
+        std::sync::Arc<ParquetSession>,
+        std::sync::Arc<AtomicU64>,
+        std::thread::JoinHandle<Result<QueryResult, String>>,
+    ) {
+        let dir = scratch_dir("progress");
+        let s = std::sync::Arc::new(
+            ParquetSession::open(fixture(&dir, rows).to_str().unwrap()).unwrap(),
+        );
+        let g = std::sync::Arc::new(AtomicU64::new(0));
+        let (s2, g2) = (s.clone(), g.clone());
+        let handle = std::thread::spawn(move || {
+            let mut q = req(0, 100);
+            q.sort_column = Some("name".into());
+            query_table(&s2, &q, &g2)
+        });
+        (s, g, handle)
+    }
+
+    /// Polls `view_progress` until it reports, or the build ends first.
+    fn first_progress(
+        s: &ParquetSession,
+        handle: &std::thread::JoinHandle<Result<QueryResult, String>>,
+    ) -> Option<f64> {
+        while !handle.is_finished() {
+            if let Some(p) = s.view_progress() {
+                return Some(p);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        None
+    }
+
+    #[test]
+    fn a_sort_build_reports_progress_and_nothing_else_does() {
+        let idle = session(10);
+        assert_eq!(
+            idle.view_progress(),
+            None,
+            "an idle session reports nothing"
+        );
+        let (s, _g, handle) = start_big_sort(3_000_000);
+        let seen = first_progress(&s, &handle);
+        let r = handle.join().unwrap().unwrap();
+        assert_eq!(r.total_rows, Some(3_000_000));
+        let p = seen.expect("a 3M-row sort build must report progress while it runs");
+        assert!((0.0..=100.0).contains(&p), "progress {p} out of range");
+        assert_eq!(
+            s.view_progress(),
+            None,
+            "no progress once the build is done"
+        );
+        // A page served from the finished cache reports nothing either.
+        let mut q = req(1000, 100);
+        q.sort_column = Some("name".into());
+        query_table(&s, &q, &AtomicU64::new(0)).unwrap();
+        assert_eq!(s.view_progress(), None);
+    }
+
+    #[test]
+    fn interrupting_stops_a_sort_build() {
+        let (s, _g, handle) = start_big_sort(3_000_000);
+        assert!(
+            first_progress(&s, &handle).is_some(),
+            "precondition: the build was still running"
+        );
+        // No generation bump: with one, `query_table` reports "cancelled"
+        // after a build that ran to completion, so only a build that really
+        // stopped can fail here.
+        s.interrupt();
+        let err = handle.join().unwrap().unwrap_err();
+        assert!(
+            err.contains("INTERRUPT"),
+            "the build was not stopped: {err}"
+        );
+        assert_eq!(s.view_progress(), None);
     }
 
     #[test]

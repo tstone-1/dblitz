@@ -5,6 +5,19 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.9.6] - Unreleased
+
+### Added
+- **Sorting a large Parquet file shows how far it has got.** While the sort
+  is prepared, Browse Data shows "Sorting... 42%" instead of "Loading...".
+  The figure covers reading the file (the first half) and sorting and
+  writing (the second).
+
+### Internal
+- CI compiles DuckDB once per job instead of twice: `cargo check`/`clippy`
+  and `cargo build`/`test` compiled the build script in two profiles, so the
+  C++ was compiled twice.
+
 ## [26.9.5] - 2026-09-28
 
 ### Added

@@ -239,6 +239,14 @@ export function cancelQueries(): Promise<void> {
   return invoke("cancel_queries");
 }
 
+/**
+ * Percent done (0-100) of a view still being prepared, or null. Only a sort
+ * of a Parquet file reports one; see `pq::ParquetSession::view_progress`.
+ */
+export function viewProgress(): Promise<number | null> {
+  return invoke<number | null>("view_progress");
+}
+
 /** Run an arbitrary (read-only) SQL statement. */
 export function executeSql(sql: string): Promise<SqlResult> {
   return invoke<SqlResult>("execute_sql", { sql });

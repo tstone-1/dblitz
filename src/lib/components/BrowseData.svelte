@@ -5,6 +5,7 @@
     cancelQueries,
     countRows,
     exportToXlsx,
+    viewProgress,
     type ColumnFilterValue,
   } from "$lib/ipc";
   import {
@@ -14,6 +15,7 @@
     updateTableConfig,
   } from "$lib/store.svelte";
   import DataGrid from "./DataGrid.svelte";
+  import { progressLabel, startProgressPoller } from "./progressPoller";
   import ColumnSettings from "./ColumnSettings.svelte";
   import ColumnFinder from "./ColumnFinder.svelte";
   import { createPinnedFilters } from "./pinnedFilters.svelte";
@@ -49,6 +51,19 @@
   let sortColumn = $state<string | null>(null);
   let sortAsc = $state(true);
   let loading = $state(false);
+  // Percent done of a view the backend is still preparing (a Parquet sort),
+  // polled only while a request is pending.
+  let progress = $state<number | null>(null);
+  $effect(() => {
+    if (!loading) return;
+    const stop = startProgressPoller(viewProgress, (p) => {
+      progress = p;
+    });
+    return () => {
+      stop();
+      progress = null;
+    };
+  });
   let countPending = $state(false);
   let showColumnSettings = $state(false);
   let showFinder = $state(false);
@@ -489,7 +504,7 @@
             <kbd class="kbd-hint">{modKey}+F</kbd>
           </button>
           <span class="row-info">{countPending ? 'counting...' : `${totalRows.toLocaleString()} rows`}</span>
-          {#if loading}<span class="loading-indicator">Loading...</span>{/if}
+          {#if loading}<span class="loading-indicator">{progressLabel(progress)}</span>{/if}
         </div>
 
         {#if showColumnSettings && selectedTable}
@@ -557,7 +572,7 @@
         />
       </div>
     {:else if selectedTable && loading}
-      <div class="empty">Loading...</div>
+      <div class="empty">{progressLabel(progress)}</div>
     {:else if selectedTable}
       <div class="empty">No columns found. <button onclick={() => reloadData()}>Retry</button></div>
     {:else}

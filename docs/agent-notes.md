@@ -166,6 +166,24 @@ Detection is by content (`PAR1` at both ends), never by extension.
 - **DuckDB creates its spill directory but not its parents**, so `ParquetSession::open`
   creates them; before that, every sort too big for memory failed on a fresh machine.
   The unit tests never spill, which is why only the 50M-row run found it.
+- **Sort progress** (`view_progress`): duckdb-rs keeps the connection handle that
+  `duckdb_query_progress` needs private, so both DuckDB instances are a `pq/raw.rs`
+  `RawDb` - opened through the C API, with the wrapper `Connection` plus one raw "side"
+  connection. The SQL tab's side connection is the classifier; the browse instance's
+  builds sort caches, with `enable_progress_bar` and `progress_bar_time = 0` set on it,
+  so another thread can read its progress and interrupt it. A `building` flag limits
+  `view_progress` to the build itself. Measured on 50M rows the figure rose steadily
+  from 0 to 100 (the scan is the first half). `interrupting_stops_a_sort_build`
+  interrupts without bumping the generation, because with a bump `query_table`
+  reports "cancelled" after a build that ran to completion - a test that could not
+  tell whether the build stopped, and did not.
+- **CI compiled DuckDB twice per job until `[profile.dev.build-override] debug = false`.**
+  Without it, `cargo check`/`clippy` and `cargo build`/`test` compiled libduckdb-sys's
+  build script in two profiles (its fingerprints differed only in `profile` and in the
+  build script's own dependencies), so the script ran twice and each run compiled the
+  C++. Locally it hid in the cache: both outputs existed side by side, so neither
+  command rebuilt. `cargo check -v` and `cargo build -v` printing the same
+  `libduckdb-sys-<hash>/out` is the check.
 - The sort cache is detached and deleted when the session drops; stale sort caches and
   spill directories older than 24 h are swept at startup (`pq::sweep_stale_cache`).
 - Timings go through the shipped code: `cargo run --release --example parquet_benchmark [rows]`

@@ -265,6 +265,15 @@ fn cancel_queries(state: State<'_, Arc<DbState>>) {
     db::cancel_queries(&state);
 }
 
+/// Percent done of a view still being prepared, polled by Browse Data while a
+/// page request is pending. Only a Parquet sort reports one; everything else
+/// is `None`. Sync on purpose, like `cancel_queries`: it takes no connection
+/// lock, so it answers while the query it describes holds one.
+#[tauri::command]
+fn view_progress(state: State<'_, Arc<DbState>>) -> Option<f64> {
+    state.parquet_session().and_then(|pq| pq.view_progress())
+}
+
 #[tauri::command(async)]
 fn open_database(
     app: AppHandle,
@@ -836,6 +845,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             close_database,
             cancel_queries,
+            view_progress,
             open_database,
             get_columns,
             get_schema,
