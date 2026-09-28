@@ -17,7 +17,7 @@ fn escape_like(value: &str) -> String {
         .replace('_', "\\_")
 }
 
-fn contains_pattern(value: &str) -> String {
+pub(crate) fn contains_pattern(value: &str) -> String {
     format!("%{}%", escape_like(value))
 }
 
@@ -41,6 +41,70 @@ fn declares_blob(declared_type: &str) -> bool {
 /// arm in [`build_where_clause`].
 fn has_no_affinity(declared_type: &str) -> bool {
     declared_type.trim().is_empty() || declares_blob(declared_type)
+}
+
+/// One `;`-separated piece of a column filter, after its operator prefix is
+/// recognised. Shared by the SQLite builder below and the Parquet one in
+/// `pq/filters.rs`, so the grammar exists once and cannot drift between them.
+///
+/// Operator prefixes recognized: "<>", ">=", "<=", ">", "<", "=". The frontend
+/// mirrors the operand-requiring subset in
+/// src/lib/components/filterOperators.ts (OPERAND_REQUIRED_OPS) to gate
+/// half-typed filters - keep the two in sync when adding ops.
+/// `operand_required_ops_match_frontend` below parses that TS file and pins the
+/// two lists together, so an op added on one side only fails a test rather
+/// than shipping.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Criterion<'a> {
+    /// `<>` alone: not NULL and not empty.
+    NotEmpty,
+    /// `<>x`: does not contain x. ANDed.
+    NotContains(&'a str),
+    Ge(&'a str),
+    Le(&'a str),
+    Gt(&'a str),
+    Lt(&'a str),
+    /// `=x`. ORed.
+    Eq(&'a str),
+    /// No operator: contains the text. ORed.
+    Contains(&'a str),
+}
+
+impl Criterion<'_> {
+    /// ANDed with the column's other criteria, rather than ORed.
+    pub(crate) fn is_and(&self) -> bool {
+        !matches!(self, Criterion::Eq(_) | Criterion::Contains(_))
+    }
+}
+
+/// Splits a column filter on `;` and parses each non-empty piece.
+pub(crate) fn parse_criteria(value: &str) -> Vec<Criterion<'_>> {
+    value
+        .split(';')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|val| {
+            if let Some(rest) = val.strip_prefix("<>") {
+                if rest.is_empty() {
+                    Criterion::NotEmpty
+                } else {
+                    Criterion::NotContains(rest)
+                }
+            } else if let Some(rest) = val.strip_prefix(">=") {
+                Criterion::Ge(rest)
+            } else if let Some(rest) = val.strip_prefix("<=") {
+                Criterion::Le(rest)
+            } else if let Some(rest) = val.strip_prefix('>') {
+                Criterion::Gt(rest)
+            } else if let Some(rest) = val.strip_prefix('<') {
+                Criterion::Lt(rest)
+            } else if let Some(rest) = val.strip_prefix('=') {
+                Criterion::Eq(rest)
+            } else {
+                Criterion::Contains(val)
+            }
+        })
+        .collect()
 }
 
 /// Build the `WHERE` clause for one view.
@@ -118,12 +182,7 @@ pub(super) fn build_where_clause(
             let col_escaped = quote_ident(&f.column);
 
             // Split on semicolon for multi-criteria: exclusions=AND, inclusions=OR
-            let criteria: Vec<&str> = f
-                .value
-                .split(';')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .collect();
+            let criteria = parse_criteria(&f.value);
 
             if criteria.is_empty() {
                 continue;
@@ -134,63 +193,63 @@ pub(super) fn build_where_clause(
             let mut or_parts: Vec<String> = Vec::new();
             let mut or_params: Vec<String> = Vec::new();
 
-            // Operator prefixes recognized below: "<>", ">=", "<=", ">", "<",
-            // "=". The frontend mirrors the operand-requiring subset in
-            // src/lib/components/filterOperators.ts (OPERAND_REQUIRED_OPS) to
-            // gate half-typed filters — keep the two in sync when adding ops.
-            // `operand_required_ops_match_frontend` below parses that TS file
-            // and pins the two lists together, so an op added on one side only
-            // fails a test rather than shipping.
-            for val in &criteria {
-                if let Some(rest) = val.strip_prefix("<>") {
-                    if rest.is_empty() {
+            for criterion in criteria {
+                match criterion {
+                    Criterion::NotEmpty => {
                         and_parts.push(format!(
                             "{} IS NOT NULL AND {} != ''",
                             col_escaped, col_escaped
                         ));
-                    } else {
+                    }
+                    Criterion::NotContains(rest) => {
                         and_parts.push(format!("{} NOT LIKE ? ESCAPE '\\'", col_escaped));
                         and_params.push(contains_pattern(rest));
                     }
-                } else if let Some(rest) = val.strip_prefix(">=") {
-                    and_parts.push(format!("{} >= ?", col_escaped));
-                    and_params.push(rest.to_string());
-                } else if let Some(rest) = val.strip_prefix("<=") {
-                    and_parts.push(format!("{} <= ?", col_escaped));
-                    and_params.push(rest.to_string());
-                } else if let Some(rest) = val.strip_prefix('>') {
-                    and_parts.push(format!("{} > ?", col_escaped));
-                    and_params.push(rest.to_string());
-                } else if let Some(rest) = val.strip_prefix('<') {
-                    and_parts.push(format!("{} < ?", col_escaped));
-                    and_params.push(rest.to_string());
-                } else if let Some(rest) = val.strip_prefix('=') {
-                    // On a column with no affinity, SQLite compares a bound
-                    // text operand against a numeric cell across storage
-                    // classes, where a number is always less than any text - so
-                    // `=3` against a REAL 3.0 matched nothing at all, and the
-                    // user had no spelling that would. Add a second arm holding
-                    // the value as a number whenever it parses as one. It is
-                    // interpolated rather than bound because the parameter list
-                    // is text-only; `render_real` emits digits, a point, `e`
-                    // and a sign, so nothing else can reach the SQL. Only added
-                    // where plain `=` provably cannot match: on a column with
-                    // numeric affinity SQLite converts the operand itself, and
-                    // an extra OR arm there would cost the index.
-                    match rest.parse::<f64>() {
-                        Ok(number) if no_affinity && number.is_finite() => {
-                            or_parts.push(format!(
-                                "({col} = ? OR {col} = {literal})",
-                                col = col_escaped,
-                                literal = render_real(number)
-                            ));
-                        }
-                        _ => or_parts.push(format!("{} = ?", col_escaped)),
+                    Criterion::Ge(rest) => {
+                        and_parts.push(format!("{} >= ?", col_escaped));
+                        and_params.push(rest.to_string());
                     }
-                    or_params.push(rest.to_string());
-                } else {
-                    or_parts.push(format!("{} LIKE ? ESCAPE '\\'", col_escaped));
-                    or_params.push(contains_pattern(val));
+                    Criterion::Le(rest) => {
+                        and_parts.push(format!("{} <= ?", col_escaped));
+                        and_params.push(rest.to_string());
+                    }
+                    Criterion::Gt(rest) => {
+                        and_parts.push(format!("{} > ?", col_escaped));
+                        and_params.push(rest.to_string());
+                    }
+                    Criterion::Lt(rest) => {
+                        and_parts.push(format!("{} < ?", col_escaped));
+                        and_params.push(rest.to_string());
+                    }
+                    Criterion::Eq(rest) => {
+                        // On a column with no affinity, SQLite compares a bound
+                        // text operand against a numeric cell across storage
+                        // classes, where a number is always less than any text - so
+                        // `=3` against a REAL 3.0 matched nothing at all, and the
+                        // user had no spelling that would. Add a second arm holding
+                        // the value as a number whenever it parses as one. It is
+                        // interpolated rather than bound because the parameter list
+                        // is text-only; `render_real` emits digits, a point, `e`
+                        // and a sign, so nothing else can reach the SQL. Only added
+                        // where plain `=` provably cannot match: on a column with
+                        // numeric affinity SQLite converts the operand itself, and
+                        // an extra OR arm there would cost the index.
+                        match rest.parse::<f64>() {
+                            Ok(number) if no_affinity && number.is_finite() => {
+                                or_parts.push(format!(
+                                    "({col} = ? OR {col} = {literal})",
+                                    col = col_escaped,
+                                    literal = render_real(number)
+                                ));
+                            }
+                            _ => or_parts.push(format!("{} = ?", col_escaped)),
+                        }
+                        or_params.push(rest.to_string());
+                    }
+                    Criterion::Contains(val) => {
+                        or_parts.push(format!("{} LIKE ? ESCAPE '\\'", col_escaped));
+                        or_params.push(contains_pattern(val));
+                    }
                 }
             }
 

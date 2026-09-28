@@ -231,6 +231,9 @@ pub fn open_database(state: &DbState, path: &str) -> Result<Vec<TableInfo>, Stri
         *conn_guard = Some(conn);
         *aux_guard = Some(aux_conn);
     }
+    if let Some(previous) = state.parquet.lock().take() {
+        previous.interrupt();
+    }
     *state.current_path.lock() = Some(path.to_string());
 
     Ok(tables)

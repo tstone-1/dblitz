@@ -14,7 +14,7 @@ impl SqlResult {
     /// Empty-result error: no columns/rows, just the message. The shape every
     /// pre-row rejection returns (no DB open, the ATTACH/DETACH gate, the
     /// write gate, a prepare failure, a query-start failure).
-    fn error(message: String) -> Self {
+    pub(crate) fn error(message: String) -> Self {
         SqlResult {
             columns: vec![],
             rows: vec![],
@@ -27,7 +27,7 @@ impl SqlResult {
     /// Error carrying the partial columns/rows already collected before a
     /// mid-iteration failure (a `next()` error, or cancellation by a newer
     /// request), so the frontend can still render what was fetched.
-    fn partial_error(
+    pub(crate) fn partial_error(
         columns: Vec<String>,
         rows: Vec<Vec<Option<String>>>,
         column_types: Vec<String>,

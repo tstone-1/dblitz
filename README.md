@@ -2,7 +2,7 @@
 
 [![Checks][checks-badge]][checks-url]
 
-A fast, read-only SQLite browser. Built with Tauri, Svelte, and Rust.
+A fast, read-only SQLite and Parquet browser. Built with Tauri, Svelte, and Rust.
 
 ## Why dblitz?
 
@@ -11,10 +11,10 @@ a quick look at a database file and wished for a tool that's strictly read-only,
 persists every view setting per file, and is engineered for large tables —
 that's dblitz.
 
-It's a single-purpose viewer: **SQLite only, read-only only.** If you need to
-edit data, DB Browser for SQLite is excellent. If you need to talk to many
-different database engines, DBeaver covers you. dblitz is for inspecting SQLite
-files quickly and safely.
+It's a single-purpose viewer: **SQLite and Parquet files, read-only only.** If
+you need to edit data, DB Browser for SQLite is excellent. If you need to talk
+to many different database engines, DBeaver covers you. dblitz is for
+inspecting local data files quickly and safely.
 
 ### Read-only by design
 
@@ -100,6 +100,85 @@ cargo run --release --example filtered_scroll_benchmark
 Over 500,000 rows with 250,000 matching and a 200-row page, building the ordered
 set takes 37.30 ms and each page then costs 0.10-0.11 ms, against 40-69 ms per
 page when every page re-ran the scan: 37.80 ms total against 297.30 ms.
+
+### Parquet files
+
+A Parquet file opens as one table named `data`, in Browse Data and in the SQL
+editor (`SELECT … FROM data`). dblitz recognises the file by its contents, not
+its extension. Queries run on an embedded [DuckDB](https://duckdb.org/), so the
+SQL editor speaks DuckDB's SQL dialect for these files, and a regex filter uses
+RE2 syntax.
+
+Read-only is enforced differently from SQLite, in two layers:
+
+1. The SQL editor's engine may read the opened file and nothing else: file and
+   network access, `COPY`, `EXPORT`, `ATTACH` and extension loading are turned
+   off, and the configuration is locked.
+2. Only a single `SELECT` statement runs (including `FROM`-first queries,
+   `DESCRIBE` and `SUMMARIZE`).
+
+Paging stays fast on large files. This release-mode benchmark generates a
+14-column Parquet file (integers, text, doubles, decimals, timestamps,
+booleans, a LIST and a STRUCT) and pages through it with the same code the app
+runs:
+
+```bash
+cd src-tauri
+cargo run --release --example parquet_benchmark -- 50000000
+```
+
+Measured 2026-09-28 on macOS 27.0, Apple M5, rustc 1.98.1, DuckDB 1.5.5, on a
+3.02 GB file of 50,000,000 rows. Median of five reads, 500-row pages. The
+one-time build is a single measurement: it runs once per view, and later pages
+are served from what it built.
+
+| View | One-time build | Page at 0 | 25% | 50% | 75% | Last page |
+|------|----------------|-----------|-----|-----|-----|-----------|
+| Unfiltered | - | 17.8 ms | 20.1 ms | 20.0 ms | 20.5 ms | 21.2 ms |
+| Filtered, `cat` = one of 5 values | 162 ms | 19.2 ms | 21.5 ms | 21.8 ms | 22.7 ms | 23.4 ms |
+| Regex filter, 11,944 matches | 300 ms | 38.5 ms | 40.6 ms | 41.9 ms | 42.2 ms | 45.4 ms |
+| Sorted by a DOUBLE column | 14.0 s | 4.9 ms | 5.0 ms | 5.1 ms | 4.8 ms | 4.9 ms |
+
+Opening the file took 45.7 ms. A sort is materialized once per view into
+a temporary DuckDB file in the OS cache directory (3.2 GB for the file above)
+and deleted when the file is closed; the file you opened is never written.
+
+#### SQLite or Parquet?
+
+The same 50,000,000 rows x 14 columns, written once as Parquet (3.02 GB) and
+once as a SQLite table (7.90 GB; the LIST, STRUCT and timestamp columns as the
+text the grid shows), then browsed and queried with identical requests through
+each backend's shipped code:
+
+```bash
+cd src-tauri
+cargo run --release --example format_comparison_benchmark -- <dir> 50000000
+```
+
+Measured 2026-09-28, same machine as above. Both files in the OS page cache.
+First pages are single measurements, other pages the median of five reads,
+SQL queries the median of three.
+
+| Measurement | SQLite | Parquet | Faster |
+|---|---|---|---|
+| Open the file | 3.0 s | 46 ms | Parquet 66x |
+| Unfiltered: page, middle / last | 0.73 / 0.72 ms | 21 / 21 ms | SQLite 29x |
+| Filtered, `cat` = one of 5 values: first page | 2.6 s | 177 ms | Parquet 14x |
+| Filtered: page, middle / last | 0.87 / 0.83 ms | 23 / 23 ms | SQLite 27x |
+| Regex filter: first page | 4.2 s | 400 ms | Parquet 10x |
+| Regex filter: page, middle / last | 0.97 / 1.03 ms | 44 / 50 ms | SQLite 46x |
+| Sorted by a DOUBLE column: first page | 41.1 s | 16.1 s | Parquet 3x |
+| Sorted: page, middle / last | 0.92 / 0.95 ms | 4.99 / 4.90 ms | SQLite 5x |
+| SQL: `GROUP BY` one column, count + average | 12.3 s | 73 ms | Parquet 168x |
+| SQL: count with a range predicate | 4.4 s | 73 ms | Parquet 60x |
+| SQL: `count(DISTINCT ...)` | 6.0 s | 27 ms | Parquet 226x |
+| SQL: top 10 by a column | 4.8 s | 107 ms | Parquet 44x |
+
+A SQLite page is faster once a view exists, but both stay far below what
+scrolling can show. Everything that reads the whole table is faster on
+Parquet: opening (dblitz counts each SQLite table at open; Parquet keeps the
+count in its footer), building a filtered or sorted view, and whole-table
+queries in the SQL editor, where DuckDB reads only the columns a query uses.
 
 ### Remembers what you set
 

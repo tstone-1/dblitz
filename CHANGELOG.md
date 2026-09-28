@@ -5,6 +5,30 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.9.5] - Unreleased
+
+### Added
+- **Parquet files open in dblitz.** A Parquet file appears as one table named
+  `data`, with the same browsing, filters, sorting, SQL editor, Structure tab
+  and Excel export as a SQLite database. Queries run on an embedded DuckDB.
+  The file is recognised by its contents, and `.parquet` is registered as a
+  file type.
+- **Read-only for Parquet, too.** The SQL editor can read the opened file and
+  nothing else, and runs only a single `SELECT`.
+- **Fast paging on large Parquet files.** On a 50-million-row file, a page
+  loads in about 20 ms at any depth. A sort is prepared once per view (14 to
+  18 s at that size) and then pages in about 5 ms.
+
+### Internal
+- The filter grammar is parsed once and shared by the SQLite and Parquet
+  query builders.
+- The packaged-app smoke test opens a Parquet file as well as a SQLite
+  database.
+- `cargo run --release --example parquet_benchmark` measures Parquet paging
+  through the shipped code, next to the two SQLite benchmarks.
+- `cargo run --release --example format_comparison_benchmark` runs the same
+  data and requests through the SQLite and Parquet backends side by side.
+
 ## [26.9.4] - 2026-09-24
 
 ### Fixed

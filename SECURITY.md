@@ -27,8 +27,8 @@ advisory and the changelog, say so and you will get it.
 
 ## What is in scope
 
-dblitz is a **read-only** SQLite viewer that opens files you point it at. The
-things most worth reporting follow from that:
+dblitz is a **read-only** viewer for SQLite and Parquet files that opens files
+you point it at. The things most worth reporting follow from that:
 
 - **Anything that lets dblitz write.** The read-only guarantee is enforced in
   layers: connections open `SQLITE_OPEN_READ_ONLY` with `?immutable=1`,
@@ -37,9 +37,15 @@ things most worth reporting follow from that:
   introspection allowlist. A way through **any** of those layers is a real
   finding, including one that only mutates session state or reaches a file other
   than the one opened.
+- **A way out of the Parquet SQL lockdown.** Parquet files are queried with an
+  embedded DuckDB whose settings allow reading only the opened file and are
+  then locked, and whose SQL editor runs only a single `SELECT`. A statement
+  that writes a file, reads another file, reaches the network, loads an
+  extension, or changes the `data` view is in scope.
 - **Malicious database files.** A `.sqlite` file is untrusted input. Memory
   corruption, path traversal, command execution, or reading a file outside the
-  one opened — triggered by opening a crafted database — is in scope.
+  one opened — triggered by opening a crafted database or Parquet file — is in
+  scope.
 - **The updater.** Anything that would cause dblitz to install a payload not
   signed by the project's key, or to accept a manifest it should reject. Update
   payloads are verified with minisign against the public key committed in

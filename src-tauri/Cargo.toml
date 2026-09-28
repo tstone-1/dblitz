@@ -1,7 +1,7 @@
 [package]
 name = "dblitz"
 version = "26.9.4"
-description = "Read-only SQLite browser"
+description = "Read-only SQLite and Parquet browser"
 # Matches the repository's LICENSE file; declared here so `cargo` and any
 # generated metadata carry it too.
 license = "MIT"
@@ -21,6 +21,11 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.40.1", features = ["bundled", "hooks", "column_decltype"] }
+# Parquet files are read through an embedded DuckDB (src/pq/). `bundled` alone
+# has no Parquet reader - the `parquet` feature is what links it in. Measured
+# 2026-09-28 on a 10-core M-series Mac: +35.7 MB to a stripped binary and a
+# 147 s cold build (1,009 s of CPU), so a cold CI leg grows by several minutes.
+duckdb = { version = "1.10505.0", features = ["bundled", "parquet"] }
 regex = "1.13"
 sha2 = "0.11"
 hex = "0.4"

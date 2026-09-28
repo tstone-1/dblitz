@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "dblitz - SQLite Browser",
+        "title": "dblitz - SQLite & Parquet Browser",
         "width": 1200,
         "height": 800,
         "resizable": true,
@@ -53,6 +53,11 @@
         "ext": ["db", "sqlite", "sqlite3", "db3"],
         "mimeType": "application/x-sqlite3",
         "description": "SQLite Database"
+      },
+      {
+        "ext": ["parquet"],
+        "mimeType": "application/vnd.apache.parquet",
+        "description": "Parquet File"
       }
     ]
   }

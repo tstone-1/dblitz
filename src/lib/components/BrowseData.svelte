@@ -383,7 +383,7 @@
 <svelte:window onkeydown={onWindowKeydown} />
 
 {#if !appState.dbPath}
-  <div class="empty">Open a SQLite database to browse data.</div>
+  <div class="empty">Open a SQLite database or Parquet file to browse data.</div>
 {:else}
   <div class="browse-layout">
     <div class="sidebar" class:collapsed={sidebarCollapsed}>

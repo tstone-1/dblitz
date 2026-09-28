@@ -28,7 +28,7 @@
 //
 // Output sticks to ASCII ([OK]/[FAIL]) so it renders on any CI console.
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -146,6 +146,31 @@ async function main() {
   db.close();
   log(`fixture created at ${dbPath}`);
 
+  // The Parquet fixture comes from a Rust example (DuckDB), since Node has no
+  // Parquet writer. It reuses the target directory the app build just filled,
+  // so this is a link step, not a second build of the world.
+  const parquetPath = join(fixtureDir, "smoke.parquet");
+  const made = spawnSync(
+    "cargo",
+    [
+      "run",
+      "--quiet",
+      "--manifest-path",
+      join(root, "src-tauri", "Cargo.toml"),
+      "--example",
+      "make_parquet_fixture",
+      "--",
+      parquetPath,
+    ],
+    { stdio: ["ignore", "inherit", "inherit"] },
+  );
+  if (made.status !== 0 || !existsSync(parquetPath)) {
+    throw new Error(
+      `could not write the Parquet fixture (cargo ${made.error?.message ?? `exit ${made.status}`})`,
+    );
+  }
+  log(`fixture created at ${parquetPath}`);
+
   // tauri-driver proxies the W3C WebDriver protocol to the platform's native
   // driver (WebKitWebDriver on Linux), launching the app itself and exporting
   // TAURI_AUTOMATION so wry puts the webview into automation mode.
@@ -200,56 +225,66 @@ async function main() {
 
     // `args` delivers the fixture path as argv[1], the same route a CLI launch
     // or a Windows file association uses -- get_initial_file picks it up.
-    const session = await webdriver("POST", "/session", {
-      capabilities: {
-        alwaysMatch: {
-          browserName: "wry",
-          "tauri:options": { application: appPath, args: [dbPath] },
+    // Each file gets its own session, i.e. its own app launch.
+    const openAndRender = async (path, marker) => {
+      const session = await webdriver("POST", "/session", {
+        capabilities: {
+          alwaysMatch: {
+            browserName: "wry",
+            "tauri:options": { application: appPath, args: [path] },
+          },
         },
-      },
-    });
-    sessionId = session.value?.sessionId;
-    if (!sessionId) {
-      throw new Error(
-        `no sessionId in response: ${JSON.stringify(session)}; ` +
-          driverDiagnostic(),
-      );
-    }
-    log(`session ${sessionId} started, app launched`);
-
-    const execute = async (script) => {
-      const res = await webdriver(
-        "POST",
-        `/session/${sessionId}/execute/sync`,
-        { script, args: [] },
-      );
-      return res.value;
-    };
-
-    // Poll until the grid shows the fixture row (or time runs out). The state
-    // snapshot doubles as the failure diagnostic -- on timeout it says how far
-    // the app got (blank page? toolbar but no grid? grid but no rows?).
-    const deadline = Date.now() + RENDER_TIMEOUT_MS;
-    let state = null;
-    for (;;) {
-      state = await execute(`return {
-        path: document.querySelector(".file-path")?.textContent?.trim() ?? "",
-        cells: Array.from(document.querySelectorAll(".data-cell"))
-          .slice(0, 12)
-          .map((cell) => cell.textContent.trim()),
-        body: document.body?.innerText?.slice(0, 400) ?? "",
-      };`);
-      if (state.cells.includes("alice")) break;
-      if (Date.now() > deadline) {
+      });
+      sessionId = session.value?.sessionId;
+      if (!sessionId) {
         throw new Error(
-          "grid never rendered the fixture row; last observed state: " +
-            JSON.stringify(state, null, 2) +
-            `\n${driverDiagnostic()}`,
+          `no sessionId in response: ${JSON.stringify(session)}; ` +
+            driverDiagnostic(),
         );
       }
-      await sleep(POLL_INTERVAL_MS);
-    }
+      log(`session ${sessionId} started, app launched on ${path}`);
 
+      const execute = async (script) => {
+        const res = await webdriver(
+          "POST",
+          `/session/${sessionId}/execute/sync`,
+          { script, args: [] },
+        );
+        return res.value;
+      };
+
+      // Poll until the grid shows the fixture row (or time runs out). The
+      // state snapshot doubles as the failure diagnostic -- on timeout it says
+      // how far the app got (blank page? toolbar but no grid? grid but no
+      // rows?).
+      const deadline = Date.now() + RENDER_TIMEOUT_MS;
+      for (;;) {
+        const state = await execute(`return {
+          path: document.querySelector(".file-path")?.textContent?.trim() ?? "",
+          cells: Array.from(document.querySelectorAll(".data-cell"))
+            .slice(0, 12)
+            .map((cell) => cell.textContent.trim()),
+          body: document.body?.innerText?.slice(0, 400) ?? "",
+        };`);
+        if (state.cells.includes(marker)) return state;
+        if (Date.now() > deadline) {
+          throw new Error(
+            `grid never rendered the fixture row of ${path}; last observed state: ` +
+              JSON.stringify(state, null, 2) +
+              `\n${driverDiagnostic()}`,
+          );
+        }
+        await sleep(POLL_INTERVAL_MS);
+      }
+    };
+    const closeSession = async () => {
+      if (sessionId) {
+        await webdriver("DELETE", `/session/${sessionId}`).catch(() => {});
+        sessionId = null;
+      }
+    };
+
+    let state = await openAndRender(dbPath, "alice");
     console.log("[OK] grid renders a fixture row over production IPC");
     if (!state.cells.includes("ALICE")) {
       throw new Error(
@@ -264,6 +299,23 @@ async function main() {
       );
     }
     console.log("[OK] toolbar shows the opened database path");
+    await closeSession();
+
+    // Parquet goes through a different backend (DuckDB) behind the same IPC
+    // commands. The LIST cell proves cells are rendered by DuckDB and reach
+    // the grid as text.
+    state = await openAndRender(parquetPath, "alice");
+    console.log("[OK] grid renders a Parquet row over production IPC");
+    if (!state.cells.includes("[1, 2]")) {
+      throw new Error(
+        `Parquet LIST column did not render as "[1, 2]"; cells: ${JSON.stringify(state.cells)}`,
+      );
+    }
+    console.log("[OK] Parquet LIST column renders as DuckDB text");
+    if (!state.path.includes("smoke.parquet")) {
+      throw new Error(`toolbar path does not show the Parquet file: "${state.path}"`);
+    }
+    console.log("[OK] toolbar shows the opened Parquet path");
     console.log("[PASS] packaged-app smoke test");
   } finally {
     if (sessionId) {

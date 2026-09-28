@@ -32,6 +32,7 @@ A release build can be driven over CDP through WebView2's environment variables,
 ## Architecture
 
 - Frontend code lives under `src/`; Tauri/Rust backend code under `src-tauri/`.
+- **Parquet files are served by an embedded DuckDB in `src-tauri/src/pq/`**, behind the same IPC commands. The SQL tab's lockdown is two layers whose order is load-bearing, and cells are rendered by DuckDB's own `CAST`. Read the notes before changing it: [docs/agent-notes.md](docs/agent-notes.md).
 - SQLite backend code lives under `src-tauri/src/db/`, with `src-tauri/src/db.rs` as a thin facade re-exporting the submodules:
   - `schema.rs` — table/column introspection, the open batch, and row counts
   - `query.rs` — table paging, the rowid-index fast path, and regex filtering

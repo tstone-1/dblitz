@@ -112,6 +112,10 @@ pub struct DbState {
     /// other's handle, so cancelling only the browse connection would leave a
     /// runaway recursive CTE in the SQL tab running forever.
     pub(super) aux_interrupt_handle: Mutex<Option<rusqlite::InterruptHandle>>,
+    /// The open Parquet file, when the open file is one; every SQLite field
+    /// above is then `None`, and vice versa. An `Arc` so a command can clone
+    /// it and release this lock before running a query that may take seconds.
+    pub parquet: Mutex<Option<std::sync::Arc<crate::pq::ParquetSession>>>,
 }
 
 /// Delegates to [`DbState::new`]. Required now that `db` is a public module:
@@ -133,6 +137,16 @@ impl DbState {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// The open Parquet session, if the open file is Parquet.
+    pub fn parquet_session(&self) -> Option<std::sync::Arc<crate::pq::ParquetSession>> {
+        self.parquet.lock().clone()
+    }
+
+    /// The generation counter, for the Parquet backend's cancellation checks.
+    pub(crate) fn generation(&self) -> &AtomicU64 {
+        &self.query_generation
+    }
+
     pub fn new() -> Self {
         Self {
             conn: Mutex::new(None),
@@ -144,6 +158,7 @@ impl DbState {
             query_generation: AtomicU64::new(0),
             interrupt_handle: Mutex::new(None),
             aux_interrupt_handle: Mutex::new(None),
+            parquet: Mutex::new(None),
         }
     }
 }

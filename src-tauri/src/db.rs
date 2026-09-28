@@ -20,9 +20,14 @@ pub mod bench_api {
     };
     pub use super::types::RowidIndex;
     pub use super::util::{collect_rows, quote_ident};
+    /// The Parquet paths `examples/parquet_benchmark.rs` measures: a real
+    /// session (both DuckDB instances, the app's settings) and the shipped
+    /// `query_table`, so its numbers describe what the app runs.
+    pub use crate::pq::{query_table as parquet_query_table, ParquetSession};
 }
 
 pub use export::export_to_xlsx;
+pub(crate) use filters::{contains_pattern, parse_criteria, Criterion};
 pub use query::{count_rows, query_table};
 pub use schema::{get_columns, get_schema, open_database};
 pub use sql::execute_sql;
@@ -56,6 +61,9 @@ pub fn cancel_queries(state: &DbState) {
     if let Some(handle) = state.aux_interrupt_handle.lock().as_ref() {
         handle.interrupt();
     }
+    if let Some(session) = state.parquet.lock().as_ref() {
+        session.interrupt();
+    }
 }
 
 /// Clears all per-table caches (rowid index, ordered row lists, row counts).
@@ -82,7 +90,23 @@ pub fn close_database(state: &DbState) {
     *state.current_path.lock() = None;
     *state.interrupt_handle.lock() = None;
     *state.aux_interrupt_handle.lock() = None;
+    // Dropping the session detaches and deletes its sort cache. A query still
+    // running on it holds its own `Arc` and finishes against the old session.
+    *state.parquet.lock() = None;
     clear_caches(state);
+}
+
+/// Opens a Parquet file. Mirrors `open_database`'s guarantee: the new session
+/// is fully built before anything in `state` changes, so a failure leaves the
+/// previously open file - SQLite or Parquet - intact.
+pub fn open_parquet(state: &DbState, path: &str) -> Result<Vec<TableInfo>, String> {
+    tracing::info!(path, "Opening Parquet file (read-only)");
+    let session = crate::pq::ParquetSession::open(path)?;
+    let tables = session.tables();
+    close_database(state);
+    *state.parquet.lock() = Some(std::sync::Arc::new(session));
+    *state.current_path.lock() = Some(path.to_string());
+    Ok(tables)
 }
 
 #[cfg(test)]
@@ -160,5 +184,72 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn parquet_fixture(name: &str) -> std::path::PathBuf {
+        let path = crate::db::util::unique_temp_path(name, ".parquet");
+        duckdb::Connection::open_in_memory()
+            .unwrap()
+            .execute_batch(&format!(
+                "COPY (SELECT 1 AS a) TO '{}' (FORMAT parquet)",
+                path.to_str().unwrap().replace('\'', "''")
+            ))
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn close_database_drops_a_parquet_session() {
+        let path = parquet_fixture("dblitz_close_pq");
+        let state = DbState::new();
+        open_parquet(&state, path.to_str().unwrap()).unwrap();
+        assert!(state.parquet_session().is_some(), "precondition");
+        close_database(&state);
+        assert!(state.parquet_session().is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn opening_one_kind_of_file_drops_the_other() {
+        let pq = parquet_fixture("dblitz_switch_pq");
+        let db = crate::db::util::unique_temp_path("dblitz_switch_db", ".sqlite");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch("CREATE TABLE t (a INTEGER);")
+            .unwrap();
+        let state = DbState::new();
+
+        open_database(&state, db.to_str().unwrap()).unwrap();
+        open_parquet(&state, pq.to_str().unwrap()).unwrap();
+        assert!(
+            state.conn.lock().is_none() && state.aux_conn.lock().is_none(),
+            "a Parquet open must release the SQLite connections"
+        );
+        assert_eq!(state.current_path.lock().as_deref(), pq.to_str());
+
+        open_database(&state, db.to_str().unwrap()).unwrap();
+        assert!(
+            state.parquet_session().is_none(),
+            "a SQLite open must drop the Parquet session, or its commands would keep answering"
+        );
+        let _ = std::fs::remove_file(&pq);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn a_failed_parquet_open_leaves_the_open_database_intact() {
+        let db = crate::db::util::unique_temp_path("dblitz_keep_db", ".sqlite");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch("CREATE TABLE t (a INTEGER);")
+            .unwrap();
+        let state = DbState::new();
+        open_database(&state, db.to_str().unwrap()).unwrap();
+        assert!(open_parquet(&state, "/nonexistent/x.parquet").is_err());
+        assert!(
+            state.conn.lock().is_some(),
+            "the SQLite file must stay open"
+        );
+        let _ = std::fs::remove_file(&db);
     }
 }

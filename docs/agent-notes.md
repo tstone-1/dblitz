@@ -113,3 +113,62 @@ caught it either", which is the more useful result.
 - Updates inherit the signature: the updater bundler tars the already-stapled `.app` without re-signing, and the staple ticket lives at `Contents/CodeResources` (an ordinary file, not an xattr), so it survives the tar.
 - **Windows stays unsigned** — no Authenticode cert. SmartScreen warns on first launch; a Developer ID does nothing for that.
 - The tap cask's `postflight` quarantine strip (added 2026-07-07 as the free workaround for the "damaged" error) was **removed** from `Casks/dblitz.rb` on 2026-07-25, once 26.7.6 proved a notarized app passes Gatekeeper with the quarantine flag intact. Do not reintroduce it: stripping the flag discards provenance, and needing it again would mean notarization has silently broken — which is the thing to investigate, not paper over.
+
+### Parquet backend (`src-tauri/src/pq/`)
+
+A Parquet file is served by an embedded DuckDB behind the **same 20 IPC commands**, so
+the frontend has no second code path. `lib.rs` dispatches on
+`DbState::parquet_session()`; `db::open_parquet` and `db::close_database` keep the
+failure-atomic open (both DuckDB instances are built before `DbState` changes, and a
+SQLite open drops any Parquet session - `db::tests::opening_one_kind_of_file_drops_the_other`).
+Detection is by content (`PAR1` at both ends), never by extension.
+
+- **Two DuckDB instances, mirroring `conn`/`aux_conn`.** `browse` runs only SQL dblitz
+  generates and stays unlocked, because it must `ATTACH` the sort cache and spill. `sql`
+  (the SQL tab) is locked, see below. The file is exposed as the view `data`; `browse`
+  also has `data_rn` with DuckDB's virtual `file_row_number`, unless the file has its own
+  column of that name, in which case every view falls back to `LIMIT/OFFSET`.
+- **The SQL tab lockdown is two layers, and the order is load-bearing** (`pq/lockdown.rs`).
+  Settings (`allowed_paths` = the file, external access off, extension autoload/install off,
+  then `lock_configuration`) stop every file and network access. A single-SELECT classifier
+  stops what settings allow: `CREATE OR REPLACE VIEW data AS SELECT 42` went through with
+  settings alone. The classifier must only ever see a **locked** instance, because
+  preparing does I/O: preparing `EXPORT DATABASE '<dir>'` created the directory, and
+  preparing a query over an https URL issued the GET. Pinned by
+  `classifying_on_an_unlocked_instance_does_write` (the control) and
+  `classifying_on_the_locked_instance_writes_nothing`. duckdb-rs keeps the statement type
+  private, so the classifier uses the C API on a second raw connection;
+  `Connection::open_from_raw` does not own the database, hence `LockedDb`'s `Drop`.
+- **The SQL tab runs the user's SQL through `query('<literal>')`**, not a spliced
+  subquery, so a trailing `;` or `-- comment` is harmless, and renders columns by
+  position (`#1`) so duplicate names survive. DuckDB renames a repeated name (`a`, `a_1`).
+- **Every cell is rendered by DuckDB with `CAST(col AS VARCHAR)`**, in the page query and
+  in the filter SQL alike, so the grid text is exactly what a filter matches - the Parquet
+  equivalent of `render_real`. BLOBs render as `[BLOB n bytes]` and never match.
+- **A file controls parts of a type string** (ENUM values, STRUCT field names), and the
+  `browse` instance is unlocked, so `pq/filters.rs::cast_target` interpolates a type only
+  when it is letters, digits, spaces, `(),_`; anything else compares as text.
+- **The filter grammar is parsed once**, by `db::filters::parse_criteria`, and both
+  builders consume it. Text matching is `ILIKE` (DuckDB's `LIKE` is case-sensitive); a
+  comparison operand is cast to the column type and one that does not fit is an error;
+  a regex runs in DuckDB (RE2).
+- **Paging** (measured 2026-09-28, 50M rows x 14 columns, 3 GB, M5, release):
+  unfiltered pages use `file_row_number` ranges, 20-24 ms at any depth (`LIMIT/OFFSET`
+  reached 82 ms at 50M). Filtered views cache the ascending matching row numbers and fetch
+  chunks with `IN (...)`, ~22 ms. Sorted views are materialized **in their own column
+  types** into `<cache dir>/dblitz/sort-cache/<pid>-<n>.duckdb` and paged by `rowid`,
+  6-9 ms; each page is rendered on the way out. Caching rendered text instead took 34.5 s
+  against 17.7 s. A cached order list was rejected in the spike: ~500 ms per chunk,
+  because a sorted chunk touches nearly every row group.
+- **`MEMORY_LIMIT` is 2 GB per instance**, and the process peaks above it (DuckDB limits
+  its buffer pool only): 3 GB gave 13.0 s / 3.8 GB RSS on the sort above, 2 GB 17.7 s /
+  2.65 GB. 1 GB starved the Parquet scan itself.
+- **DuckDB creates its spill directory but not its parents**, so `ParquetSession::open`
+  creates them; before that, every sort too big for memory failed on a fresh machine.
+  The unit tests never spill, which is why only the 50M-row run found it.
+- The sort cache is detached and deleted when the session drops; stale sort caches and
+  spill directories older than 24 h are swept at startup (`pq::sweep_stale_cache`).
+- Timings go through the shipped code: `cargo run --release --example parquet_benchmark [rows]`
+  generates its own file and calls `ParquetSession`/`query_table` via `db::bench_api`.
+- Cost: `duckdb` with `bundled` + `parquet` (`bundled` alone has no Parquet reader), +35.7 MB
+  stripped and a 147 s cold build on 10 cores; it pulls in the Arrow crates.

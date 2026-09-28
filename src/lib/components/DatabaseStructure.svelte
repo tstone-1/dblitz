@@ -87,12 +87,15 @@
     if (upper.includes("REAL") || upper.includes("FLOAT") || upper.includes("DOUBLE"))
       return "var(--warning)";
     if (upper.includes("BLOB")) return "var(--error)";
+    // DuckDB (Parquet) names: VARCHAR matches CHAR above, BIGINT and friends
+    // INT. These are the ones the SQLite substrings miss.
+    if (upper.includes("DECIMAL") || upper.includes("NUMERIC")) return "var(--warning)";
     return "var(--text-secondary)";
   }
 </script>
 
 {#if !appState.dbPath}
-  <div class="empty">Open a SQLite database to view its structure.</div>
+  <div class="empty">Open a SQLite database or Parquet file to view its structure.</div>
 {:else}
   <div class="structure-layout">
     <div class="toggle-bar">

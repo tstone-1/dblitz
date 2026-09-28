@@ -144,7 +144,7 @@
 </script>
 
 {#if !appState.dbPath}
-  <div class="empty">Open a SQLite database to execute SQL.</div>
+  <div class="empty">Open a SQLite database or Parquet file to execute SQL.</div>
 {:else}
   <div class="sql-layout">
     <div class="editor-area">

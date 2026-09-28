@@ -70,11 +70,13 @@
   async function handleOpen() {
     const path = await open({
       // SQLite stays first so it is the default. The All Files fallback is not
-      // optional: a SQLite database is identified by its header, not its name,
-      // and files like data.bin or cache.dat are common in the wild — without
-      // this they cannot be opened through the dialog at all.
+      // optional: both formats are identified by their content, not their
+      // name (the backend checks for Parquet's `PAR1` magic), and files like
+      // data.bin or cache.dat are common in the wild — without this they
+      // cannot be opened through the dialog at all.
       filters: [
         { name: "SQLite", extensions: ["db", "sqlite", "sqlite3", "db3"] },
+        { name: "Parquet", extensions: ["parquet"] },
         { name: "All Files", extensions: ["*"] },
       ],
       multiple: false,
@@ -156,7 +158,7 @@
 
 <div class="toolbar" style={toolbarStyle}>
   <div class="open-btn-group">
-    <button onclick={handleOpen} class="open-btn" title="Open SQLite database">
+    <button onclick={handleOpen} class="open-btn" title="Open a SQLite database or Parquet file">
       Open DB
     </button>
     <button

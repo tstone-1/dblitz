@@ -4,6 +4,7 @@ mod config;
 /// re-implementing them - see [`db::bench_api`]. Everything the app itself uses
 /// goes through the `#[tauri::command]` wrappers below.
 pub mod db;
+mod pq;
 mod updates;
 
 use config::FileConfig;
@@ -270,7 +271,14 @@ fn open_database(
     state: State<'_, Arc<DbState>>,
     path: String,
 ) -> Result<Vec<TableInfo>, String> {
-    let result = db::open_database(&state, &path).err_ctx(&format!("opening {path}"));
+    // Detected by content: a Parquet file starts and ends with `PAR1`.
+    // Everything else goes to SQLite, which reports a non-database itself.
+    let result = if pq::is_parquet(&path) {
+        db::open_parquet(&state, &path)
+    } else {
+        db::open_database(&state, &path)
+    }
+    .err_ctx(&format!("opening {path}"));
     if result.is_ok() {
         #[cfg(windows)]
         add_to_recent_docs(&path);
@@ -562,12 +570,20 @@ fn set_check_for_updates_on_startup(enabled: bool) -> Result<(), String> {
 
 #[tauri::command(async)]
 fn get_columns(state: State<'_, Arc<DbState>>, table: String) -> Result<Vec<ColumnInfo>, String> {
-    db::get_columns(&state, &table).err_ctx(&format!("loading columns for table \"{table}\""))
+    match state.parquet_session() {
+        Some(pq) => pq.get_columns(&table),
+        None => db::get_columns(&state, &table),
+    }
+    .err_ctx(&format!("loading columns for table \"{table}\""))
 }
 
 #[tauri::command(async)]
 fn get_schema(state: State<'_, Arc<DbState>>) -> Result<Vec<SchemaEntry>, String> {
-    db::get_schema(&state).err_ctx("loading the database schema")
+    match state.parquet_session() {
+        Some(pq) => Ok(pq.get_schema()),
+        None => db::get_schema(&state),
+    }
+    .err_ctx("loading the database schema")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -591,7 +607,11 @@ fn query_table(
         sort_column,
         sort_asc,
     };
-    db::query_table(&state, &req).err_ctx(&format!("querying table \"{}\"", req.table))
+    match state.parquet_session() {
+        Some(session) => pq::query_table(&session, &req, state.generation()),
+        None => db::query_table(&state, &req),
+    }
+    .err_ctx(&format!("querying table \"{}\"", req.table))
 }
 
 #[tauri::command(async)]
@@ -601,13 +621,19 @@ fn count_rows(
     filters: Vec<ColumnFilter>,
     global_filter: String,
 ) -> Result<i64, String> {
-    db::count_rows(&state, &table, &filters, &global_filter)
-        .err_ctx(&format!("counting rows in table \"{table}\""))
+    match state.parquet_session() {
+        Some(pq) => pq.count_rows(&table, &filters, &global_filter, state.generation()),
+        None => db::count_rows(&state, &table, &filters, &global_filter),
+    }
+    .err_ctx(&format!("counting rows in table \"{table}\""))
 }
 
 #[tauri::command(async)]
 fn execute_sql(state: State<'_, Arc<DbState>>, sql: String) -> SqlResult {
-    db::execute_sql(&state, &sql)
+    match state.parquet_session() {
+        Some(pq) => pq.execute_sql(&sql, state.generation()),
+        None => db::execute_sql(&state, &sql),
+    }
 }
 
 #[tauri::command(async)]
@@ -832,6 +858,8 @@ pub fn run() {
         ])
         .setup(|app| {
             update_window_title(app.handle(), None);
+            // Sort caches and spill files a crashed Parquet session left behind.
+            std::thread::spawn(pq::sweep_stale_cache);
 
             // Resolve the version transition once, here, and stash it as app
             // state. `record_run_version` is destructive by design: it returns
