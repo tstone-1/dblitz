@@ -28,8 +28,8 @@
 //
 // Output sticks to ASCII ([OK]/[FAIL]) so it renders on any CI console.
 
-import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { copyFileSync, mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -146,29 +146,11 @@ async function main() {
   db.close();
   log(`fixture created at ${dbPath}`);
 
-  // The Parquet fixture comes from a Rust example (DuckDB), since Node has no
-  // Parquet writer. It reuses the target directory the app build just filled,
-  // so this is a link step, not a second build of the world.
+  // The Parquet fixture is committed: Node has no Parquet writer, and running
+  // the Rust example that writes it (src-tauri/examples/make_parquet_fixture.rs)
+  // recompiled DuckDB's C++ inside this step. Regenerate it with that example.
   const parquetPath = join(fixtureDir, "smoke.parquet");
-  const made = spawnSync(
-    "cargo",
-    [
-      "run",
-      "--quiet",
-      "--manifest-path",
-      join(root, "src-tauri", "Cargo.toml"),
-      "--example",
-      "make_parquet_fixture",
-      "--",
-      parquetPath,
-    ],
-    { stdio: ["ignore", "inherit", "inherit"] },
-  );
-  if (made.status !== 0 || !existsSync(parquetPath)) {
-    throw new Error(
-      `could not write the Parquet fixture (cargo ${made.error?.message ?? `exit ${made.status}`})`,
-    );
-  }
+  copyFileSync(join(root, "scripts", "fixtures", "smoke.parquet"), parquetPath);
   log(`fixture created at ${parquetPath}`);
 
   // tauri-driver proxies the W3C WebDriver protocol to the platform's native

@@ -76,3 +76,11 @@ opt-level = 2
 # SQLite C code gets maximum optimization
 [profile.dev.package.libsqlite3-sys]
 opt-level = 3
+
+# DuckDB's C++ keeps the dependency opt-level (fast enough to browse real
+# Parquet files in `tauri dev`) but drops debug info. With it, the static
+# library was 1.7 GB and a clean build 110 s on a 10-core Mac; on CI's
+# 3-4-core runners, compiled for clippy and again for tests, that pushed
+# every backend job past its 45-minute limit.
+[profile.dev.package.libduckdb-sys]
+debug = false

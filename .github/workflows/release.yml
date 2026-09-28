@@ -87,9 +87,11 @@ jobs:
   # release leg after the tag was already pushed.
   quality:
     runs-on: ubuntu-latest
-    # Observed max 18 min 52 s (2026-07-24, cold Rust cache); 10-15 min warm.
+    # Observed max 18 min 52 s (2026-07-24, cold Rust cache) before DuckDB,
+    # whose C++ is compiled for clippy and again for the tests; the same gate
+    # in checks.yml took 37 min cold on macOS (2026-09-28). 10-15 min warm.
     # `npm run quality` is the full frontend + clippy + cargo test gate.
-    timeout-minutes: 40
+    timeout-minutes: 75
     # Compiles and tests only. Inherits `contents: read`.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
