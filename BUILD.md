@@ -418,6 +418,7 @@ ships looking green.
 **Update toolchains and dependencies:**
 - [ ] Update Rust toolchain: `rustup update stable`
 - [ ] Update Rust dependencies: `cd src-tauri && cargo update`
+  - Confirm the update landed in the file, not only in cargo's output: `git diff --stat -- src-tauri/Cargo.lock` must list the lockfile whenever cargo printed `Updating` lines. On 2026-09-30 `cargo update` printed 55 updates and exited 0 three times in a row without writing the lockfile.
   - Review output for major version bumps — check changelogs before proceeding.
 - [ ] Update npm dependencies: `npm update && npm outdated`
   - `npm outdated` shows remaining major-version updates. Review individually.
@@ -580,6 +581,7 @@ To overwrite a pre-existing non-brew install, use `brew install --cask --force d
 # Full release process (replace x.y.z with actual version)
 rustup update stable
 cd src-tauri && cargo update && cd ..
+git diff --stat -- src-tauri/Cargo.lock   # must list the lockfile if cargo printed updates
 npm update && npm outdated
 npm audit
 cd src-tauri && cargo audit && cd ..
