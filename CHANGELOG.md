@@ -5,6 +5,31 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.10.0] - 2026-10-01
+
+### Added
+- **Find text in the grid.** Ctrl+F (Cmd+F on macOS) opens a find bar above
+  the grid; Enter or F3 selects the next cell containing the text and scrolls
+  it into view, Shift+F3 the previous one, and Ctrl+G works as F3. The search
+  covers the rows and columns the grid shows, with filters and sort applied,
+  ignores case, never matches NULL, and wraps at the end. It works in the SQL
+  tab's result grid too.
+- **Show all / Hide all in the Columns panel.** One click shows or hides
+  every column. When every column is hidden, the grid says so and offers
+  Show all.
+- **Column presets.** "Save current" stores the columns shown now, in their
+  order, under a name. Clicking the preset later shows exactly those columns
+  and hides the rest, including columns the table gained since. A preset
+  belongs to the table in this file. If some of its columns no longer exist,
+  the panel names them.
+
+### Changed
+- **The column finder moved to Ctrl+Shift+F** (Cmd+Shift+F on macOS), so
+  Ctrl+F can be find in the grid.
+
+### Internal
+- Tauri 2.12.1, DuckDB 1.10506.0, and the other compatible dependency updates.
+
 ## [26.9.6] - 2026-09-28
 
 ### Added
