@@ -15,6 +15,15 @@ pub struct PinnedFilter {
     pub is_regex: bool,
 }
 
+/// A named set of visible columns, in display order. It stores the VISIBLE
+/// list rather than the hidden one so a column added to the table later stays
+/// hidden when the preset is applied, instead of appearing in the middle of it.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct ColumnPreset {
+    pub name: String,
+    pub columns: Vec<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 pub struct ViewConfig {
     pub hidden_columns: Vec<String>,
@@ -29,6 +38,8 @@ pub struct ViewConfig {
     pub pinned_global_filter: Option<String>,
     #[serde(default)]
     pub column_widths: HashMap<String, u32>,
+    #[serde(default)]
+    pub column_presets: Vec<ColumnPreset>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
@@ -93,11 +104,32 @@ fn sanitize_label(label: Option<String>) -> Option<String> {
     label.map(|s| s.chars().take(LABEL_MAX_LEN).collect())
 }
 
+/// Drops presets with a blank name or no columns, caps names at
+/// [`LABEL_MAX_LEN`] chars, and keeps only the first preset of each name, so a
+/// hand-edited file cannot give the UI two entries it cannot tell apart.
+fn sanitize_column_presets(presets: Vec<ColumnPreset>) -> Vec<ColumnPreset> {
+    let mut seen = std::collections::HashSet::new();
+    presets
+        .into_iter()
+        .filter_map(|preset| {
+            let name: String = preset.name.trim().chars().take(LABEL_MAX_LEN).collect();
+            if name.is_empty() || preset.columns.is_empty() || !seen.insert(name.clone()) {
+                return None;
+            }
+            Some(ColumnPreset {
+                name,
+                columns: preset.columns,
+            })
+        })
+        .collect()
+}
+
 fn sanitize_file_config(mut config: FileConfig) -> FileConfig {
     config.tint = sanitize_tint(config.tint);
     config.label = sanitize_label(config.label);
     for view in config.tables.values_mut() {
         view.column_colors = sanitize_column_colors(std::mem::take(&mut view.column_colors));
+        view.column_presets = sanitize_column_presets(std::mem::take(&mut view.column_presets));
     }
     config
 }
@@ -914,6 +946,45 @@ mod tests {
         assert_eq!(colors.get("good"), Some(&"#fde8e8".to_string()));
     }
 
+    fn preset(name: &str, columns: &[&str]) -> ColumnPreset {
+        ColumnPreset {
+            name: name.to_string(),
+            columns: columns.iter().map(|c| c.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn sanitize_file_config_cleans_column_presets() {
+        let view = ViewConfig {
+            column_presets: vec![
+                preset("  Pricing  ", &["price", "currency"]),
+                preset("   ", &["a"]),
+                preset("Empty", &[]),
+                preset("Pricing", &["other"]),
+                preset(&"x".repeat(LABEL_MAX_LEN + 10), &["a"]),
+            ],
+            ..ViewConfig::default()
+        };
+        let mut config = FileConfig::default();
+        config.tables.insert("t".to_string(), view);
+
+        let presets = &sanitize_file_config(config).tables["t"].column_presets;
+
+        assert_eq!(presets.len(), 2, "{presets:?}");
+        assert_eq!(presets[0], preset("Pricing", &["price", "currency"]));
+        assert_eq!(presets[1].name.chars().count(), LABEL_MAX_LEN);
+    }
+
+    #[test]
+    fn view_config_without_column_presets_still_parses() {
+        // A config written before presets existed has no `column_presets` key.
+        let json = r#"{"tables":{"t":{"hidden_columns":["a"],"column_colors":{},
+            "sort_column":null,"sort_asc":true}}}"#;
+        let config: FileConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.tables["t"].hidden_columns, vec!["a".to_string()]);
+        assert!(config.tables["t"].column_presets.is_empty());
+    }
+
     #[test]
     fn sanitize_file_config_caps_label_length() {
         let long_label = "x".repeat(200);
@@ -953,6 +1024,8 @@ mod tests {
                 is_regex: false,
             },
         );
+        view.column_presets
+            .push(preset("Pricing", &["price", "id"]));
         let mut config = FileConfig {
             tint: Some("#3080d0".to_string()),
             label: Some("PROD".to_string()),

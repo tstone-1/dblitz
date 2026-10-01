@@ -96,3 +96,42 @@ export function buildGridTemplate(columns: string[], columnWidths: Record<string
   });
   return `60px ${tracks.join(" ")}`;
 }
+
+export interface RevealRowOptions {
+  row: number;
+  rowHeight: number;
+  geometry: VirtualScrollGeometry;
+  viewportHeight: number;
+  /** Height of the sticky header stack that covers the top of the viewport. */
+  stickyHeight: number;
+  scrollTop: number;
+}
+
+/**
+ * The `scrollTop` that brings `row` fully into view, or null when it already
+ * is. Row `r` sits `r * rowHeight - dataScroll` below the sticky header, where
+ * `dataScroll` is what `virtualScrollTopToDataScroll` makes of `scrollTop`.
+ *
+ * An off-screen row is centred rather than placed at an edge. In a compressed
+ * spacer (scale > 1) one pixel of `scrollTop` moves the data by several
+ * pixels, and the browser rounds `scrollTop`, so an edge placement can land a
+ * row just outside the viewport. Centring leaves half the viewport of slack.
+ */
+export function scrollTopToRevealRow({
+  row,
+  rowHeight,
+  geometry,
+  viewportHeight,
+  stickyHeight,
+  scrollTop,
+}: RevealRowOptions): number | null {
+  const visibleHeight = Math.max(rowHeight, viewportHeight - stickyHeight);
+  const dataScroll = virtualScrollTopToDataScroll(scrollTop, geometry, viewportHeight);
+  const top = row * rowHeight - dataScroll;
+  if (top >= 0 && top + rowHeight <= visibleHeight) return null;
+
+  const targetDataScroll = Math.max(0, row * rowHeight - (visibleHeight - rowHeight) / 2);
+  const ratio = scrollRangeRatio(geometry, viewportHeight);
+  const maxScrollTop = Math.max(0, geometry.spacerHeight + stickyHeight - viewportHeight);
+  return Math.min(maxScrollTop, Math.round(targetDataScroll / ratio));
+}

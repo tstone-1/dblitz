@@ -211,8 +211,12 @@ and in the recent-files dropdown, so PROD and QA stay visually distinct.
 - Resize, reorder, hide, and color-tag columns
 - REAL values are displayed exactly as SQLite's own text conversion prints them
   (`3.0`, not `3`), so a filter typed against what you see matches what is stored
-- Find columns by name with **Ctrl+F** (Cmd+F on macOS) in the Browse Data
-  view
+- Find text in the grid with **Ctrl+F** (Cmd+F on macOS) and step through the
+  matches with **F3** / **Shift+F3**. The search covers the rows and columns the
+  grid shows, with filters and sort applied, and selects each matching cell
+- Find columns by name with **Ctrl+Shift+F** in the Browse Data view
+- Show or hide all columns at once, and save the visible columns as a named
+  preset per table
 - In-flight queries are cancelled when you switch tables or change filters
 
 **Filtering**
@@ -268,13 +272,19 @@ Cmd on macOS, Ctrl elsewhere; dblitz labels them for the platform you are on.
 | Shortcut | What it does |
 |----------|--------------|
 | Ctrl+Enter | Run the statement in the SQL editor |
-| Ctrl+F | Open the column finder (Browse Data) |
+| Ctrl+F | Find text in the grid |
+| F3 or Ctrl+G | Next match (Shift for the previous one) |
+| Ctrl+Shift+F | Open the column finder (Browse Data) |
 | Ctrl+A | Select every cell in the grid (not while typing in a field) |
 | Ctrl+C | Copy the selection |
 | Enter or Space | Sort by the focused column header |
 | Ctrl+Click | Add another selection rectangle, or switch a single cell back off |
 | Shift+Click | Extend the current selection rectangle |
 | Shift+Click on **Reset** | Also clear the pinned filter defaults |
+
+In the find bar: **Enter** goes to the next match, **Shift+Enter** to the
+previous one, and **Escape** closes it. Matching ignores case, and NULL cells
+never match.
 
 In the column finder: **Escape** closes it, **Up**/**Down** move through the
 matches and wrap around, **Home**/**End** jump to the first and last, and

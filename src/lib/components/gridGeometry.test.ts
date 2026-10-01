@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildGridTemplate,
   rowIndexToVirtualTop,
+  scrollTopToRevealRow,
   virtualScrollGeometry,
   virtualScrollTopToDataScroll,
   visibleRowIndices,
@@ -128,4 +129,56 @@ describe("grid geometry helpers", () => {
       expect(rowIndexToVirtualTop(42, 26, geometry, 600, scrollTop)).toBe(42 * 26);
     }
   });
+});
+
+describe("scrollTopToRevealRow", () => {
+  const rowHeight = 26;
+  const viewportHeight = 600;
+  const stickyHeight = 54;
+  const visibleHeight = viewportHeight - stickyHeight;
+
+  // Where the row lands below the sticky header at a given scrollTop, using
+  // the same mapping the grid renders with.
+  function rowTopBelowHeader(row: number, scrollTop: number, geometry: ReturnType<typeof virtualScrollGeometry>) {
+    return row * rowHeight - virtualScrollTopToDataScroll(scrollTop, geometry, viewportHeight);
+  }
+
+  function reveal(row: number, scrollTop: number, geometry: ReturnType<typeof virtualScrollGeometry>) {
+    return scrollTopToRevealRow({ row, rowHeight, geometry, viewportHeight, stickyHeight, scrollTop });
+  }
+
+  it("leaves the scroll position alone when the row is already fully visible", () => {
+    const geometry = virtualScrollGeometry({ rowCount: 1000, rowHeight, maxSpacerHeight: 20_000_000 });
+    expect(reveal(0, 0, geometry)).toBeNull();
+    expect(reveal(Math.floor(visibleHeight / rowHeight) - 1, 0, geometry)).toBeNull();
+  });
+
+  it("scrolls to a row below the viewport, and to one above it", () => {
+    const geometry = virtualScrollGeometry({ rowCount: 1000, rowHeight, maxSpacerHeight: 20_000_000 });
+    const down = reveal(500, 0, geometry);
+    expect(down).not.toBeNull();
+    const top = rowTopBelowHeader(500, down!, geometry);
+    expect(top).toBeGreaterThanOrEqual(0);
+    expect(top + rowHeight).toBeLessThanOrEqual(visibleHeight);
+
+    const up = reveal(3, down!, geometry);
+    expect(up).not.toBeNull();
+    expect(rowTopBelowHeader(3, up!, geometry)).toBeGreaterThanOrEqual(0);
+  });
+
+  // The case a plain `row * rowHeight` would get wrong: 1.8M rows compress the
+  // spacer, so one scrollTop pixel moves the data by more than one pixel.
+  for (const rowCount of [1000, 1_800_000, 100_000_000]) {
+    it(`lands every sampled row fully inside the viewport with ${rowCount.toLocaleString()} rows`, () => {
+      const geometry = virtualScrollGeometry({ rowCount, rowHeight, maxSpacerHeight: 20_000_000 });
+      const samples = [0, 1, 2, 17, rowCount >> 1, rowCount - 3, rowCount - 2, rowCount - 1];
+      for (let i = 0; i < 200; i++) samples.push(Math.floor((rowCount - 1) * ((i * 0.6180339887) % 1)));
+      for (const row of samples) {
+        const scrollTop = reveal(row, 0, geometry) ?? 0;
+        const top = rowTopBelowHeader(row, scrollTop, geometry);
+        expect(top, `row ${row}`).toBeGreaterThanOrEqual(0);
+        expect(top + rowHeight, `row ${row}`).toBeLessThanOrEqual(visibleHeight);
+      }
+    });
+  }
 });

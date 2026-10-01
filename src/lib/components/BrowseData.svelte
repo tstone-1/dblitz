@@ -23,9 +23,12 @@
   import { createDbGenerationReset } from "./dbGenerationReset.svelte";
   import { createBrowseQuery } from "./browseQuery.svelte";
   import {
+    applyColumnPreset,
     colorPresetsForTheme,
     orderColumns,
+    removeColumnPreset,
     stableColumnList,
+    upsertColumnPreset,
     visibleColumns,
   } from "./columnView";
   import { computeAutoWidths } from "./columnWidths";
@@ -38,7 +41,7 @@
   const CHUNK_SIZE = 500;
   const FILTER_DEBOUNCE_MS = 500;
 
-  // The Find-column shortcut accepts Ctrl+F and Cmd+F alike (see
+  // The Find-column shortcut accepts Ctrl+Shift+F and Cmd+Shift+F alike (see
   // onWindowKeydown); only the on-screen hint has to pick one, and naming Ctrl
   // on a Mac names the combination nobody presses there.
   const modKey = currentModKeyLabel();
@@ -240,6 +243,46 @@
     });
   }
 
+  // One config change and one save for the whole set. Calling
+  // toggleColumnHidden per column would queue one save per column.
+  function setAllColumnsHidden(hidden: boolean) {
+    if (!selectedTable) return;
+    updateTableConfig(selectedTable, (cfg) => {
+      cfg.hidden_columns = hidden ? [...columns] : [];
+    });
+  }
+
+  // Saves the columns visible right now, in display order.
+  function saveColumnPreset(name: string) {
+    if (!selectedTable || visColsList.length === 0) return;
+    updateTableConfig(selectedTable, (cfg) => {
+      cfg.column_presets = upsertColumnPreset(cfg.column_presets, name, visColsList);
+    });
+  }
+
+  /** Returns the preset's columns this table lacks, or null if it could not be
+   *  applied at all (none of its columns exist here). */
+  function applyPreset(name: string): string[] | null {
+    if (!selectedTable) return null;
+    const cfg = getTableConfig(selectedTable);
+    const preset = cfg.column_presets.find((p) => p.name === name);
+    if (!preset) return null;
+    const applied = applyColumnPreset(columns, cfg.column_order, preset);
+    if (!applied) return null;
+    updateTableConfig(selectedTable, (next) => {
+      next.hidden_columns = applied.hidden_columns;
+      next.column_order = applied.column_order;
+    });
+    return applied.missing;
+  }
+
+  function deleteColumnPreset(name: string) {
+    if (!selectedTable) return;
+    updateTableConfig(selectedTable, (cfg) => {
+      cfg.column_presets = removeColumnPreset(cfg.column_presets, name);
+    });
+  }
+
   function setColumnColor(col: string, color: string) {
     if (!selectedTable) return;
     updateTableConfig(selectedTable, (cfg) => {
@@ -383,11 +426,11 @@
     locateRequest = { col, n: (locateRequest?.n ?? 0) + 1 };
   }
 
-  // Ctrl+F opens the column finder. Gated to the browse tab so it doesn't
-  // intercept in SQL editor / structure tabs. preventDefault stops the webview
-  // from showing its own find UI.
+  // Ctrl+Shift+F opens the column finder; plain Ctrl+F is DataGrid's find in
+  // cells. Gated to the browse tab so it doesn't intercept in SQL editor /
+  // structure tabs. preventDefault stops the webview from showing its own UI.
   function onWindowKeydown(e: KeyboardEvent) {
-    if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== "f") return;
+    if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.key.toLowerCase() !== "f") return;
     if (appState.activeTab !== "browse") return;
     if (!selectedTable || columns.length === 0) return;
     e.preventDefault();
@@ -493,7 +536,7 @@
           <button
             onclick={() => (showFinder = !showFinder)}
             class="settings-btn find-col-btn"
-            title="Find column by name ({modKey}+F)"
+            title="Find column by name ({modKey}+Shift+F)"
             aria-label="Find column"
           >
             <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
@@ -501,7 +544,7 @@
               <line x1="10.5" y1="10.5" x2="14" y2="14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
             </svg>
             <span>Find column</span>
-            <kbd class="kbd-hint">{modKey}+F</kbd>
+            <kbd class="kbd-hint">{modKey}+Shift+F</kbd>
           </button>
           <span class="row-info">{countPending ? 'counting...' : `${totalRows.toLocaleString()} rows`}</span>
           {#if loading}<span class="loading-indicator">{progressLabel(progress)}</span>{/if}
@@ -518,7 +561,20 @@
             onSetColor={setColumnColor}
             onReorder={reorderColumns}
             onResetOrder={resetColumnOrder}
+            visibleColumns={visColsList}
+            presets={getTableConfig(selectedTable).column_presets}
+            onSetAllHidden={setAllColumnsHidden}
+            onSavePreset={saveColumnPreset}
+            onApplyPreset={applyPreset}
+            onDeletePreset={deleteColumnPreset}
           />
+        {/if}
+
+        {#if columns.length > 0 && visColsList.length === 0}
+          <div class="all-hidden">
+            All columns are hidden.
+            <button class="settings-btn" onclick={() => setAllColumnsHidden(false)}>Show all</button>
+          </div>
         {/if}
 
         <DataGrid
@@ -531,6 +587,7 @@
             getRows: virtualRows.getVisibleRows,
             setVisibleWindow: virtualRows.setVisibleWindow,
             rowsVersion: virtualRows.cacheVersion,
+            viewToken: virtualRows.currentEpoch,
           }}
           columnColors={visColColors}
           sortColumn={sortColumn}
@@ -598,6 +655,12 @@
   .empty {
     display: flex; align-items: center; justify-content: center;
     height: 100%; color: var(--text-muted); font-size: 14px;
+  }
+
+  .all-hidden {
+    display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+    font-size: 12px; color: var(--text-muted);
+    border-bottom: 1px solid var(--border-color); background: var(--bg-secondary);
   }
 
   .browse-layout {

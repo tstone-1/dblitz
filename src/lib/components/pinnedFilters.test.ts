@@ -16,6 +16,7 @@ function makeConfigStore(seed: Record<string, ViewConfig> = {}) {
     pinned_filters: {},
     pinned_global_filter: null,
     column_widths: {},
+    column_presets: [],
   });
   const getConfig = (t: string): ViewConfig => tables[t] ?? blank();
   const updateConfig = (
@@ -71,6 +72,7 @@ describe("createPinnedFilters", () => {
         pinned_filters: { name: { value: "saved", is_regex: true } },
         pinned_global_filter: null,
         column_widths: {},
+        column_presets: [],
       },
     });
     let reloads = 0;
@@ -105,6 +107,7 @@ describe("createPinnedFilters", () => {
         pinned_filters: { name: { value: "saved", is_regex: false } },
         pinned_global_filter: "global",
         column_widths: {},
+        column_presets: [],
       },
     });
     let columnFilters: Record<string, ColumnFilterValue> = {

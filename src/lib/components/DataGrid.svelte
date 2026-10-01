@@ -8,6 +8,7 @@
   import {
     buildGridTemplate,
     rowIndexToVirtualTop,
+    scrollTopToRevealRow,
     virtualScrollGeometry,
     virtualScrollTopToDataScroll,
     visibleRowIndices as getVisibleRowIndices,
@@ -17,6 +18,7 @@
   import ContextMenu from "./ContextMenu.svelte";
   import { pinToggleLabel, type PinState } from "./pinLabel";
   import { filterAfterListPaste } from "./filterOperators";
+  import { findCell, makeCellMatcher, type FindDirection } from "./gridFind";
 
   const ROW_HEIGHT = 26;
   const HEADER_HEIGHT = 26;
@@ -38,6 +40,10 @@
         setVisibleWindow: (firstRow: number, lastRow: number) => void;
         /** Bumped when a chunk lands; the statistics bar recomputes on it. */
         rowsVersion: number;
+        /** Changes whenever the view (table, filters, sort, session) is
+         *  reloaded. A find that sees it change stops instead of selecting a
+         *  cell in a view it did not search. */
+        viewToken: () => number;
       };
 
   // Props. The grid runs in two modes: mode.kind === "virtual" (BrowseData,
@@ -447,6 +453,156 @@
     }
   }
 
+  // Find in grid (see gridFind.ts). Only the match itself is highlighted, by
+  // selecting it, so the search adds no per-cell render work.
+  const FIND_BLOCK_ROWS = 2000;
+  const FIND_PROGRESS_DELAY_MS = 300;
+  let findOpen = $state(false);
+  let findQuery = $state("");
+  let findStatus = $state("");
+  let findBusy = $state(false);
+  let findInput: HTMLInputElement | undefined = $state();
+  // Plain counter: a search that is no longer the latest one publishes nothing.
+  let findSearchId = 0;
+
+  function openFind() {
+    findOpen = true;
+    void tick().then(() => {
+      findInput?.focus();
+      findInput?.select();
+    });
+  }
+
+  function cancelFind() {
+    findSearchId++;
+    findBusy = false;
+  }
+
+  function closeFind() {
+    cancelFind();
+    findOpen = false;
+    findStatus = "";
+    scrollContainer?.focus();
+  }
+
+  async function runFind(direction: FindDirection) {
+    if (findQuery.trim() === "") {
+      openFind();
+      return;
+    }
+    const myId = ++findSearchId;
+    // Everything the search depends on is captured now; if any of it changes
+    // while the search runs, the search stops instead of publishing.
+    const m = mode;
+    const cols = columns;
+    const total = rowCount;
+    const token: unknown = m.kind === "virtual" ? m.viewToken() : m.rows;
+    const currentToken = (): unknown => (mode.kind === "virtual" ? mode.viewToken() : mode.rows);
+    const isCancelled = () => myId !== findSearchId || currentToken() !== token || columns !== cols;
+    const loadRows =
+      m.kind === "virtual"
+        ? m.getRows
+        : (first: number, last: number) => Promise.resolve(m.rows.slice(first, last + 1));
+    const startedAt = Date.now();
+    findBusy = true;
+    findStatus = "";
+    try {
+      const result = await findCell({
+        rowCount: total,
+        colCount: cols.length,
+        start: sel ? { row: sel.r0, col: sel.c0 } : null,
+        direction,
+        matches: makeCellMatcher(findQuery),
+        loadRows,
+        blockRows: FIND_BLOCK_ROWS,
+        isCancelled,
+        onProgress: (searched) => {
+          if (myId !== findSearchId || Date.now() - startedAt < FIND_PROGRESS_DELAY_MS) return;
+          findStatus = `Searching... row ${searched.toLocaleString()} of ${total.toLocaleString()}`;
+        },
+      });
+      if (myId !== findSearchId) return;
+      if (result.kind === "cancelled") {
+        findStatus = "Search stopped: the view changed.";
+      } else if (result.kind === "none") {
+        findStatus = "No match";
+      } else {
+        selection.setSelection({ row: result.row, col: result.col }, { row: result.row, col: result.col });
+        revealCell(result.row, result.col);
+        findStatus = result.wrapped ? (direction === 1 ? "Wrapped to top" : "Wrapped to bottom") : "";
+      }
+    } catch {
+      if (myId !== findSearchId) return;
+      // A chunk failure is already on the error banner (virtualRows reports
+      // it); the bar only has to say the search did not cover every row.
+      findStatus = isCancelled()
+        ? "Search stopped: the view changed."
+        : "Search stopped: some rows could not be loaded.";
+    } finally {
+      if (myId === findSearchId) findBusy = false;
+    }
+  }
+
+  // Scrolls so the cell is fully visible: vertically through the (possibly
+  // compressed) spacer geometry, horizontally by hand, because scrollIntoView
+  // would also scroll the overflow:hidden ancestors.
+  function revealCell(row: number, col: number) {
+    const viewport = scrollContainer;
+    if (!viewport) return;
+    const next = scrollTopToRevealRow({
+      row,
+      rowHeight: ROW_HEIGHT,
+      geometry: scrollGeometry,
+      viewportHeight,
+      stickyHeight,
+      scrollTop: viewport.scrollTop,
+    });
+    if (next !== null) {
+      viewport.scrollTop = next;
+      pendingScrollTop = next;
+      scrollTop = next;
+    }
+    const header = gridContainer?.querySelector<HTMLElement>(`.col-header[data-colidx="${col}"]`);
+    if (!header) return;
+    const h = header.getBoundingClientRect();
+    const v = viewport.getBoundingClientRect();
+    const rowNumWidth = viewport.querySelector<HTMLElement>(".row-num-header")?.offsetWidth ?? 0;
+    const viewLeft = v.left + rowNumWidth;
+    const viewRight = v.left + viewport.clientWidth;
+    if (h.left < viewLeft) viewport.scrollLeft -= viewLeft - h.left;
+    else if (h.right > viewRight) viewport.scrollLeft += Math.min(h.right - viewRight, h.left - viewLeft);
+  }
+
+  function handleFindInputKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void runFind(e.shiftKey ? -1 : 1);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      closeFind();
+    }
+  }
+
+  // Ctrl/Cmd+F opens the bar; F3 / Ctrl+G go to the next match, with Shift to
+  // the previous one. Window-level like Ctrl+C, and only for the grid that is
+  // on screen: Browse and SQL each keep a mounted grid. A key the SQL editor
+  // already handled (CodeMirror has its own search) arrives defaultPrevented.
+  function handleFindKeydown(e: KeyboardEvent) {
+    if (e.defaultPrevented || gridContainer?.offsetParent == null) return;
+    const mod = e.ctrlKey || e.metaKey;
+    const key = e.key.toLowerCase();
+    if (mod && !e.shiftKey && !e.altKey && key === "f") {
+      e.preventDefault();
+      openFind();
+    } else if (e.key === "F3" || (mod && !e.altKey && key === "g")) {
+      e.preventDefault();
+      void runFind(e.shiftKey ? -1 : 1);
+    } else if (e.key === "Escape" && findBusy) {
+      cancelFind();
+      findStatus = "Search cancelled";
+    }
+  }
+
   // Header mouse-based reorder (extracted to dragReorder.ts)
   const reorder = createDragReorder(() => columns, () => columnOps?.onReorderColumn);
 
@@ -506,9 +662,27 @@
   function closePinCtx() { pinCtx = null; }
 </script>
 
-<svelte:window onkeydown={handleWindowKeydown} />
+<svelte:window onkeydown={(e) => { handleWindowKeydown(e); handleFindKeydown(e); }} />
 
 <div class="grid-container" bind:this={gridContainer}>
+  {#if findOpen}
+    <div class="find-bar" role="search">
+      <input
+        bind:this={findInput}
+        bind:value={findQuery}
+        oninput={() => (findStatus = "")}
+        onkeydown={handleFindInputKeydown}
+        class="find-input"
+        type="text"
+        placeholder="Find in visible columns"
+        aria-label="Find in grid"
+      />
+      <button class="find-btn" onclick={() => runFind(-1)} disabled={findQuery.trim() === ""} title="Previous match (Shift+F3)">Previous</button>
+      <button class="find-btn" onclick={() => runFind(1)} disabled={findQuery.trim() === ""} title="Next match (F3)">Next</button>
+      <span class="find-status">{findStatus}</span>
+      <button class="find-btn find-close" onclick={closeFind} title="Close (Esc)" aria-label="Close find">&times;</button>
+    </div>
+  {/if}
   <div class="scroll-viewport" role="grid" tabindex="0" bind:this={scrollContainer} bind:clientHeight={viewportHeight} onscroll={handleScroll} onkeydown={handleGridKeydown}>
     <!-- Sticky header stack: header row + (optional) filter row pinned together
          to avoid 1px subpixel drift between two independently-sticky elements -->
@@ -699,6 +873,16 @@
   .grid-container {
     flex: 1; display: flex; flex-direction: column; overflow: hidden;
   }
+
+  .find-bar {
+    display: flex; align-items: center; gap: 6px; padding: 4px 8px;
+    border-bottom: 1px solid var(--border-color); background: var(--bg-secondary);
+    font-size: 12px; flex-shrink: 0;
+  }
+  .find-input { width: 240px; font-size: 12px; padding: 2px 6px; }
+  .find-btn { font-size: 11px; padding: 1px 8px; }
+  .find-status { color: var(--text-muted); font-size: 11px; }
+  .find-close { margin-left: auto; }
 
   .sel-status-bar {
     display: flex;

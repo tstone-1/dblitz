@@ -496,7 +496,14 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
     void deps.cancelQueries();
   }
 
+  /** The current epoch. Every reload and reset moves it, so a long operation
+   *  that captured it can tell the view changed underneath it. */
+  function currentEpoch(): number {
+    return epoch;
+  }
+
   return {
+    currentEpoch,
     getVisibleRow,
     peekVisibleRow,
     getVisibleRows,

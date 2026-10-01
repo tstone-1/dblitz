@@ -81,6 +81,12 @@ export interface RecentFile {
   label: string | null;
 }
 
+/** A named set of visible columns in display order (`ColumnPreset` in config.rs). */
+export interface ColumnPreset {
+  name: string;
+  columns: string[];
+}
+
 export interface ViewConfig {
   hidden_columns: string[];
   column_colors: Record<string, string>;
@@ -101,6 +107,7 @@ export interface ViewConfig {
    * new writer has to do the same.
    */
   column_widths: Record<string, number>;
+  column_presets: ColumnPreset[];
 }
 
 export interface FileConfig {

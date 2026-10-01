@@ -20,6 +20,7 @@ function freshConfig(): ViewConfig {
     pinned_filters: {},
     pinned_global_filter: null,
     column_widths: {},
+    column_presets: [],
   };
 }
 
