@@ -515,6 +515,24 @@ locally — CI does. `npx tauri build` is only for a local desktop artifact.
 - [ ] Release workflow succeeded end-to-end: `gh run watch <run-id> --exit-status`
 - [ ] Published (not draft) GitHub release exists for the tag: `gh release view vYY.M.MICRO --json isDraft`
 
+> **Gotcha — notarization returns HTTP 403 "A required agreement is missing
+> or has expired".** Apple has published an updated Developer Program License
+> Agreement, and notarization stops until the **Account Holder** accepts it on
+> https://developer.apple.com/account (a banner at the top of the page). The
+> macOS legs fail at the notarize step; Windows and Linux succeed, `publish`
+> and `update-tap` are skipped, and the release stays a draft, so nothing
+> reaches users. After accepting, wait for the run to finish and run
+> `gh run rerun <run-id> --failed`: only the failed legs rebuild. A leg that
+> reaches notarization after the agreement is accepted passes in the same run.
+> The identity is shared with `screenpick`, which is blocked the same way.
+> (Seen on `26.10.0`, 2026-10-01.)
+
+> **Gotcha — local `npx tauri build` fails with `LNK1114: cannot overwrite the
+> original file '...libduckdb.a'; error code 5`.** Another process (typically
+> the virus scanner) had the freshly written DuckDB archive open while `lib.exe`
+> appended to it. Rerun the build; nothing needs cleaning. (Seen once, 26.10.0,
+> right after `cargo update` moved `libduckdb-sys`.)
+
 > **Gotcha — transient `publish`-job cancellation.** The `publish` job (a
 > one-line `gh release edit --draft=false`) is occasionally **cancelled** by a
 > GitHub Actions infra flake even when all four build legs succeed; `update-tap`
