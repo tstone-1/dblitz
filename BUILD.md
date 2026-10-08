@@ -2,9 +2,12 @@
 
 > **Distribution model:** **macOS release builds are signed with a Developer ID
 > identity and notarized by Apple** (since 26.7.6) — users open them normally.
-> **Windows builds are unsigned**; SmartScreen warns on first launch. Local and
-> fork builds stay ad-hoc signed (`"signingIdentity": "-"` in `tauri.conf.json`)
-> unless you export `APPLE_SIGNING_IDENTITY` yourself — see
+> **Windows release builds are signed with a Certum Open Source Code Signing
+> certificate** (releases after 26.10.0), by the Windows leg of `release.yml` —
+> see [Windows code signing](#windows-code-signing). A local Windows build is
+> unsigned. Local and fork macOS builds stay ad-hoc signed
+> (`"signingIdentity": "-"` in `tauri.conf.json`) unless you export
+> `APPLE_SIGNING_IDENTITY` yourself — see
 > [macOS code signing and notarization](#macos-code-signing-and-notarization).
 
 ## Prerequisites
@@ -80,9 +83,12 @@ the same way (see AGENTS.md).
 **Portable executable** (recommended):
 - `src-tauri/target/release/dblitz.exe`
 
-**Installers** (in `src-tauri/target/release/bundle/`):
+**Installer** (in `src-tauri/target/release/bundle/`):
 - `nsis/dblitz_x.y.z_x64-setup.exe` - NSIS installer (registers file associations)
-- `msi/dblitz_x.y.z_x64_en-US.msi` - MSI installer
+
+No MSI is built: `src-tauri/tauri.windows.conf.json` limits the Windows bundle
+to `nsis`, and [Windows code signing](#windows-code-signing) has the reason.
+The other platforms still build everything (`"targets": "all"`).
 
 ### macOS
 
@@ -411,6 +417,190 @@ Each macOS leg ends with a verification step that greps for
 notarization exits 0 (see above), and without that gate an unnotarized release
 ships looking green.
 
+## Windows code signing
+
+**Status: wired up 2026-10-08, first used by the release after 26.10.0.** The
+installer, the uninstaller it writes, `dblitz.exe` inside it and the portable
+`dblitz.exe` on the release page are signed by the Windows leg of
+`release.yml`. 26.10.0 and everything before it is unsigned.
+
+This is **independent of the updater's minisign key**, like the Apple
+signature: Windows reads the code signature, an installed dblitz reads the
+minisign signature and nothing else. A stolen signing login lets somebody sign
+their own program under this name; it does not let them update anybody's
+dblitz.
+
+### The certificate is shared with tpdf and screenpick
+
+| Thing | Value |
+|---|---|
+| Certificate | Certum *Open Source Code Signing in the Cloud* |
+| Subject | `CN=Open Source Developer Timo Stein` |
+| Issuer | *Certum Code Signing 2021 CA* |
+| Valid until | 2027-10-07 |
+| Key | In Certum's SimplySign service. It cannot be exported |
+
+The certificate names a person, not an application, so the same one signs
+`tpdf` and `screenpick`. The method below was worked out in `tpdf`, whose
+[`BUILD.md` → Signing with the Certum certificate](https://github.com/tstone-1/tpdf/blob/main/BUILD.md#signing-with-the-certum-certificate)
+records the measurements: the runs, the four rehearsal tags that each failed
+one step later than the last, and the release that shipped an unsigned
+uninstaller. They are not repeated here. What follows from sharing:
+
+- **Renewal in October 2027 is a three-repository event**, like the Apple
+  certificate. The login does not change with a renewal, but the subject may,
+  and each repository's `Verify the Windows build is signed` step names it.
+- **A concurrency group ends at the repository.** Every job in this repository
+  that signs is in the group `certum-signing`, but a release of `tpdf` or
+  `screenpick` is invisible to it. Do not push a tag or start a rehearsal here
+  while one of theirs is signing: see the three rules below.
+
+### How a release is signed
+
+Certum supports one way to use the key: log in to its desktop program with the
+account's e-mail address and a six-digit code, after which the certificate
+appears in the user's certificate store. A hosted runner has no person and no
+phone, so the login is done by [`ssign`](https://github.com/Le-Syl21/ssign)
+(MIT), an **unofficial** client for the SimplySign service. The Windows leg:
+
+1. Fails at once if either secret is empty.
+2. Builds `ssign` v0.1.7 from the pinned commit
+   `5fd4daf22155b19b645aef3dd467f3c4c9e440b3` with `cargo install --locked`,
+   outside the checkout and into a folder of its own under `RUNNER_TEMP`, so
+   the Rust cache never restores the program that holds the login.
+3. Gives Tauri `src-tauri/tauri.signing.conf.json`, an overlay that sets
+   `bundle.windows.signCommand` to `sign-windows.cmd`. Tauri then calls it for
+   `dblitz.exe`, for the NSIS plugin DLLs, for the uninstaller (from inside
+   makensis) and for the installer. The first call logs in and the later ones
+   reuse the session, so one build is one login.
+4. Removes the session `ssign` leaves behind and prints the signing log, both
+   also when the build failed.
+5. Reads the signatures back with `scripts/verify-signature.ps1` and fails
+   unless each is valid, timestamped and by the signer: the installer and the
+   portable `dblitz.exe`, then, after running the installer silently, every
+   executable file in the folder it installed to, the uninstaller among them.
+6. Uploads the portable `dblitz.exe`, which is the file step 5 read: Tauri
+   signs it where it was built, before packing it.
+
+The login is two secrets of the GitHub environment `signing`, and of no other
+place: `CERTUM_EMAIL`, and `CERTUM_OTP_URI`, the whole `otpauth://` address
+Certum shows once at activation. Keep the whole address and not only its
+`secret`: `ssign` reads `algorithm`, `digits` and `period` from it, and an
+authenticator that assumes SHA-1 shows six digits that are refused. Only the
+Windows leg names the environment, so the Linux and macOS legs cannot read the
+secrets. The environment accepts the `main` branch and `v*` tags.
+
+Setting it up, once (not yet done for this repository on 2026-10-08):
+
+```sh
+gh auth switch --user tstone-1
+gh api -X PUT repos/tstone-1/dblitz/environments/signing --input - <<'JSON'
+{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}
+JSON
+gh api -X POST repos/tstone-1/dblitz/environments/signing/deployment-branch-policies -f name=main -f type=branch
+gh api -X POST repos/tstone-1/dblitz/environments/signing/deployment-branch-policies -f name='v*' -f type=tag
+
+# Each value from the clipboard, so it is never in the command text.
+pbpaste | gh secret set CERTUM_EMAIL --env signing --repo tstone-1/dblitz
+pbpaste | gh secret set CERTUM_OTP_URI --env signing --repo tstone-1/dblitz
+
+# Read back: two policies, `main branch` and `v* tag`, and two secret names.
+gh api repos/tstone-1/dblitz/environments/signing/deployment-branch-policies \
+  --jq '.branch_policies[] | "\(.name) \(.type)"'
+gh secret list --env signing --repo tstone-1/dblitz
+```
+
+A job that names an environment which does not exist creates it, empty and
+open to every branch. The first step of the Windows leg then fails on the
+missing secrets, so nothing is signed, but delete such an environment and
+create it as above.
+
+### Four things a build like this got wrong before
+
+All four were paid for in `tpdf`; the code here starts from the fixed state,
+and `src/lib/windowsSigning.test.ts` holds each in place.
+
+| What went wrong | What prevents it here |
+|---|---|
+| The overlay's path was put together in the job matrix, where `github.workspace` is empty, so Tauri was given `/src-tauri/tauri.signing.conf.json` | The matrix carries the flag `signs-windows`; the path is built in the step |
+| `failed to run ssign` and no reason: Tauri shows nothing of a sign command that failed | `scripts/sign-windows.ps1` writes everything `ssign` prints to a log, and the leg prints it |
+| `atomically replacing ...: Access is denied. (os error 5)` on the application's executable, a fraction of a second after Tauri had written to it. `ssign` replaces a file by renaming a signed copy over it | `ssign` signs into a folder of its own and the script copies the bytes back, again for up to thirty seconds |
+| An unsigned `uninstall.exe` in a release whose other files were signed. makensis starts the sign command by its quoted name through `PATH` from its own folder, the wrapper looked for its script beside itself (`%~dp0`), and makensis printed `UninstFinalize command returned 64` and went on | The wrapper takes the script's path from `DBLITZ_SIGN_SCRIPT`, and the leg installs what it built and reads `uninstall.exe` where it lands |
+
+### Three rules the login brings
+
+One code is good for one login, so two jobs that log in within the same 30
+seconds make the second fail, and repeated failed logins can lock the account:
+
+- Everything here that signs is in the concurrency group `certum-signing`.
+- Do not log in to the desktop program while a signing job runs.
+- Do not let two of the three repositories sign at the same time.
+
+`ssign` keeps its session for twenty minutes in a file, under `%TEMP%\ssign`
+or `.cache\ssign` in the home folder; both workflows remove it.
+
+### The rehearsal
+
+`sign-rehearsal.yml` proves the build of `ssign` and the login without
+building dblitz and without a tag: it signs a plain executable and the
+installer of a published, unsigned release (26.10.0 by default), starts the
+wrapper the way makensis does, holds one of the files open so the copy has to
+wait, reads both signatures back and installs from the signed installer. It
+uploads nothing.
+
+```sh
+gh workflow run sign-rehearsal.yml --ref main
+gh run list --workflow sign-rehearsal.yml --limit 1
+```
+
+Run it after the environment is first set up, whenever `SSIGN_REV` changes,
+and when a release leg fails in the build step with a login error. It does
+**not** cover the release leg itself: the conditional environment, the overlay
+reaching Tauri, and a real signature on the uninstaller are first seen on a
+tag.
+
+### There is no `.msi` any more
+
+`ssign` signs executables only and refuses an MSI (`not a PE (no MZ
+signature)`), and a release with a signed installer beside an unsigned package
+is worse than one without the package. Of the eight releases 26.9.0 to 26.10.0
+the `.msi` was downloaded once in total (read from the release assets'
+download counts on 2026-10-08).
+
+What it costs somebody who did install from it: a copy installed from the
+`.msi` is not offered an in-app update. `windows_install_provenance` in
+`lib.rs` recognises an installed copy by the registry key the NSIS installer
+writes, which an MSI install does not have, so such a copy counts as portable
+and is told to download the new version. Running the `-setup.exe` over it
+leaves two installed copies, the MSI's and the new one. The release notes say
+to uninstall the `.msi` once. This is read from the code and was not tried on
+a Windows computer.
+
+### The fallback by hand
+
+When the workflow cannot sign, a file can be signed on a Windows computer with
+Certum's SimplySign Desktop program logged in:
+
+```
+signtool sign /sha1 <thumbprint> /fd sha256 /tr http://time.certum.pl /td sha256 <file>
+scripts/verify-signature.ps1 -Signer 'Open Source Developer Timo Stein' -Path <file>
+```
+
+A signature changes the file's bytes, so an installer signed this way no
+longer matches the updater `.sig` made for the unsigned bytes. Sign first, then
+make the `.sig`.
+
+### What the login is worth to somebody who steals it
+
+The two secrets are enough to sign any file as *Open Source Developer Timo
+Stein* until the certificate is revoked or expires. `release.yml` and
+`sign-rehearsal.yml` are the two workflows that name the environment, and
+neither runs for a pull request. `ssign` is built from one pinned commit; its
+dependencies are pinned by its own lock file and nothing else. Its protocol is
+reverse-engineered, so Certum can end it without notice; the cost of that is a
+release that fails to build, not one that ships unsigned, because the Windows
+leg reads every signature back.
+
 ## Release Procedure
 
 ### 1. Pre-release Checklist
@@ -451,6 +641,15 @@ ships looking green.
   node scripts/release-preflight.mjs vYY.M.MICRO
   ```
 - [ ] Update `CHANGELOG.md` with new version entry and date
+- [ ] Read the release notes written out in `release.yml` (`create-release`,
+  the `NOTES` block). They are a literal, so nothing fails when a sentence in
+  them has become false.
+
+**Windows signing** (see [Windows code signing](#windows-code-signing)):
+- [ ] If `SSIGN_REV` changed since the last release, the rehearsal has passed:
+  `gh workflow run sign-rehearsal.yml --ref main`
+- [ ] No release or rehearsal of `tpdf` or `screenpick` is running, and nobody
+  is logged in to the SimplySign desktop program
 
 ### 2. Build Release
 
@@ -461,8 +660,8 @@ npx tauri build
 > **This exits 1 even when it succeeds.** With `createUpdaterArtifacts` enabled
 > the bundler ends by signing the updater artifacts, and locally
 > `TAURI_SIGNING_PRIVATE_KEY` is deliberately unset (the key lives only in
-> KeePass and the repo secrets) — so the build writes the exe and both
-> installers, *then* fails with "A public key has been found, but no private
+> KeePass and the repo secrets) — so the build writes the exe and the
+> installer, *then* fails with "A public key has been found, but no private
 > key". Judge this step by the artifact check below, not the exit code; signed
 > updater artifacts only ever come from CI.
 
@@ -575,6 +774,15 @@ To overwrite a pre-existing non-brew install, use `brew install --cask --force d
 - [ ] An older install actually offers the update (the point of all of the above):
       launch a previous build and confirm the bar appears within ~10 s
 - **Windows:**
+  - [ ] The release has a `-setup.exe`, its `.sig` and `dblitz.exe`, and no
+        `.msi`: `gh release view vYY.M.MICRO --json assets -q '.assets[].name'`
+  - [ ] The published files are signed. CI gates this on the files it built;
+        this reads the ones users download. On a Windows computer, after
+        downloading both, expect `Valid` and the signer twice:
+        ```powershell
+        Get-AuthenticodeSignature .\dblitz.exe, .\dblitz_*_x64-setup.exe |
+          Format-List Path, Status, @{n='Signer';e={$_.SignerCertificate.Subject}}
+        ```
   - [ ] Run exe from build output to verify it works
   - [ ] Open a .sqlite file via double-click (file association test)
   - [ ] Check that the jump list populates after opening files
@@ -725,8 +933,11 @@ dblitz/
 │   ├── icons/                    # App icons (source: sqlite.svg)
 │   ├── Cargo.toml                # Rust dependencies
 │   ├── Cargo.lock                # Carries the crate's own version
-│   └── tauri.conf.json           # Tauri config
-├── scripts/                      # release-preflight.mjs, smoke-test.mjs
+│   ├── tauri.conf.json           # Tauri config
+│   ├── tauri.windows.conf.json   # Windows only: bundle the NSIS installer, no MSI
+│   └── tauri.signing.conf.json   # Release overlay: the Windows sign command
+├── scripts/                      # release-preflight.mjs, smoke-test.mjs,
+│                                 # sign-windows.{cmd,ps1}, verify-signature.ps1
 ├── .github/                      # Workflows, dependabot, tauri-linux-deps.txt
 ├── package.json                  # npm config
 ├── AGENTS.md                     # Architecture and project conventions

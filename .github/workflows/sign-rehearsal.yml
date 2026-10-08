@@ -1,0 +1,176 @@
+name: Windows signing rehearsal
+
+# Signs two files that are already public with the Certum Open Source
+# certificate and reads every signature back. It publishes nothing and uploads
+# nothing: the question it answers is whether a hosted runner can build the
+# signing client, log in and sign, without building dblitz and without a tag.
+#
+# The key is in Certum's SimplySign service. Certum supports a login from its
+# desktop program only, so the login here is done by ssign, an unofficial
+# client (MIT) that is built from a pinned commit of its source.
+#
+# Only executables: ssign 0.1.7 refuses an MSI with "not a PE (no MZ
+# signature)", which is why dblitz ships none any more.
+#
+# Start it by hand:
+#   gh workflow run sign-rehearsal.yml --ref main
+#   gh run list --workflow sign-rehearsal.yml --limit 1
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        # 26.10.0 is the last release that was published unsigned, which is
+        # what makes it the control: a file that is already signed cannot show
+        # that signing works, and the job refuses one.
+        description: Published, unsigned release whose Windows installer is signed as a test
+        required: true
+        default: v26.10.0
+
+# A SimplySign code is good for one login. Two jobs logging in inside the same
+# 30 seconds make the second one fail, and repeated failed logins can lock the
+# account, so every job in this repository that signs shares this group and
+# none is cancelled. The group ends at the repository: do not start this while
+# another project signs with the same certificate.
+concurrency:
+  group: certum-signing
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  rehearse:
+    name: Sign and verify
+    runs-on: windows-latest
+    # Not yet run in this repository. The same job took under ten minutes in
+    # the project it was written for; most of it is compiling ssign.
+    timeout-minutes: 30
+    # The two secrets live in this environment and nowhere else, so a workflow
+    # that does not name it cannot read them.
+    environment: signing
+    env:
+      # ssign v0.1.7. A commit and not a tag: a tag can be moved. Keep it the
+      # same as SSIGN_REV in release.yml (windowsSigning.test.ts holds them
+      # equal).
+      SSIGN_REV: 5fd4daf22155b19b645aef3dd467f3c4c9e440b3
+      SIGNER: Open Source Developer Timo Stein
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Built outside the checkout and installed into a folder of its own, as
+      # release.yml does it.
+      - name: Build ssign from the pinned commit
+        shell: pwsh
+        working-directory: ${{ runner.temp }}
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'ssign-client'
+          cargo install --locked --git https://github.com/Le-Syl21/ssign --rev $env:SSIGN_REV --root $root ssign
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $bin = Join-Path $root 'bin'
+          & (Join-Path $bin 'ssign.exe') --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # The wrapper release.yml gives to Tauri, found where ssign is found.
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'scripts\sign-windows.cmd') $bin
+          Add-Content $env:GITHUB_PATH $bin
+
+      - name: Fetch the files to sign
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          New-Item -ItemType Directory -Force work | Out-Null
+          gh release download $env:RELEASE --repo $env:GITHUB_REPOSITORY --dir work --pattern '*_x64-setup.exe'
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # A plain executable, as the control beside the installer.
+          Copy-Item (Get-Command ssign).Source work\plain.exe
+          $files = Get-ChildItem work -File
+          if ($files.Count -ne 2) { Write-Output "::error::expected 2 files to sign, found $($files.Count)"; exit 1 }
+          foreach ($file in $files) {
+            $status = (Get-AuthenticodeSignature $file.FullName).Status
+            Write-Output "$($file.Name): $status before signing"
+            if ($status -ne 'NotSigned') { Write-Output "::error::$($file.Name) is already signed, so it cannot show that signing works"; exit 1 }
+          }
+
+      - name: Sign
+        shell: pwsh
+        env:
+          CERTUM_EMAIL: ${{ secrets.CERTUM_EMAIL }}
+          CERTUM_OTP: ${{ secrets.CERTUM_OTP_URI }}
+          DBLITZ_SIGN_SCRIPT: ${{ github.workspace }}/scripts/sign-windows.ps1
+        run: |
+          if (-not $env:CERTUM_EMAIL -or -not $env:CERTUM_OTP) { Write-Output '::error::CERTUM_EMAIL or CERTUM_OTP_URI is not set in the environment "signing"'; exit 1 }
+          # One file at a time and stop at the first failure: a second attempt
+          # with the same account is a second login.
+          #
+          # The plain executable is held open for twenty seconds by another
+          # process that lets nobody write to it, which is the state a release
+          # build leaves the application's executable in. Signing it has to
+          # wait and then succeed.
+          $held = (Resolve-Path work\plain.exe).Path
+          $holder = Start-Job -ArgumentList $held -ScriptBlock {
+            param($path)
+            $file = [IO.File]::Open($path, 'Open', 'Read', 'Read')
+            Start-Sleep -Seconds 20
+            $file.Dispose()
+          }
+          Start-Sleep -Seconds 3
+          #
+          # Each file is signed the way makensis signs the uninstaller: from
+          # another folder, through the shell, by the quoted name of the
+          # wrapper. Started so, a wrapper that looks for its script beside
+          # itself looks in that other folder and signs nothing.
+          Push-Location $env:RUNNER_TEMP
+          foreach ($file in Get-ChildItem (Join-Path $env:GITHUB_WORKSPACE work) -File | Sort-Object Name) {
+            cmd /c "`"sign-windows.cmd`" `"$($file.FullName)`""
+            if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Output "::error::signing failed on $($file.Name)"; exit 1 }
+          }
+          Pop-Location
+          $waited = @(Select-String -Path (Join-Path $env:RUNNER_TEMP 'ssign.log') -Pattern '^attempt \d+:').Count
+          Write-Output "write attempts that had to wait: $waited"
+          if ($waited -lt 1) { Write-Output '::error::the held file was written at once, so the wait was not exercised'; exit 1 }
+
+      - name: Show what the signing client said
+        if: always()
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'ssign.log'
+          if (Test-Path $log) { Get-Content $log | Where-Object { $_ -notmatch 'card ' } } else { Write-Output 'no signing log: the sign command never ran' }
+
+      - name: Remove the cached session
+        if: always()
+        shell: pwsh
+        run: |
+          $places = @((Join-Path ([IO.Path]::GetTempPath()) 'ssign'))
+          foreach ($root in $env:HOME, $env:USERPROFILE) { if ($root) { $places += Join-Path $root '.cache\ssign' } }
+          foreach ($place in $places) { Write-Output "$place present: $(Test-Path $place)"; Remove-Item -Recurse -Force $place -ErrorAction SilentlyContinue }
+
+      - name: Read every signature back
+        shell: pwsh
+        run: scripts/verify-signature.ps1 -Signer $env:SIGNER -Path (Get-ChildItem work -File | Sort-Object Name).FullName
+
+      # A signature is appended to the file, and an NSIS installer checks its
+      # own bytes when it starts. Installing it is what shows that the signed
+      # installer still works, which reading the signature cannot.
+      #
+      # Only the installer was signed here, so the files it installs are the
+      # unsigned ones of the published release. Their signatures are the
+      # release leg's to read, not this job's.
+      - name: Install from the signed installer
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem work -Filter '*_x64-setup.exe' | Select-Object -First 1
+          $run = Start-Process $setup.FullName -ArgumentList '/S' -Wait -PassThru
+          Write-Output "installer exit code: $($run.ExitCode)"
+          if ($run.ExitCode -ne 0) { Write-Output '::error::the signed installer did not install'; exit 1 }
+          # The folder the installer recorded, as release.yml reads it.
+          $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\dblitz'
+          $where = "$((Get-ItemProperty $key -ErrorAction SilentlyContinue).InstallLocation)".Trim().Trim('"')
+          if (-not $where -or -not (Test-Path (Join-Path $where 'dblitz.exe'))) { Write-Output "::error::the signed installer left no dblitz.exe (install folder: '$where')"; exit 1 }
+          Write-Output "installed: $(Join-Path $where 'dblitz.exe')"
+          foreach ($file in Get-ChildItem $where -File -Include '*.exe', '*.dll' -Recurse) {
+            Write-Output "$($file.Name): $((Get-AuthenticodeSignature $file.FullName).Status)"
+          }

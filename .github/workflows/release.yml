@@ -3,12 +3,15 @@ name: Release
 # Builds installers and publishes them to a GitHub Release.
 #
 # macOS is signed with a Developer ID identity and notarized by Apple, so it
-# installs without a Gatekeeper bypass. Windows has no Authenticode cert and is
-# still unsigned — users bypass SmartScreen on first launch; see the "Install"
-# section of README.md.
+# installs without a Gatekeeper bypass. Windows is signed with a Certum Open
+# Source Code Signing certificate, whose key is in Certum's SimplySign service;
+# the `Build the Windows signing client` step has the detail, and BUILD.md,
+# "Windows code signing", has the rules.
 #
-# Signing is conditional on the Apple secrets being present, so a fork without
-# them still builds (ad-hoc signed, unnotarized).
+# Apple signing is conditional on the Apple secrets being present, so a
+# checkout without them still gets through the macOS preparation step (ad-hoc
+# signed, unnotarized). Windows signing is not conditional: a Windows leg that
+# cannot sign fails.
 
 on:
   push:
@@ -163,8 +166,17 @@ jobs:
         # build legs can upload BY ID: GitHub's get-release-by-tag REST endpoint
         # (which tauri-action uses when given `tagName`) returns 404 for a draft,
         # so tagName-based upload fails until the release is published.
+        #
+        # The notes are a literal here and not a slice of CHANGELOG.md, so no
+        # tag can pick up a heading of the wrong shape. Read them before each
+        # release: nothing goes red when a sentence in them becomes false.
         run: |
-          gh release create ${{ github.ref_name }} --draft --title "dblitz ${{ github.ref_name }}" --notes "See [CHANGELOG.md](https://github.com/tstone-1/dblitz/blob/main/CHANGELOG.md) for details."
+          cat > "$RUNNER_TEMP/notes.md" <<'NOTES'
+          See [CHANGELOG.md](https://github.com/tstone-1/dblitz/blob/main/CHANGELOG.md) for details.
+
+          **Windows** - take the `-setup.exe`, or the portable `dblitz.exe`. Both are code-signed; the publisher reads *Open Source Developer Timo Stein*. The certificate is new, so SmartScreen can still warn on first launch: choose *More info*, check the publisher, then *Run anyway*. There is no `.msi` after 26.10.0: if you installed dblitz from one, uninstall it once in Windows *Settings* > *Apps* and install the `-setup.exe`. See the [code signing policy](https://github.com/tstone-1/dblitz#code-signing-policy).
+          NOTES
+          gh release create ${{ github.ref_name }} --draft --title "dblitz ${{ github.ref_name }}" --notes-file "$RUNNER_TEMP/notes.md"
           echo "release_id=$(gh release view ${{ github.ref_name }} --json databaseId -q .databaseId)" >> "$GITHUB_OUTPUT"
 
   build:
@@ -182,16 +194,42 @@ jobs:
       max-parallel: 1
       matrix:
         include:
+          # `signs-windows` marks the one leg that signs with the Certum
+          # certificate. It is a flag and not a path: `github.workspace` is
+          # empty inside a matrix, so every path is put together in the step
+          # that uses it.
           - os: windows-latest
             target: ''
+            signs-windows: true
           - os: macos-latest
             target: aarch64-apple-darwin
+            signs-windows: false
           - os: macos-latest
             target: x86_64-apple-darwin
+            signs-windows: false
           - os: ubuntu-latest
             target: ''
+            signs-windows: false
 
     runs-on: ${{ matrix.os }}
+    # The Certum login is two secrets of the environment `signing` and of no
+    # other place, and the environment accepts the main branch and `v*` tags
+    # only. The Windows leg alone names it; the other three get the empty
+    # string, which is no environment, so they cannot read the login at all.
+    environment: ${{ matrix.signs-windows && 'signing' || '' }}
+    # One SimplySign code is good for one login. A second job logging in inside
+    # the same 30 seconds fails, and repeated failed logins can lock the
+    # account, so everything in this repository that signs shares the group
+    # `certum-signing` and nothing in it is cancelled. `sign-rehearsal.yml` is
+    # the other member. The other legs get a group of their own each, so this
+    # adds no waiting to them: `max-parallel: 1` already runs them in turn.
+    #
+    # A concurrency group ends at the repository. The same certificate signs
+    # other projects, and nothing here can see their runs: do not start a
+    # release or a rehearsal here while one of theirs is signing.
+    concurrency:
+      group: ${{ matrix.signs-windows && 'certum-signing' || format('release-build-{0}-{1}-{2}', github.run_id, matrix.os, matrix.target) }}
+      cancel-in-progress: false
     # Observed max 42 min 56 s (ubuntu-latest, 2026-08-05, cold Rust cache);
     # the first legs with DuckDB took 17-30 min cold (v26.9.5, windows-latest
     # slowest). 4-10 min per leg warm. AGENTS.md warns that a cold cache alone can push a
@@ -206,7 +244,12 @@ jobs:
       contents: write
 
     steps:
+      # No token is left in `.git/config`: the Windows leg compiles a program
+      # from another repository in this job, and every step that talks to
+      # GitHub is handed its token through the environment.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -324,17 +367,73 @@ jobs:
           } >> "$GITHUB_ENV"
           echo "Apple signing enabled for this build."
 
+      # Asked before the signing client is built, so a missing secret costs
+      # seconds and names itself. Without this the build would run to the first
+      # file Tauri signs and stop there with a login error.
+      - name: Check the Windows signing login is set
+        if: matrix.signs-windows
+        shell: pwsh
+        env:
+          CERTUM_EMAIL: ${{ secrets.CERTUM_EMAIL }}
+          CERTUM_OTP: ${{ secrets.CERTUM_OTP_URI }}
+        run: |
+          if (-not $env:CERTUM_EMAIL -or -not $env:CERTUM_OTP) {
+            Write-Output '::error::CERTUM_EMAIL or CERTUM_OTP_URI is not set in the environment "signing" (BUILD.md, Windows code signing)'
+            exit 1
+          }
+          Write-Output 'Windows signing login present.'
+
+      # Windows files are signed by ssign, an unofficial client (MIT) for
+      # Certum's SimplySign service: Certum supports a login from its desktop
+      # program only, and that program needs a person and a phone. Built from a
+      # pinned commit of its source, and a commit and not a tag, so that a later
+      # change to the tool cannot reach the login without a change here.
+      #
+      # Built outside the checkout and installed into a folder of its own under
+      # RUNNER_TEMP, not into `~/.cargo/bin`: the Rust cache above saves and
+      # restores that folder, and the program that holds the login is built
+      # from its source in every run. `sign-rehearsal.yml` proves the same
+      # build and login without building dblitz.
+      - name: Build the Windows signing client
+        if: matrix.signs-windows
+        shell: pwsh
+        working-directory: ${{ runner.temp }}
+        env:
+          # ssign v0.1.7
+          SSIGN_REV: 5fd4daf22155b19b645aef3dd467f3c4c9e440b3
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'ssign-client'
+          cargo install --locked --git https://github.com/Le-Syl21/ssign --rev $env:SSIGN_REV --root $root ssign
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $bin = Join-Path $root 'bin'
+          & (Join-Path $bin 'ssign.exe') --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # Tauri is given the wrapper by name and finds it where it finds ssign.
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'scripts\sign-windows.cmd') $bin
+          Add-Content $env:GITHUB_PATH $bin
+
       - name: Build and upload artifacts
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Read by ssign, which Tauri starts once for every Windows executable
+          # it bundles, once for the uninstaller and once for the installer.
+          # The first start logs in and the later ones reuse that session, so
+          # one build is one login. Empty on the three legs that do not sign;
+          # those legs have no environment, so the secrets do not exist there.
+          CERTUM_EMAIL: ${{ matrix.signs-windows && secrets.CERTUM_EMAIL || '' }}
+          CERTUM_OTP: ${{ matrix.signs-windows && secrets.CERTUM_OTP_URI || '' }}
+          # Where sign-windows.cmd finds the script that does the work. It
+          # cannot look beside itself: see the file.
+          DBLITZ_SIGN_SCRIPT: ${{ github.workspace }}/scripts/sign-windows.ps1
           # Minisign key for the updater. Every update payload is signed with it
           # and verified against `plugins.updater.pubkey` in tauri.conf.json
           # before install. Independent of the Apple Developer ID signing above:
           # different key, different purpose. Apple's signature authenticates the
           # bundle to Gatekeeper; this one authenticates the update payload to an
           # already-installed dblitz, and it is the only control on that path on
-          # Windows and Linux, which are unsigned. Losing this key
+          # every platform: the updater does not read the Windows code
+          # signature, and Linux has none. Losing this key
           # permanently orphans the installed base (a new key cannot sign for
           # clients holding the old pubkey), so it is backed up outside CI.
           # NOTE: this takes the key file's *contents*, not a path.
@@ -344,12 +443,100 @@ jobs:
           # Upload to the draft by numeric id, not tag — a draft is invisible to
           # the get-release-by-tag endpoint tauri-action uses for `tagName`.
           releaseId: ${{ needs.create-release.outputs.release_id }}
-          # The action defaults this to false, which would put the MSI in
+          # The action defaults this to false, which would put an MSI in
           # latest.json while README.md points users at the NSIS setup.exe. An
           # MSI update on top of an NSIS install produces a second, parallel
-          # installation instead of an upgrade.
+          # installation instead of an upgrade. No MSI is built any more
+          # (`src-tauri/tauri.windows.conf.json`), so this now only holds the
+          # line if one ever comes back.
           updaterJsonPreferNsis: true
-          args: ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }}
+          # The overlay, on the Windows leg only, names the program Tauri signs
+          # every Windows executable with. It is an overlay and not a line in
+          # `tauri.conf.json`, where it would make every build on a development
+          # machine ask for a signing login. Its path is put together here and
+          # not in the matrix, where `github.workspace` is empty and Tauri
+          # would be given `/src-tauri/tauri.signing.conf.json`.
+          args: ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }} ${{ matrix.signs-windows && format('--config {0}/src-tauri/tauri.signing.conf.json', github.workspace) || '' }}
+
+      # ssign keeps its session in a file for twenty minutes, under
+      # %HOME%\.cache where HOME is set and under the temporary folder where it
+      # is not. Nothing after the build signs, so it goes, whether the build
+      # passed or not.
+      - name: Remove the Windows signing session
+        if: always() && matrix.signs-windows
+        shell: pwsh
+        run: |
+          $places = @((Join-Path ([IO.Path]::GetTempPath()) 'ssign'))
+          foreach ($root in $env:HOME, $env:USERPROFILE) { if ($root) { $places += Join-Path $root '.cache\ssign' } }
+          foreach ($place in $places) { Write-Output "$place present: $(Test-Path $place)"; Remove-Item -Recurse -Force $place -ErrorAction SilentlyContinue }
+
+      # Tauri prints nothing of a sign command that failed, so this is where a
+      # failed signature gets its reason. The line naming the card is left out.
+      - name: Show what the signing client said
+        if: always() && matrix.signs-windows
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'ssign.log'
+          if (Test-Path $log) { Get-Content $log | Where-Object { $_ -notmatch 'card ' } } else { Write-Output 'no signing log: the sign command never ran' }
+
+      # Nothing in the build reads a signature back, so this step does, for
+      # every file a Windows user gets: the installer, the portable
+      # `dblitz.exe` the last step uploads, and what the installer puts on the
+      # disk. The installer on the release is this one: the updater signature
+      # beside it is over these bytes.
+      - name: Verify the Windows build is signed
+        if: matrix.signs-windows
+        shell: pwsh
+        run: |
+          $signer = 'Open Source Developer Timo Stein'
+          $conf = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $name = $conf.productName
+          $bundle = 'src-tauri/target/release/bundle'
+          # Named by version and not found by pattern, so a file of another
+          # version left in the folder cannot be taken for this build's.
+          $setup = "$bundle/nsis/${name}_$($conf.version)_x64-setup.exe"
+          if (-not (Test-Path $setup)) { Write-Output "::error::no installer at $setup"; exit 1 }
+          $setup = (Resolve-Path $setup).Path
+          $msi = @(Get-ChildItem "$bundle/msi" -Filter "${name}_$($conf.version)_*.msi" -ErrorAction SilentlyContinue)
+          if ($msi.Count -ne 0) { Write-Output "::error::the build made an MSI, which cannot be signed: $($msi[0].Name)"; exit 1 }
+          $portable = "src-tauri/target/release/$name.exe"
+          if (-not (Test-Path $portable)) { Write-Output "::error::no executable at $portable"; exit 1 }
+          $portable = (Resolve-Path $portable).Path
+
+          scripts/verify-signature.ps1 -Signer $signer -Path $setup, $portable
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+          # The uninstaller is not a file in the installer: the installer
+          # writes it. makensis signs it while building and goes on when that
+          # fails, so an unsigned one is found only where it lands. The
+          # installer is run here, and every executable file in the folder it
+          # reports is read: found by their first two bytes and not by a list
+          # of names, so a file added to the installer later is covered too.
+          $run = Start-Process $setup -ArgumentList '/S' -Wait -PassThru
+          if ($run.ExitCode -ne 0) { Write-Output "::error::the signed installer did not install (exit code $($run.ExitCode))"; exit 1 }
+          $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$name"
+          $where = "$((Get-ItemProperty $key -ErrorAction SilentlyContinue).InstallLocation)".Trim().Trim('"')
+          if (-not $where -or -not (Test-Path $where)) { Write-Output "::error::the installer recorded no install folder under $key"; exit 1 }
+          Write-Output "installed to $where"
+          $installed = @(Get-ChildItem $where -Recurse -File | Where-Object {
+            $stream = [IO.File]::OpenRead($_.FullName)
+            try { $stream.ReadByte() -eq 0x4D -and $stream.ReadByte() -eq 0x5A } finally { $stream.Dispose() }
+          })
+          foreach ($wanted in "$name.exe", 'uninstall.exe') {
+            if (@($installed | Where-Object Name -eq $wanted).Count -ne 1) { Write-Output "::error::expected one $wanted in $where"; exit 1 }
+          }
+          scripts/verify-signature.ps1 -Signer $signer -Path $installed.FullName
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+          # For the record only: the NSIS plugin DLLs the installer unpacks
+          # into a temporary folder while it runs. They are NSIS's and Tauri's
+          # files, not dblitz's, and they are not left on the disk.
+          $unpacked = Join-Path $env:RUNNER_TEMP 'signed-setup'
+          7z x -y "-o$unpacked" $setup | Out-Null
+          if ($LASTEXITCODE -ne 0) { Write-Output '::warning::7z could not unpack the installer, so its plugin DLLs are not listed'; exit 0 }
+          Get-ChildItem $unpacked -Recurse -File -Include '*.dll', '*.exe' |
+            ForEach-Object { Write-Output "in the installer: $($_.Name): $((Get-AuthenticodeSignature $_.FullName).Status)" }
+          exit 0
 
       # Tauri's bundler notarizes and staples the .app, then builds the DMG and
       # only SIGNS it — the DMG itself is left unnotarized, and
@@ -417,6 +604,8 @@ jobs:
             || { echo "::error::Gatekeeper does not see this as notarized"; exit 1; }
           echo "macOS build verified: Developer ID signed, notarized, stapled."
 
+      # The file the Verify step above read: Tauri signs it where it was built,
+      # before it packs it into the installer.
       - name: Upload portable exe
         if: matrix.os == 'windows-latest'
         env:

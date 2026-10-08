@@ -108,9 +108,10 @@ describe("release workflow updater wiring", () => {
   });
 
   it("points the Windows manifest entry at the NSIS installer", () => {
-    // Defaults to false, which would put the MSI in latest.json. An MSI update
+    // Defaults to false, which would put an MSI in latest.json. An MSI update
     // on top of an NSIS install produces a second, parallel installation
-    // instead of an upgrade.
+    // instead of an upgrade. No MSI is built any more (windowsSigning.test.ts),
+    // so this holds the line only if one comes back.
     expect(workflow).toMatch(/updaterJsonPreferNsis:\s*true/);
   });
 });

@@ -5,6 +5,32 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.10.1] - Unreleased
+
+### Changed
+- **The Windows installer and the portable `dblitz.exe` are code-signed.**
+  Windows shows the publisher as *Open Source Developer Timo Stein*. The
+  certificate is new, so SmartScreen can still warn the first time a download
+  is run: choose *More info*, check the publisher, then *Run anyway*. 26.10.0
+  and the releases before it stay unsigned. The README has a
+  [code signing policy](README.md#code-signing-policy).
+- **There is no `.msi` any more.** The signing service cannot sign one, and a
+  signed installer beside an unsigned package is worse than no package. If you
+  installed dblitz from an `.msi`, uninstall it once in Windows *Settings* →
+  *Apps* and install the `-setup.exe`. A copy installed from the `.msi` is not
+  offered in-app updates; one installed from the `-setup.exe` is.
+
+### Internal
+- The Windows leg of the release workflow signs with a Certum Open Source
+  certificate through `ssign`, built from a pinned commit, and reads every
+  signature back: the installer, the portable exe, and every executable the
+  installer leaves on the disk, the uninstaller among them. The login is in a
+  GitHub environment that only this leg and the new manual
+  `sign-rehearsal.yml` name. `windowsSigning.test.ts` holds the wiring.
+- The release's build job no longer leaves a token in the checkout.
+- The draft release's notes are written out in `release.yml` and carry the
+  Windows paragraph.
+
 ## [26.10.0] - 2026-10-01
 
 ### Added

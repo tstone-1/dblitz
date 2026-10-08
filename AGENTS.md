@@ -75,13 +75,16 @@ A release build can be driven over CDP through WebView2's environment variables,
 
 `.github/workflows/checks.yml` runs frontend checks, a Rust backend matrix
 (ubuntu/windows/macos, clippy `-D warnings` on all three), and a `smoke` job.
-`.github/workflows/release.yml` runs on a `v*` tag. Both are pinned and bounded;
-`src/lib/releaseWorkflow.test.ts` and `checksWorkflow.test.ts` fail on any drift.
+`.github/workflows/release.yml` runs on a `v*` tag, and
+`.github/workflows/sign-rehearsal.yml` is started by hand (see *Windows code
+signing* below). All three are pinned and bounded;
+`src/lib/releaseWorkflow.test.ts`, `checksWorkflow.test.ts` and
+`windowsSigning.test.ts` fail on any drift.
 
-- **Every `uses:` in both workflows is pinned to a full 40-character commit SHA with a `# vX.Y.Z` comment.** The release build job holds the updater's minisign private key, the Apple credentials and a contents-write token at once, and a mutable ref decided which code received them — note `dtolnay/rust-toolchain@stable` is a **branch**, which the shorthand disguises as a toolchain channel. Pinning does not make an action trustworthy; it makes the version reviewable and makes an upstream change arrive as a diff. `.github/dependabot.yml` advances the pins monthly in **two** groups: `tauri-apps/tauri-action` is excluded from the wildcard group and gets a `release-critical` group to itself, because it is the one action handed the signing material and the one whose breakage is silent (a bad `latest.json` publishes green and updates nobody). Dependabot cannot see a branch SHA at all, so check `gh api repos/<owner>/<repo>/tags` before pinning anything new.
+- **Every `uses:` in every workflow is pinned to a full 40-character commit SHA with a `# vX.Y.Z` comment.** The release build job holds the updater's minisign private key, the Apple credentials and a contents-write token at once (and, on the Windows leg, the login to the code signing certificate), and a mutable ref decided which code received them — note `dtolnay/rust-toolchain@stable` is a **branch**, which the shorthand disguises as a toolchain channel. Pinning does not make an action trustworthy; it makes the version reviewable and makes an upstream change arrive as a diff. `.github/dependabot.yml` advances the pins monthly in **two** groups: `tauri-apps/tauri-action` is excluded from the wildcard group and gets a `release-critical` group to itself, because it is the one action handed the signing material and the one whose breakage is silent (a bad `latest.json` publishes green and updates nobody). Dependabot cannot see a branch SHA at all, so check `gh api repos/<owner>/<repo>/tags` before pinning anything new.
 - **`dtolnay/rust-toolchain` is pinned to tag `v1`, where `toolchain` is a required input**, so all three call sites pass `with: toolchain: stable`. Dropping that `with:` block fails the action, not the build — it is load-bearing, not decoration.
 - **Every job has a `timeout-minutes` with its observed maximum in a comment next to it**, so an infinite hang costs minutes rather than six hours. The release `build` legs are 90 minutes each and `max-parallel: 1`, so the job as a whole can legitimately take four times one leg.
-- **Both workflows default to `permissions: contents: read`**, with `contents: write` granted only to `create-release`, `build` and `publish`. `update-tap` goes the other way to `permissions: {}` because it authenticates as `TAP_GITHUB_TOKEN` throughout.
+- **Every workflow defaults to `permissions: contents: read`**, with `contents: write` granted only to `create-release`, `build` and `publish`. `update-tap` goes the other way to `permissions: {}` because it authenticates as `TAP_GITHUB_TOKEN` throughout.
 - **`release.yml`'s concurrency group is `${{ github.workflow }}`, not the ref, with `cancel-in-progress: false`.** Each tag is its own ref, so a ref-scoped group would serialize nothing; two overlapping releases would then race the same `latest.json`.
 - **The Linux build prerequisites live in one file, `.github/tauri-linux-deps.txt`**, read into `$deps` at all four apt sites with an emptiness check (a bare `$(grep ...)` substitution lets `apt-get` exit 0 on a missing file). Before it existed, `checks.yml` gated main against `libappindicator3-dev` while `release.yml` shipped installers built against `libayatana-appindicator3-dev`. The smoke job appends `webkit2gtk-driver xvfb` on its own install line. A composite action was rejected: `uses: ./...` cannot be SHA-pinned and would fail the pin test.
 
@@ -100,8 +103,10 @@ The Linux `smoke` job is the only check above the webview-IPC seam, and it does 
   the channel, and it keeps the personal address off a public repo.
 - In scope, and worth knowing when triaging: a bypass of **any** of the four
   read-only layers above, a crafted database file (the app's one genuinely
-  untrusted input), updater signature verification, and webview escape. The
-  unsigned Windows build is a documented state, not a finding.
+  untrusted input), updater signature verification, webview escape, and a file
+  signed with the Windows certificate that the release workflow did not build.
+  A SmartScreen warning on a signed build, and the unsigned Windows builds up
+  to 26.10.0, are documented states, not findings.
 
 ## Release
 
@@ -128,3 +133,7 @@ A `v*` tag releases and `update-tap` bumps `tstone-1/homebrew-dblitz` with `TAP_
 ### macOS signing and notarization
 
 Developer ID identity shared with `screenpick` (rotation is a two-repo event); the signing gates fail closed in `tstone-1/dblitz`; the DMG is notarized separately from the `.app`. Full notes: [docs/agent-notes.md](docs/agent-notes.md).
+
+### Windows code signing
+
+Releases after 26.10.0 are signed with a Certum Open Source certificate shared with `tpdf` and `screenpick`, by the Windows leg of `release.yml` through `ssign`, an unofficial client built from a pinned commit. The login is two secrets of the GitHub environment `signing`, which only that leg and `sign-rehearsal.yml` name. There is no `.msi` any more: `ssign` cannot sign one. Read [BUILD.md](BUILD.md#windows-code-signing) before touching the leg, and [docs/agent-notes.md](docs/agent-notes.md) for what must not be simplified away.

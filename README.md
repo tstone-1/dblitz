@@ -298,7 +298,8 @@ https://github.com/tstone-1/dblitz/releases
 
 Each release ships:
 
-- **Windows** — NSIS installer (`*-setup.exe`), MSI installer (`*.msi`), and a portable `dblitz.exe`
+- **Windows** — NSIS installer (`*-setup.exe`) and a portable `dblitz.exe`, both
+  code-signed
 - **macOS** — `.dmg` and `.app.tar.gz` for both Intel (`x64`) and Apple Silicon
   (`aarch64`)
 - **Linux** — `.deb`, `.rpm`, and `.AppImage` (all x86_64)
@@ -312,8 +313,18 @@ also install from the [Homebrew tap](https://github.com/tstone-1/homebrew-dblitz
 brew install --cask tstone-1/dblitz/dblitz
 ```
 
-**Windows** builds are unsigned. SmartScreen warns on first launch — choose
-*More info* → *Run anyway*.
+**Windows** releases after 26.10.0 are code-signed: the publisher reads *Open
+Source Developer Timo Stein*. The certificate is new, so Windows can still show
+"Windows protected your PC" the first time you run a download — choose
+*More info*, check the publisher, then *Run anyway*. Whether a computer with
+Smart App Control switched on accepts it has not been tested. 26.10.0 and the
+releases before it are unsigned. The files are built and signed from this
+repository by the public [release workflow](.github/workflows/release.yml);
+[Code signing policy](#code-signing-policy) has who signs and what.
+
+There is no `.msi` any more, because the signing service cannot sign one. If
+you installed dblitz from an `.msi`, uninstall it once in Windows *Settings* →
+*Apps* and install the `-setup.exe`.
 
 ## Updates
 
@@ -339,6 +350,49 @@ a broken button:
 On macOS the Homebrew cask is marked `auto_updates true`, so `brew` knows dblitz
 manages its own version and won't report the cask as permanently outdated after
 an in-app update.
+
+## Code signing policy
+
+Windows releases after 26.10.0 are signed with a
+[Certum](https://www.certum.eu/) Open Source Code Signing certificate issued to
+the maintainer. Windows shows the publisher as *Open Source Developer Timo
+Stein*. 26.10.0 and the releases before it are unsigned. macOS releases use
+Apple Developer ID signing and notarization. Linux packages are not
+code-signed.
+
+The committer, reviewer and release approver is
+[Timo Stein (tstone-1)](https://github.com/tstone-1). Nobody else can sign.
+
+- **What is signed.** The installer, the uninstaller it writes, and
+  `dblitz.exe`, both the copy inside the installer and the portable one on the
+  release page. All are built from this repository; SQLite and DuckDB are
+  compiled from source into `dblitz.exe`. The installer builder also signs the
+  NSIS plugin DLLs it packs into the installer: they are NSIS's and Tauri's
+  files, run only while the installer runs, and are not left on the disk. No
+  other file is signed with this certificate here.
+- **Where.** Only in the public [release workflow](.github/workflows/release.yml),
+  on a GitHub-hosted runner, for a version tag the maintainer pushes. The
+  workflow reads every signature back and fails if one is missing or not his.
+- **Approval.** A release is published only when every platform built and every
+  check passed. A version tag is pushed by the maintainer alone, and that push
+  is the approval.
+- **The key.** It is held in Certum's signing service and cannot be exported.
+  The login to that service is a secret of this repository that only the
+  release workflow and its rehearsal can read, and a pull request cannot. The
+  GitHub account uses two-factor authentication, and every login to the
+  signing service needs a one-time code.
+
+### Privacy
+
+dblitz reads the files you open on your computer and sends none of their
+contents anywhere. It has no analytics and no telemetry. The one network
+request it makes by itself is the update check: about ten seconds after launch
+it asks GitHub whether a newer release exists, an ordinary HTTPS request that
+carries the connection's IP address and request metadata. Downloading and
+installing an update needs a click. **Settings → Updates → Check at startup**
+turns the automatic check off; the manual button stays. GitHub's handling of
+those requests is covered by its
+[privacy statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement).
 
 ## Usage
 

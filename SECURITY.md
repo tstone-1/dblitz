@@ -50,6 +50,13 @@ you point it at. The things most worth reporting follow from that:
   signed by the project's key, or to accept a manifest it should reject. Update
   payloads are verified with minisign against the public key committed in
   `tauri.conf.json`.
+- **The Windows code signature.** Releases after 26.10.0 are signed as *Open
+  Source Developer Timo Stein*. A file carrying that signature that this
+  repository's release workflow did not build, or a way for a pull request or
+  a fork to reach the signing login, is in scope. The
+  [code signing policy](README.md#code-signing-policy) says what is signed and
+  where. The signature is separate from the updater's: an installed dblitz
+  accepts an update by the minisign key alone.
 - **Escaping the webview sandbox.** The app runs under a strict CSP with a
   narrow set of Tauri capabilities. Injection that executes script in the
   webview, or that reaches a command outside the declared capability set,
@@ -58,8 +65,10 @@ you point it at. The things most worth reporting follow from that:
 
 ## What is out of scope
 
-- **Windows builds are unsigned.** SmartScreen warns on first launch. This is a
-  known, documented state, not a vulnerability report.
+- **SmartScreen warnings on Windows.** The signing certificate is new, so
+  SmartScreen can still warn the first time a signed build is run, and 26.10.0
+  and the releases before it are unsigned. Both are known, documented states,
+  not vulnerability reports.
 - **Vulnerabilities in SQLite, Tauri, or other dependencies**, which belong
   upstream — unless dblitz's use of them makes the impact worse than upstream's
   own assessment, in which case please do report it.

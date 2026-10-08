@@ -11,7 +11,11 @@ function readText(file: string): string {
   return readFileSync(join(root, file), "utf8");
 }
 
-const WORKFLOWS = [".github/workflows/checks.yml", ".github/workflows/release.yml"];
+const WORKFLOWS = [
+  ".github/workflows/checks.yml",
+  ".github/workflows/release.yml",
+  ".github/workflows/sign-rehearsal.yml",
+];
 
 /** Every `uses:` line, with leading whitespace and the `uses:` keyword stripped. */
 function actionRefs(workflow: string): string[] {
@@ -25,9 +29,10 @@ function actionRefs(workflow: string): string[] {
  * The release build job holds three secrets at once: the updater's minisign
  * private key, the Apple Developer ID material, and a contents-write token. A
  * mutable tag or branch decides which code receives them, so whoever controls
- * that ref controls the key that authorizes updates on the unsigned Windows and
- * Linux builds — and losing that key orphans every installed copy, because a
- * new one cannot sign for clients holding the old pubkey.
+ * that ref controls the key that authorizes updates on every platform — and
+ * losing that key orphans every installed copy, because a new one cannot sign
+ * for clients holding the old pubkey. The Windows leg also holds the login to
+ * the code signing certificate (windowsSigning.test.ts).
  *
  * Pinning to a full commit SHA does not make an action trustworthy; it makes
  * the version reviewable, and makes an upstream change arrive as a diff rather
