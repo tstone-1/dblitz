@@ -486,10 +486,40 @@ jobs:
           # would be given `/src-tauri/tauri.signing.conf.json`.
           args: ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }} ${{ matrix.signs-windows && format('--config {0}/src-tauri/tauri.signing.conf.json', github.workspace) || '' }}
 
+      # Tauri signs `target\release\dblitz.exe`, packs it, and then puts the
+      # unsigned file back: the bundler restores the executable after every
+      # package type, and says so in its source ("Restore unsigned and
+      # unpatched binary"). The portable exe on the release is that file, so
+      # it is signed here, by the same wrapper and inside the session the
+      # build opened, which makes it no second login. 26.10.1 found this: the
+      # log said the file was signed and the next step read it as NotSigned.
+      - name: Sign the portable exe
+        if: matrix.signs-windows
+        shell: pwsh
+        env:
+          CERTUM_EMAIL: ${{ secrets.CERTUM_EMAIL }}
+          CERTUM_OTP: ${{ secrets.CERTUM_OTP_URI }}
+          DBLITZ_SIGN_SCRIPT: ${{ github.workspace }}/scripts/sign-windows.ps1
+        run: |
+          $conf = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $portable = (Resolve-Path "src-tauri/target/release/$($conf.productName).exe").Path
+          $before = (Get-AuthenticodeSignature $portable).Status
+          Write-Output "$portable before: $before"
+          # A file that is signed already must not be signed again: two
+          # signatures in one file can fail verification.
+          if ($before -eq 'Valid') { exit 0 }
+          # Started the way makensis starts it: from another folder, through
+          # the shell, by the quoted name of the wrapper.
+          Push-Location $env:RUNNER_TEMP
+          cmd /c "`"sign-windows.cmd`" `"$portable`""
+          $code = $LASTEXITCODE
+          Pop-Location
+          if ($code -ne 0) { Write-Output '::error::signing the portable exe failed'; exit 1 }
+
       # ssign keeps its session in a file for twenty minutes, under
       # %HOME%\.cache where HOME is set and under the temporary folder where it
-      # is not. Nothing after the build signs, so it goes, whether the build
-      # passed or not.
+      # is not. Nothing after the portable exe is signed, so it goes, whether
+      # the build passed or not.
       - name: Remove the Windows signing session
         if: always() && matrix.signs-windows
         shell: pwsh

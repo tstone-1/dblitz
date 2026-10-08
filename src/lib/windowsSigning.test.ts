@@ -111,8 +111,9 @@ describe("release workflow Windows signing", () => {
 
   it("hands the Certum login to no step that runs on another leg", () => {
     const withLogin = steps(build).filter((step) => step.includes("secrets.CERTUM_"));
-    // The check step and the build step.
-    expect(withLogin.length).toBe(2);
+    // The check step, the build step, and the step that signs the portable
+    // exe after the build.
+    expect(withLogin.length).toBe(3);
     for (const step of withLogin) {
       const guardedStep = /^ {8}if: matrix\.signs-windows$/m.test(step);
       const lines = step.split("\n").filter((line) => line.includes("secrets.CERTUM_"));
@@ -157,9 +158,24 @@ describe("release workflow Windows signing", () => {
     const verify = names.indexOf("name: Verify the Windows build is signed");
     const upload = names.indexOf("name: Upload portable exe");
     const built = names.indexOf("name: Build and upload artifacts");
+    const portable = names.indexOf("name: Sign the portable exe");
+    const forget = names.indexOf("name: Remove the Windows signing session");
     expect(built).toBeGreaterThan(-1);
-    expect(verify).toBeGreaterThan(built);
+    // Tauri puts the unsigned executable back after packing it, so the
+    // portable exe is signed by a step of its own: after the build, inside
+    // the session the build opened, and before that session is removed.
+    expect(portable).toBeGreaterThan(built);
+    expect(forget).toBeGreaterThan(portable);
+    expect(verify).toBeGreaterThan(forget);
     expect(upload).toBeGreaterThan(verify);
+    const sign = steps(build)[portable];
+    expect(sign).toMatch(/^ {8}if: matrix\.signs-windows$/m);
+    expect(sign).toContain("CERTUM_OTP: ${{ secrets.CERTUM_OTP_URI }}");
+    expect(sign).toContain("DBLITZ_SIGN_SCRIPT: ${{ github.workspace }}/scripts/sign-windows.ps1");
+    expect(sign).toContain('"src-tauri/target/release/$($conf.productName).exe"');
+    expect(sign).toContain("if ($before -eq 'Valid') { exit 0 }");
+    expect(sign).toContain('cmd /c "`"sign-windows.cmd`" `"$portable`""');
+    expect(sign).toContain("if ($code -ne 0)");
 
     const step = steps(build)[verify];
     expect(step).toMatch(/^ {8}if: matrix\.signs-windows$/m);

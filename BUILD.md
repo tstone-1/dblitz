@@ -476,14 +476,18 @@ phone, so the login is done by [`ssign`](https://github.com/Le-Syl21/ssign)
    `dblitz.exe`, for the NSIS plugin DLLs, for the uninstaller (from inside
    makensis) and for the installer. The first call logs in and the later ones
    reuse the session, so one build is one login.
-4. Removes the session `ssign` leaves behind and prints the signing log, both
-   also when the build failed.
+4. Signs the portable `dblitz.exe` in a step of its own, with the same
+   wrapper and inside the session the build opened. Tauri signs
+   `target\release\dblitz.exe`, packs it into the installer, and then puts
+   the unsigned file back, so the file left in that folder is never the
+   signed one.
+   Then removes the session `ssign` leaves behind and prints the signing log,
+   both also when the build failed.
 5. Reads the signatures back with `scripts/verify-signature.ps1` and fails
    unless each is valid, timestamped and by the signer: the installer and the
    portable `dblitz.exe`, then, after running the installer silently, every
    executable file in the folder it installed to, the uninstaller among them.
-6. Uploads the portable `dblitz.exe`, which is the file step 5 read: Tauri
-   signs it where it was built, before packing it.
+6. Uploads the portable `dblitz.exe`, which is the file step 5 read.
 
 The login is two secrets of the GitHub environment `signing`, and of no other
 place: `CERTUM_EMAIL`, and `CERTUM_OTP_URI`, the whole `otpauth://` address
@@ -518,10 +522,11 @@ open to every branch. The first step of the Windows leg then fails on the
 missing secrets, so nothing is signed, but delete such an environment and
 create it as above.
 
-### Four things a build like this got wrong before
+### Five things a build like this got wrong before
 
-All four were paid for in `tpdf`; the code here starts from the fixed state,
-and `src/lib/windowsSigning.test.ts` holds each in place.
+Four were paid for in `tpdf`, and the code here started from the fixed state.
+The fifth was found here, by the first tag. `src/lib/windowsSigning.test.ts`
+holds each in place.
 
 | What went wrong | What prevents it here |
 |---|---|
@@ -529,6 +534,7 @@ and `src/lib/windowsSigning.test.ts` holds each in place.
 | `failed to run ssign` and no reason: Tauri shows nothing of a sign command that failed | `scripts/sign-windows.ps1` writes everything `ssign` prints to a log, and the leg prints it |
 | `atomically replacing ...: Access is denied. (os error 5)` on the application's executable, a fraction of a second after Tauri had written to it. `ssign` replaces a file by renaming a signed copy over it | `ssign` signs into a folder of its own and the script copies the bytes back, again for up to thirty seconds |
 | An unsigned `uninstall.exe` in a release whose other files were signed. makensis starts the sign command by its quoted name through `PATH` from its own folder, the wrapper looked for its script beside itself (`%~dp0`), and makensis printed `UninstFinalize command returned 64` and went on | The wrapper takes the script's path from `DBLITZ_SIGN_SCRIPT`, and the leg installs what it built and reads `uninstall.exe` where it lands |
+| The portable `dblitz.exe` read `NotSigned` although the signing log said it was written. The first tag `v26.10.1` (run 37758696265, 2026-10-08) stopped there and published nothing. Tauri's bundler copies the executable before it packs, signs the file in place, packs it, and restores the copy: "Restore unsigned and unpatched binary" | The step `Sign the portable exe` signs the restored file after the build, inside the build's session, and the verification reads it before it is uploaded |
 
 ### Three rules the login brings
 
