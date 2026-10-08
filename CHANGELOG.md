@@ -20,6 +20,22 @@ Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
   *Apps* and install the `-setup.exe`. A copy installed from the `.msi` is not
   offered in-app updates; one installed from the `-setup.exe` is.
 
+### Fixed
+- **Sorting a wide Parquet file no longer takes seconds.** A sort used to copy
+  every column into a temporary file, which took 5 to 7 seconds for 700,000
+  rows x 100 columns and 17 seconds for 2,000,000 x 100. Up to 200 million
+  cells (rows x columns) dblitz now keeps only the order of the rows and reads
+  each page from the file: the first sorted page of those two files takes
+  0.15 s and 0.46 s. A page of a sorted view costs more than before on these
+  files (about 90 ms and 330-400 ms per 500 rows, against 20 ms and 65 ms).
+  Larger files sort as before.
+- **Sorting a large, wide Parquet file no longer fails with "Out of Memory
+  Error".** A file of 5,000,000 rows x 100 columns could not be sorted at all
+  on a machine with 32 threads. When the temporary sorted copy cannot be
+  built, dblitz now shows the sorted view from the order of the rows alone.
+  That file's first sorted page appears after about 20 seconds and a page then
+  takes about a second.
+
 ### Internal
 - The Windows leg of the release workflow signs with a Certum Open Source
   certificate through `ssign`, built from a pinned commit, and reads every

@@ -157,6 +157,12 @@ pub struct ParquetSession {
     /// which would collide with DuckDB's virtual one; every view then falls
     /// back to `LIMIT/OFFSET` ([`query`]).
     row_numbers: bool,
+    /// [`query::ORDER_LIST_MAX_CELLS`]; a field so that a test can force
+    /// either sorted path on a small fixture.
+    order_list_max_cells: i64,
+    /// Set when a sort cache could not be built; sorted views are then paged
+    /// from an order list for the rest of the session.
+    sort_cache_failed: AtomicBool,
     browse: Mutex<raw::RawDb>,
     browse_interrupt: Arc<duckdb::InterruptHandle>,
     /// The browse instance's side connection, which builds sort caches; read
@@ -233,6 +239,8 @@ impl ParquetSession {
             total_rows,
             schema_sql,
             row_numbers,
+            order_list_max_cells: query::ORDER_LIST_MAX_CELLS,
+            sort_cache_failed: AtomicBool::new(false),
             browse: Mutex::new(raw),
             browse_interrupt,
             builder,

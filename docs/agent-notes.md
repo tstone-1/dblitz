@@ -178,6 +178,63 @@ Detection is by content (`PAR1` at both ends), never by extension.
   6-9 ms; each page is rendered on the way out. Caching rendered text instead took 34.5 s
   against 17.7 s. A cached order list was rejected in the spike: ~500 ms per chunk,
   because a sorted chunk touches nearly every row group.
+- **A sorted view of a file up to `ORDER_LIST_MAX_CELLS` (200M cells, rows x columns, and
+  at most 20M rows) is paged from an order list instead**: the row numbers in sort order,
+  each chunk fetched with `IN (...)` and put back into list order in Rust, because the
+  scan returns file order. It is the filtered path with a different `ORDER BY`
+  (`View::Listed`). The reason is that the materialized build pays for copying every
+  column, not for sorting: on 700,000 rows x 100 columns of short text the sort of key
+  and row number took 20-40 ms, copying the columns into a memory table 1.6-2.0 s and
+  into the cache file 4.5-7.3 s, with or without `ORDER BY`. No `force_compression`
+  codec and no thread count brought the cache write under 3.4 s. Measured 2026-10-08,
+  Windows, 32 threads, release, generated files (first sorted page, then a later page):
+
+  | Rows x columns | Materialized | Order list |
+  |---|---|---|
+  | 425,000 x 16 | 0.28-0.30 s, 2 ms | 19-25 ms, 7-11 ms |
+  | 700,000 x 100 | 5.4-7.3 s, 14-19 ms | 31-42 ms, 24-225 ms |
+  | 1,900,000 x 41 | 4.4-4.6 s, 14-17 ms | 65-89 ms, 25-119 ms |
+  | 2,000,000 x 100 | 16.6-17.9 s, 60-66 ms | 72-88 ms, 63-336 ms |
+  | 10,000,000 x 14 | 3.3-4.3 s, 8-16 ms | 330-433 ms, 23-175 ms |
+  | 5,000,000 x 100 | 44 s, or out of memory | 160-228 ms, 147-1,096 ms |
+
+  Two real files confirm it, sorted by the first, middle and last column in both
+  directions: 708,930 x 100 shows its first sorted page in 58-183 ms (5.3-5.9 s
+  materialized) and later pages in 27-99 ms (20 ms); 1,891,987 x 41 in 182-222 ms
+  (3.5-3.7 s) and 31-108 ms (21 ms).
+
+  The low end of each page range is a sort column that follows file order, the high end
+  one that scatters every page over the whole file. The last row is above the limit and
+  still materializes: a page of more than a second was the reason to stop at 200M cells.
+  The limit is a field on the session (`order_list_max_cells`) so that a test can force
+  either path on a small fixture; `the_cell_count_decides_how_a_sorted_view_is_paged`
+  pins the boundary and `a_page_of_an_order_list_keeps_the_sort_order_within_the_page`
+  the reordering.
+- **A sort cache that cannot be built falls back to the order list**, for that view and
+  every later sort of the session (`sort_cache_failed`), whatever the file's size. The
+  case it exists for: DuckDB sorts whole rows, and under the 2 GB limit a wide file
+  fails with "Out of Memory Error: failed to pin block". The copy without `ORDER BY`
+  completes, so it is the sort and not the write. Measured 2026-10-08, 32-thread
+  Windows machine, sort by a scattered column:
+
+  | Rows x columns | Threads: result |
+  |---|---|
+  | 5,000,000 x 50 | 32: ok, 15 s |
+  | 5,000,000 x 100 | 32: fails after 19 s. 24, 16, 8, 4: ok, 45-50 s |
+  | 10,000,000 x 100 | 32, 16: fail after 9-17 s. 4: ok, 88 s. 32 with a 4 GB limit: ok, 73 s |
+  | 3,000,000 x 200 | 32, 16: fail after 11-14 s. 8: ok, 97 s |
+  | 2,000,000 x 400 | 8: fails after 14 s. 4: fails after 80 s |
+
+  No thread count is safe for every shape, which is why the fix is a fallback and not a
+  cap; `preserve_insertion_order = false` changed nothing. The price is the wait for
+  the failed build: the 5M x 100 file shows its first sorted page after 21 s and then
+  pages in about 1 s. The fallback takes any build failure except a cancelled or
+  interrupted one, so a cache file that cannot be written (a full disk) is covered too,
+  and that is how `a_sort_the_cache_cannot_hold_is_paged_from_a_list` reaches it
+  without needing an out-of-memory failure. Not built: predicting the failure, so the
+  wait is spared.
+- `parquet_benchmark` takes a fourth argument, the number of extra text columns:
+  `700000 500 5 86` is the 100-column case.
 - **`MEMORY_LIMIT` is 2 GB per instance**, and the process peaks above it (DuckDB limits
   its buffer pool only): 3 GB gave 13.0 s / 3.8 GB RSS on the sort above, 2 GB 17.7 s /
   2.65 GB. 1 GB starved the Parquet scan itself.

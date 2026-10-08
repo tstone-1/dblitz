@@ -139,9 +139,14 @@ are served from what it built.
 | Regex filter, 11,944 matches | 300 ms | 38.5 ms | 40.6 ms | 41.9 ms | 42.2 ms | 45.4 ms |
 | Sorted by a DOUBLE column | 14.0 s | 4.9 ms | 5.0 ms | 5.1 ms | 4.8 ms | 4.9 ms |
 
-Opening the file took 45.7 ms. A sort is materialized once per view into
-a temporary DuckDB file in the OS cache directory (3.2 GB for the file above)
-and deleted when the file is closed; the file you opened is never written.
+Opening the file took 45.7 ms. A sort of a file this size is materialized once
+per view into a temporary DuckDB file in the OS cache directory (3.2 GB for the
+file above) and deleted when the file is closed; the file you opened is never
+written. Up to 200 million cells (rows x columns) a sort keeps only the order
+of the rows and reads each page from the file, because copying the columns
+costs more than sorting them: a generated file of 700,000 rows x 100 columns
+shows its first sorted page in 0.15 s that way, against 5.4-7.3 s
+materialized (2026-10-08, Windows 11, 32 threads).
 
 #### SQLite or Parquet?
 

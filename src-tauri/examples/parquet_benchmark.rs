@@ -1,12 +1,15 @@
 // Parquet paging benchmark: the three Browse Data paths for a Parquet file.
 //
-// Run: cargo run --release --example parquet_benchmark [rows] [chunk] [repeats]
+// Run: cargo run --release --example parquet_benchmark [rows] [chunk] [repeats] [extra]
 // (Release mode matters - DuckDB's own code is optimized either way, but the
 // Rust side that reads every cell is not in a debug build.)
 //
 // The file is generated here, 14 columns of the kinds the renderer treats
 // differently (integers, text, doubles, decimals, timestamps, booleans, a
 // LIST and a STRUCT), written by DuckDB with ZSTD and its default row groups.
+// `extra` appends that many columns of short text in long runs, for a wide
+// file: `700000 500 5 86` is 100 columns in a few MB. The cost of a sorted view
+// depends on the column count, which the 14 columns alone do not show.
 // Every measured call goes through the SHIPPED code via `db::bench_api`: the
 // session is opened by `ParquetSession::open` (both DuckDB instances, the
 // app's memory limit and spill directory) and every page by `query_table`.
@@ -32,16 +35,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rows = arg(1).unwrap_or(DEFAULT_ROWS);
     let chunk = arg(2).unwrap_or(DEFAULT_CHUNK_SIZE);
     let repeats = arg(3).map(|r| r as usize).unwrap_or(DEFAULT_REPEATS);
+    let extra = arg(4).unwrap_or(0);
 
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("bench.parquet");
     let path_str = path.to_str().expect("temp path is UTF-8");
     let t = Instant::now();
-    write_file(path_str, rows)?;
+    write_file(path_str, rows, extra)?;
     let size = std::fs::metadata(&path)?.len();
     println!(
-        "Generated {rows} rows x 14 columns, {:.2} GB, in {:.1} s",
-        size as f64 / 1e9,
+        "Generated {rows} rows x {} columns, {:.1} MB, in {:.1} s",
+        14 + extra,
+        size as f64 / 1e6,
         t.elapsed().as_secs_f64()
     );
 
@@ -117,8 +122,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn write_file(path: &str, rows: i64) -> Result<(), duckdb::Error> {
+fn write_file(path: &str, rows: i64, extra: i64) -> Result<(), duckdb::Error> {
     let conn = duckdb::Connection::open_in_memory()?;
+    // Run length and distinct count differ per column, so the columns do not
+    // compress as copies of one another.
+    let wide: String = (1..=extra)
+        .map(|j| {
+            let run = 500 + (j * 7919) % 20_000;
+            let distinct = 3 + (j * 31) % 200;
+            format!(
+                ",
+                 'value-' || lpad(((i // {run}) % {distinct})::VARCHAR, 5, '0') AS w{j}"
+            )
+        })
+        .collect();
     conn.execute_batch(&format!(
         "COPY (SELECT i AS id,
                  TIMESTAMP '2020-01-01' + to_seconds(i) AS ts,
@@ -131,7 +148,7 @@ fn write_file(path: &str, rows: i64) -> Result<(), duckdb::Error> {
                  CASE WHEN i % 10 = 0 THEN NULL ELSE random() END AS r1,
                  random() AS r2, random() AS r3, random() AS r4,
                  [i % 3, i % 5] AS tags,
-                 {{'a': i % 7, 'b': 'x'}} AS meta
+                 {{'a': i % 7, 'b': 'x'}} AS meta{wide}
                FROM range({rows}) t(i))
          TO '{}' (FORMAT parquet, COMPRESSION zstd)",
         path.replace('\'', "''")
