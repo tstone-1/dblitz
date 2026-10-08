@@ -5,7 +5,7 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
-## [26.10.1] - Unreleased
+## [26.10.1] - 2026-10-08
 
 ### Changed
 - **The Windows installer and the portable `dblitz.exe` are code-signed.**
