@@ -7,7 +7,9 @@ name: Windows signing rehearsal
 #
 # The key is in Certum's SimplySign service. Certum supports a login from its
 # desktop program only, so the login here is done by ssign, an unofficial
-# client (MIT) that is built from a pinned commit of its source.
+# client (MIT) that is built from a pinned commit of its source. The built
+# client is kept in a cache, and a run of this workflow on main is what saves
+# the copy the next release uses (BUILD.md, "The cache of the signing client").
 #
 # Only executables: ssign 0.1.7 refuses an MSI with "not a PE (no MZ
 # signature)", which is why dblitz ships none any more.
@@ -43,14 +45,16 @@ jobs:
   rehearse:
     name: Sign and verify
     runs-on: windows-latest
-    # Not yet run in this repository. The same job took under ten minutes in
-    # the project it was written for; most of it is compiling ssign.
+    # Observed 4 min 44 s (2026-10-08), of which 3 min 58 s was compiling
+    # ssign. A run that restores the client from the cache leaves that part
+    # out; a run after SSIGN_REV changed compiles again.
     timeout-minutes: 30
     # The two secrets live in this environment and nowhere else, so a workflow
     # that does not name it cannot read them.
     environment: signing
     env:
-      # ssign v0.1.7. A commit and not a tag: a tag can be moved. Keep it the
+      # ssign v0.1.7. A commit and not a tag: a tag can be moved. Written once
+      # in this workflow: the cache key and the build both read it. Keep it the
       # same as SSIGN_REV in release.yml (windowsSigning.test.ts holds them
       # equal).
       SSIGN_REV: 5fd4daf22155b19b645aef3dd467f3c4c9e440b3
@@ -62,19 +66,40 @@ jobs:
 
       # Built outside the checkout and installed into a folder of its own, as
       # release.yml does it.
+      #
+      # The built client is kept in a cache whose key is the commit. A release
+      # runs on a tag and can read a cache saved on main and none saved on
+      # another tag, so a run of this workflow on main is what gives the next
+      # release its copy. No `restore-keys`: a copy built from another commit
+      # is never taken.
+      - name: Restore ssign
+        id: ssign
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\ssign-client
+          key: ssign-${{ runner.os }}-${{ runner.arch }}-${{ env.SSIGN_REV }}
+
       - name: Build ssign from the pinned commit
         shell: pwsh
         working-directory: ${{ runner.temp }}
+        env:
+          CACHED: ${{ steps.ssign.outputs.cache-hit }}
         run: |
           $root = Join-Path $env:RUNNER_TEMP 'ssign-client'
-          cargo install --locked --git https://github.com/Le-Syl21/ssign --rev $env:SSIGN_REV --root $root ssign
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if ($env:CACHED -eq 'true') {
+            Write-Output "ssign $env:SSIGN_REV restored from the cache"
+          } else {
+            cargo install --locked --git https://github.com/Le-Syl21/ssign --rev $env:SSIGN_REV --root $root ssign
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          # From here on the same for a restored client and a built one.
           $bin = Join-Path $root 'bin'
           & (Join-Path $bin 'ssign.exe') --version
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if ($LASTEXITCODE -ne 0) { Write-Output '::error::the signing client does not start'; exit 1 }
           # The wrapper release.yml gives to Tauri, found where ssign is found.
-          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'scripts\sign-windows.cmd') $bin
-          Add-Content $env:GITHUB_PATH $bin
+          # Copied in every run, over the copy the cache restored.
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'scripts\sign-windows.cmd') $bin -Force
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
 
       - name: Fetch the files to sign
         shell: pwsh

@@ -27,6 +27,9 @@ Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
   installer leaves on the disk, the uninstaller among them. The login is in a
   GitHub environment that only this leg and the new manual
   `sign-rehearsal.yml` name. `windowsSigning.test.ts` holds the wiring.
+- The built signing client is kept in a cache whose key is its pinned commit,
+  so a release does not compile it again. The copy a release reads is the one
+  `sign-rehearsal.yml` saves when it is run on `main`.
 - The release's build job no longer leaves a token in the checkout.
 - The draft release's notes are written out in `release.yml` and carry the
   Windows paragraph.

@@ -464,10 +464,13 @@ phone, so the login is done by [`ssign`](https://github.com/Le-Syl21/ssign)
 (MIT), an **unofficial** client for the SimplySign service. The Windows leg:
 
 1. Fails at once if either secret is empty.
-2. Builds `ssign` v0.1.7 from the pinned commit
-   `5fd4daf22155b19b645aef3dd467f3c4c9e440b3` with `cargo install --locked`,
-   outside the checkout and into a folder of its own under `RUNNER_TEMP`, so
-   the Rust cache never restores the program that holds the login.
+2. Takes `ssign` v0.1.7, built from the pinned commit
+   `5fd4daf22155b19b645aef3dd467f3c4c9e440b3`, out of a cache whose key is
+   that commit, and builds it with `cargo install --locked` when the cache has
+   none. It is built outside the checkout and into a folder of its own under
+   `RUNNER_TEMP`, so the Rust cache of the build, whose keys do not name that
+   commit, never holds the program that reads the login. See
+   [The cache of the signing client](#the-cache-of-the-signing-client).
 3. Gives Tauri `src-tauri/tauri.signing.conf.json`, an overlay that sets
    `bundle.windows.signCommand` to `sign-windows.cmd`. Tauri then calls it for
    `dblitz.exe`, for the NSIS plugin DLLs, for the uninstaller (from inside
@@ -553,11 +556,41 @@ gh workflow run sign-rehearsal.yml --ref main
 gh run list --workflow sign-rehearsal.yml --limit 1
 ```
 
-Run it after the environment is first set up, whenever `SSIGN_REV` changes,
-and when a release leg fails in the build step with a login error. It does
-**not** cover the release leg itself: the conditional environment, the overlay
+Run it on `main` after the environment is first set up, whenever `SSIGN_REV`
+changes, and when a release leg fails in the build step with a login error. It
+also saves the built client for the next release, as the next section says. It
+does **not** cover the release leg itself: the conditional environment, the overlay
 reaching Tauri, and a real signature on the uninstaller are first seen on a
 tag.
+
+### The cache of the signing client
+
+Both workflows keep the built `ssign` in a cache of GitHub Actions, so that it
+is compiled once for each commit of `ssign` and not in every run. The key is
+`ssign-<os>-<arch>-<SSIGN_REV>`, there is no fallback key, and the cached
+folder holds this one program. `SSIGN_REV` is written once in each workflow;
+the cache key and the build both read it.
+
+Which cache a release reads is decided by GitHub, not by the workflow: a run
+on a tag can restore only caches saved on the default branch, and on its own
+ref. So the cache that releases use is the one `sign-rehearsal.yml` saves when
+it is run on `main`. A tag that finds none builds the client as before and is
+just as green; the copy it then saves belongs to that tag, and no other tag
+can read it.
+
+- After changing `SSIGN_REV`, run the rehearsal on `main` once. The key names
+  the commit, so the first run after the change builds the client and saves
+  it.
+- A cache that is not read for 7 days is removed. The next run then builds the
+  client again, and a rehearsal on `main` saves it again.
+- The cached file is the program that reads the Certum login. Only a workflow
+  run on `main` can replace the copy a release reads: a pull request from a
+  fork cannot write a cache that `main` or a tag reads. A saved cache is never
+  overwritten, so replacing it means deleting it first
+  (`gh cache delete <key>`).
+- Every run starts the restored client (`ssign --version`) before anything is
+  signed, and copies `scripts/sign-windows.cmd` from the checkout over the
+  copy the cache restored.
 
 ### There is no `.msi` any more
 
@@ -596,7 +629,11 @@ The two secrets are enough to sign any file as *Open Source Developer Timo
 Stein* until the certificate is revoked or expires. `release.yml` and
 `sign-rehearsal.yml` are the two workflows that name the environment, and
 neither runs for a pull request. `ssign` is built from one pinned commit; its
-dependencies are pinned by its own lock file and nothing else. Its protocol is
+dependencies are pinned by its own lock file and nothing else. A release runs
+the copy of it that a run on `main` built and saved
+([The cache of the signing client](#the-cache-of-the-signing-client)), so
+whoever can run a workflow on `main` decides which program reads the login,
+as was already true of the workflow files themselves. Its protocol is
 reverse-engineered, so Certum can end it without notice; the cost of that is a
 release that fails to build, not one that ships unsigned, because the Windows
 leg reads every signature back.
@@ -646,7 +683,8 @@ leg reads every signature back.
   them has become false.
 
 **Windows signing** (see [Windows code signing](#windows-code-signing)):
-- [ ] If `SSIGN_REV` changed since the last release, the rehearsal has passed:
+- [ ] If `SSIGN_REV` changed since the last release, the rehearsal has passed
+  on `main`, which also saves the built client for the release:
   `gh workflow run sign-rehearsal.yml --ref main`
 - [ ] No release or rehearsal of `tpdf` or `screenpick` is running, and nobody
   is logged in to the SimplySign desktop program

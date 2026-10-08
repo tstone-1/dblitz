@@ -5,7 +5,7 @@ name: Release
 # macOS is signed with a Developer ID identity and notarized by Apple, so it
 # installs without a Gatekeeper bypass. Windows is signed with a Certum Open
 # Source Code Signing certificate, whose key is in Certum's SimplySign service;
-# the `Build the Windows signing client` step has the detail, and BUILD.md,
+# the `Restore the Windows signing client` step has the detail, and BUILD.md,
 # "Windows code signing", has the rules.
 #
 # Apple signing is conditional on the Apple secrets being present, so a
@@ -242,9 +242,15 @@ jobs:
       # tauri-action uploads installers to the draft release; the DMG staple
       # step and the portable-exe step each run `gh release upload`.
       contents: write
+    env:
+      # ssign v0.1.7, the Windows signing client. A commit and not a tag: a tag
+      # can be moved. Written once in this workflow: the cache key and the
+      # build below both read it. Keep it the same as SSIGN_REV in
+      # sign-rehearsal.yml (windowsSigning.test.ts holds them equal).
+      SSIGN_REV: 5fd4daf22155b19b645aef3dd467f3c4c9e440b3
 
     steps:
-      # No token is left in `.git/config`: the Windows leg compiles a program
+      # No token is left in `.git/config`: the Windows leg runs a program built
       # from another repository in this job, and every step that talks to
       # GitHub is handed its token through the environment.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -388,29 +394,51 @@ jobs:
       # program only, and that program needs a person and a phone. Built from a
       # pinned commit of its source, and a commit and not a tag, so that a later
       # change to the tool cannot reach the login without a change here.
+      # `sign-rehearsal.yml` proves the same build and login without building
+      # dblitz.
       #
       # Built outside the checkout and installed into a folder of its own under
       # RUNNER_TEMP, not into `~/.cargo/bin`: the Rust cache above saves and
-      # restores that folder, and the program that holds the login is built
-      # from its source in every run. `sign-rehearsal.yml` proves the same
-      # build and login without building dblitz.
+      # restores that folder, and its keys do not name the commit of ssign.
+      #
+      # The built client is kept in a cache of its own, whose key is that
+      # commit, so a release does not compile it again. A run on a tag can read
+      # a cache saved on main and none saved on another tag, so the copy a
+      # release finds is the one `sign-rehearsal.yml` saved on main; a release
+      # that finds none builds the client as before. No `restore-keys`: a copy
+      # built from another commit is never taken. This is the program that
+      # reads the Certum login: only a run on main can put it into the cache a
+      # release reads, and a pull request from a fork cannot.
+      - name: Restore the Windows signing client
+        id: ssign
+        if: matrix.signs-windows
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\ssign-client
+          key: ssign-${{ runner.os }}-${{ runner.arch }}-${{ env.SSIGN_REV }}
+
       - name: Build the Windows signing client
         if: matrix.signs-windows
         shell: pwsh
         working-directory: ${{ runner.temp }}
         env:
-          # ssign v0.1.7
-          SSIGN_REV: 5fd4daf22155b19b645aef3dd467f3c4c9e440b3
+          CACHED: ${{ steps.ssign.outputs.cache-hit }}
         run: |
           $root = Join-Path $env:RUNNER_TEMP 'ssign-client'
-          cargo install --locked --git https://github.com/Le-Syl21/ssign --rev $env:SSIGN_REV --root $root ssign
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if ($env:CACHED -eq 'true') {
+            Write-Output "ssign $env:SSIGN_REV restored from the cache"
+          } else {
+            cargo install --locked --git https://github.com/Le-Syl21/ssign --rev $env:SSIGN_REV --root $root ssign
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          # From here on the same for a restored client and a built one.
           $bin = Join-Path $root 'bin'
           & (Join-Path $bin 'ssign.exe') --version
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          # Tauri is given the wrapper by name and finds it where it finds ssign.
-          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'scripts\sign-windows.cmd') $bin
-          Add-Content $env:GITHUB_PATH $bin
+          if ($LASTEXITCODE -ne 0) { Write-Output '::error::the signing client does not start'; exit 1 }
+          # Tauri is given the wrapper by name and finds it where it finds
+          # ssign. Copied in every run, over the copy the cache restored.
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'scripts\sign-windows.cmd') $bin -Force
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
 
       - name: Build and upload artifacts
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0

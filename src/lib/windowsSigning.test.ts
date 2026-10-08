@@ -195,6 +195,87 @@ describe("everything that signs logs in one at a time, with the same client", ()
     }
   });
 
+  it("writes the pinned commit once in each workflow", () => {
+    // A second copy is a second place to change, and the cache key would then
+    // name one commit while the build compiles another.
+    for (const text of [release, rehearsal]) {
+      expect(text.match(/^\s*SSIGN_REV: /gm)?.length).toBe(1);
+    }
+    // In the build job's `env:`, where the cache step's `with:` can read it. A
+    // step's own `env:` is not visible to another step.
+    expect(build).toMatch(/^ {4}env:\n(?: {6}#.*\n)* {6}SSIGN_REV: [0-9a-f]{40}$/m);
+    expect(rehearsal).toMatch(/^ {4}env:\n(?: {6}#.*\n)* {6}SSIGN_REV: [0-9a-f]{40}$/m);
+  });
+
+  it("keeps the built client in a cache whose key is the pinned commit", () => {
+    const jobs: [string, string, string][] = [
+      [build, "Restore the Windows signing client", "Build the Windows signing client"],
+      [rehearsal, "Restore ssign", "Build ssign from the pinned commit"],
+    ];
+    for (const [job, restoreName, buildName] of jobs) {
+      const names = steps(job).map((step) => step.split("\n")[0]);
+      const restore = names.indexOf(`name: ${restoreName}`);
+      const install = names.indexOf(`name: ${buildName}`);
+      expect(restore).toBeGreaterThan(-1);
+      // Restored immediately before the step that would otherwise build it.
+      expect(install).toBe(restore + 1);
+
+      const cache = steps(job)[restore];
+      expect(cache).toMatch(/^ {8}id: ssign$/m);
+      expect(cache).toMatch(/^ {8}uses: actions\/cache@[0-9a-f]{40} # v\d/m);
+      // The folder `cargo install --root` writes to, and nothing else: the
+      // cache holds this one program.
+      expect(cache).toMatch(/^ {10}path: \$\{\{ runner\.temp \}\}\\ssign-client$/m);
+      expect(cache).toMatch(
+        /^ {10}key: ssign-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-\$\{\{ env\.SSIGN_REV \}\}$/m,
+      );
+      // A fallback key would hand the login to a client built from another
+      // commit. Read from the whole job, comments left out.
+      const code = job
+        .split("\n")
+        .filter((line) => !line.trimStart().startsWith("#"))
+        .join("\n");
+      expect(code).toContain("key: ssign-");
+      expect(code).not.toContain("restore-keys");
+
+      const step = steps(job)[install];
+      expect(step).toContain("$root = Join-Path $env:RUNNER_TEMP 'ssign-client'");
+      expect(step).toContain("CACHED: ${{ steps.ssign.outputs.cache-hit }}");
+      // Only the compile is left out on a hit. The client is started and the
+      // wrapper copied in every run: a restored client that does not start
+      // stops the job here, before anything is signed, and the wrapper is this
+      // commit's and not the one the cache was saved with.
+      const lines = step.split("\n").map((line) => line.trim());
+      const hit = lines.indexOf("if ($env:CACHED -eq 'true') {");
+      const miss = lines.indexOf("} else {");
+      const end = lines.indexOf("}", miss);
+      const at = (text: string) => lines.findIndex((line) => line.startsWith(text));
+      expect(hit).toBeGreaterThan(-1);
+      expect(miss).toBeGreaterThan(hit);
+      expect(end).toBeGreaterThan(miss);
+      expect(at("cargo install --locked")).toBeGreaterThan(miss);
+      expect(at("cargo install --locked")).toBeLessThan(end);
+      expect(at("& (Join-Path $bin 'ssign.exe') --version")).toBeGreaterThan(end);
+      expect(at("Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'scripts\\sign-windows.cmd') $bin -Force")).toBeGreaterThan(end);
+      expect(at("Add-Content -Path $env:GITHUB_PATH -Value $bin")).toBeGreaterThan(end);
+    }
+    // In the release the cache step runs on the signing leg only.
+    const restore = steps(build).find((s) => s.startsWith("name: Restore the Windows signing client\n"));
+    expect(restore).toMatch(/^ {8}if: matrix\.signs-windows$/m);
+  });
+
+  it("says in BUILD.md which cache a release reads", () => {
+    // The rule is not visible in the workflow: a release that finds no cache
+    // builds the client and is green, so only the document says to run the
+    // rehearsal on main after the commit changes.
+    const doc = readText("BUILD.md").replace(/\s+/g, " ");
+    expect(doc).toContain("### The cache of the signing client");
+    expect(doc).toContain("only caches saved on the default branch");
+    expect(doc).toContain("After changing `SSIGN_REV`, run the rehearsal on `main` once");
+    expect(doc).not.toMatch(/built from (the|its) (pinned commit|source) in every run/);
+    expect(readText("docs/agent-notes.md")).not.toMatch(/built from the pinned commit in every run/);
+  });
+
   it("keeps the rehearsal away from pull requests and inside the environment", () => {
     expect(rehearsal).toMatch(/^on:\n {2}workflow_dispatch:$/m);
     expect(rehearsal).not.toContain("pull_request");
