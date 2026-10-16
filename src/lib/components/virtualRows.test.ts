@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createVirtualRows } from "./virtualRows.svelte";
-import type { QueryResult } from "$lib/ipc";
+import type { QueryResult } from "#lib/ipc.ts";
 
 // Production defers a chunk request by one macrotask so a chunk the user has
 // scrolled past can be dropped instead of fetched (see `scheduleFetch`). Every

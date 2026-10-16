@@ -31,7 +31,7 @@
  * flag (via closure) so different consumers don't race against a shared one.
  */
 
-import { appState } from "$lib/store.svelte";
+import { appState } from "#lib/store.svelte.ts";
 
 export function createAutoSelectFirstTable(
   onSelect: (tableName: string) => void,

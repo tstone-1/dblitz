@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ColumnFilterValue, ViewConfig } from "$lib/ipc";
+import type { ColumnFilterValue, ViewConfig } from "#lib/ipc.ts";
 import { createPinnedFilters } from "./pinnedFilters.svelte";
 
 // A plain in-memory stand-in for the store's getTableConfig / updateTableConfig.

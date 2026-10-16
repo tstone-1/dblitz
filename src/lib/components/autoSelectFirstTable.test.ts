@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { appState } from "$lib/store.svelte";
-import type { TableInfo } from "$lib/ipc";
+import { appState } from "#lib/store.svelte.ts";
+import type { TableInfo } from "#lib/ipc.ts";
 import { createAutoSelectFirstTable } from "./autoSelectFirstTable.svelte";
 
 describe("createAutoSelectFirstTable", () => {

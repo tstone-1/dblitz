@@ -4,12 +4,12 @@
     cancelQueries,
     exportToXlsx,
     type SqlResult,
-  } from "$lib/ipc";
+  } from "#lib/ipc.ts";
   import {
     appState,
     getTableConfig,
     persistSqlHistory,
-  } from "$lib/store.svelte";
+  } from "#lib/store.svelte.ts";
   import DataGrid from "./DataGrid.svelte";
   import { selectionColumnTypes, type SelectionData } from "./selectionData";
   import { createDbGenerationReset } from "./dbGenerationReset.svelte";

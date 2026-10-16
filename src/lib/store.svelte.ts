@@ -9,8 +9,8 @@ import {
   loadViewConfig,
   saveViewConfig as saveViewConfigCmd,
   getColumns,
-} from "$lib/ipc";
-import type { TableInfo, ColumnInfo, FileConfig, ViewConfig } from "$lib/ipc";
+} from "#lib/ipc.ts";
+import type { TableInfo, ColumnInfo, FileConfig, ViewConfig } from "#lib/ipc.ts";
 
 export interface SqlHistoryEntry {
   sql: string;

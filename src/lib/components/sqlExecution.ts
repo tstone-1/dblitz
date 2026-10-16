@@ -20,8 +20,8 @@
  * not the answer, and leaving it set would strand the Cancel button on screen.
  */
 
-import type { SqlResult } from "$lib/ipc";
-import type { SqlHistoryEntry } from "$lib/store.svelte";
+import type { SqlResult } from "#lib/ipc.ts";
+import type { SqlHistoryEntry } from "#lib/store.svelte.ts";
 import { createSessionOwnedRequest } from "./sessionOwnedRequest";
 
 /** A completed run: the result plus the exact text that produced it. */

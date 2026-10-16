@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createBrowseQuery, type BrowseQueryDeps } from "./browseQuery.svelte";
-import type { ColumnFilterValue, QueryResult, ViewConfig } from "$lib/ipc";
+import type { ColumnFilterValue, QueryResult, ViewConfig } from "#lib/ipc.ts";
 
 /** Drain the microtask queue. `reloadData` is several awaits deep -- and each
  *  reload bumps the epoch at its FIRST await, so two started back to back means

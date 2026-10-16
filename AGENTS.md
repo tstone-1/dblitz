@@ -120,7 +120,7 @@ The Linux `smoke` job is the only check above the webview-IPC seam, and it does 
 - The draft-first release workflow must pass the numeric `releaseId` from `create-release` to `tauri-action`; GitHub's tag lookup returns 404 for a draft release, so reverting build uploads to `tagName` breaks the matrix.
 - Rebuild-and-overwrite under an existing version label is permitted only while that version is unpublished and only after asking the user. Once its tag and GitHub release are published, cut the next version instead.
 - Keep review-fix release batches scoped to the fixes. Do not fold strategic refactors (file splits, major extractions) into the same release even when they touch the same files — defer them to separate, single-purpose releases unless the refactor is a genuine prerequisite for a fix.
-- Expected `cargo audit` noise is the established allowed Tauri/Linux WebView transitive set (legacy GTK/glib/unic advisories). Treat any new advisory or materially different output as actionable; historical npm `cookie` findings applied only to the unreachable SvelteKit SSR path and must be re-evaluated if they reappear.
+- Expected `cargo audit` noise is the established allowed Tauri/Linux WebView transitive set (legacy GTK/glib/unic advisories). Treat any new advisory or materially different output as actionable; the npm `cookie` override (`^0.7.2`) that answered an old finding on the unreachable SvelteKit SSR path was removed with SvelteKit 3, which needs `cookie` 2; re-evaluate a `cookie` finding if one reappears.
 
 ### In-app updater
 

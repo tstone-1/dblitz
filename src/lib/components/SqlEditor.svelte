@@ -3,7 +3,7 @@
   import { EditorView } from "@codemirror/view";
   import { EditorState, Compartment } from "@codemirror/state";
   import type { Completion } from "@codemirror/autocomplete";
-  import { appState } from "$lib/store.svelte";
+  import { appState } from "#lib/store.svelte.ts";
   import {
     buildColumnCompletions,
     buildEditorExtensions,

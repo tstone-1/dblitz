@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ColumnPreset } from "$lib/ipc";
+  import type { ColumnPreset } from "#lib/ipc.ts";
   import {
     normalizePresetName,
     orderColumns,

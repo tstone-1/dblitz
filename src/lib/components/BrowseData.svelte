@@ -7,13 +7,13 @@
     exportToXlsx,
     viewProgress,
     type ColumnFilterValue,
-  } from "$lib/ipc";
+  } from "#lib/ipc.ts";
   import {
     appState,
     getTableConfig,
     ensureTableConfig,
     updateTableConfig,
-  } from "$lib/store.svelte";
+  } from "#lib/store.svelte.ts";
   import DataGrid from "./DataGrid.svelte";
   import { progressLabel, startProgressPoller } from "./progressPoller";
   import ColumnSettings from "./ColumnSettings.svelte";

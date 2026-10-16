@@ -9,7 +9,7 @@
  * store, so it is unit-testable with plain fakes like its fully-injected siblings.
  */
 
-import type { ColumnFilterValue, ViewConfig } from "$lib/ipc";
+import type { ColumnFilterValue, ViewConfig } from "#lib/ipc.ts";
 import type { PinState } from "./pinLabel";
 
 export interface PinnedFiltersDeps {

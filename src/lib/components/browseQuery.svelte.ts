@@ -29,7 +29,7 @@ import type {
   ColumnFilterValue,
   QueryResult,
   ViewConfig,
-} from "$lib/ipc";
+} from "#lib/ipc.ts";
 import { buildActiveFilters } from "./columnView";
 import { hasIncompleteOperator, stripIncompleteSegments } from "./filterOperators";
 import { shouldAutoFitWidths } from "./autoFitWidths";

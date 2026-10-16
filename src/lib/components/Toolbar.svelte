@@ -1,8 +1,8 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
-  import { getExportDir, setExportDir, getRecentFiles, clearRecentFiles, type RecentFile } from "$lib/ipc";
-  import { appState, openDatabase, closeDatabase, setTheme, saveViewConfig } from "$lib/store.svelte";
-  import { update } from "$lib/updateState.svelte";
+  import { getExportDir, setExportDir, getRecentFiles, clearRecentFiles, type RecentFile } from "#lib/ipc.ts";
+  import { appState, openDatabase, closeDatabase, setTheme, saveViewConfig } from "#lib/store.svelte.ts";
+  import { update } from "#lib/updateState.svelte.ts";
   import { fileName, parentDir, TINT_PRESETS, tintPillStyle, toolbarTintStyle } from "./toolbarUtils";
 
   function setTint(value: string | null) {

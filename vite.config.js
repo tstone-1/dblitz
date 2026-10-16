@@ -1,11 +1,16 @@
 import { defineConfig } from "vite";
+import adapter from "@sveltejs/adapter-static";
 import { sveltekit } from "@sveltejs/kit/vite";
+import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
 
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vitejs.dev/config/
 export default defineConfig(async () => ({
-  plugins: [sveltekit()],
+  // SvelteKit 3 takes its configuration here; it refuses a svelte.config.js.
+  // Tauri has no Node.js server for SSR, so adapter-static prerenders the app
+  // (SSG). See https://v2.tauri.app/start/frontend/sveltekit/
+  plugins: [sveltekit({ adapter: adapter(), preprocess: vitePreprocess() })],
   test: {
     environment: "node",
     include: ["src/**/*.test.ts"],

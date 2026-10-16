@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { getSchema, getColumns, type ColumnInfo, type SchemaEntry } from "$lib/ipc";
-  import { appState } from "$lib/store.svelte";
+  import { getSchema, getColumns, type ColumnInfo, type SchemaEntry } from "#lib/ipc.ts";
+  import { appState } from "#lib/store.svelte.ts";
   import { createAutoSelectFirstTable } from "./autoSelectFirstTable.svelte";
   import { createDbGenerationReset } from "./dbGenerationReset.svelte";
   import { createSessionOwnedRequest } from "./sessionOwnedRequest";

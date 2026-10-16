@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createSqlExecution } from "./sqlExecution";
-import type { SqlResult } from "$lib/ipc";
-import type { SqlHistoryEntry } from "$lib/store.svelte";
+import type { SqlResult } from "#lib/ipc.ts";
+import type { SqlHistoryEntry } from "#lib/store.svelte.ts";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

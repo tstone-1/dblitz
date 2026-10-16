@@ -2,13 +2,13 @@ import {
   updateStatus,
   getCheckForUpdatesOnStartup,
   setCheckForUpdatesOnStartup,
-} from "$lib/ipc";
+} from "#lib/ipc.ts";
 import {
   checkForUpdates,
   relaunch,
   openExternal,
   type PendingUpdate,
-} from "$lib/updaterCommands";
+} from "#lib/updaterCommands.ts";
 
 /**
  * Where the release lives when the in-app path can't be used. Shown on every

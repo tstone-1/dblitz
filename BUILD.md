@@ -85,7 +85,11 @@ the same way (see AGENTS.md).
 - `src-tauri/target/release/dblitz.exe`
 
 **Installer** (in `src-tauri/target/release/bundle/`):
-- `nsis/dblitz_x.y.z_x64-setup.exe` - NSIS installer (registers file associations)
+- `nsis/dblitz_x.y.z_<arch>-setup.exe` - NSIS installer (registers file associations)
+
+`<arch>` is the architecture of the machine that built it: `x64`, or `arm64` on
+Windows on ARM. CI builds ARM natively on `windows-11-arm` and uploads its
+portable exe as `dblitz-arm64.exe`.
 
 No MSI is built: `src-tauri/tauri.windows.conf.json` limits the Windows bundle
 to `nsis`, and [Windows code signing](#windows-code-signing) has the reason.
@@ -490,7 +494,8 @@ phone, so the login is done by [`ssign`](https://github.com/Le-Syl21/ssign)
    unless each is valid, timestamped and by the signer: the installer and the
    portable `dblitz.exe`, then, after running the installer silently, every
    executable file in the folder it installed to, the uninstaller among them.
-6. Uploads the portable `dblitz.exe`, which is the file step 5 read.
+6. Uploads the portable exe, which is the file step 5 read: as `dblitz.exe`
+   from the x64 leg and as `dblitz-arm64.exe` from the ARM leg.
 
 The login is two secrets of the GitHub environment `signing`, and of no other
 place: `CERTUM_EMAIL`, and `CERTUM_OTP_URI`, the whole `otpauth://` address
@@ -654,17 +659,26 @@ leg reads every signature back.
 **Update toolchains and dependencies:**
 - [ ] Update Rust toolchain: `rustup update stable`
 - [ ] Update Rust dependencies: `cd src-tauri && cargo update`
-  - Confirm the update landed in the file, not only in cargo's output: `git diff --stat -- src-tauri/Cargo.lock` must list the lockfile whenever cargo printed `Updating` lines. On 2026-09-30 `cargo update` printed 55 updates and exited 0 three times in a row without writing the lockfile.
-  - **Read cargo's exit code, not only its output.** Since 2026-10-13 every
-    `zip` release except 9.0.3 is yanked, while `libduckdb-sys` (build script)
-    and `rust_xlsxwriter` still require `zip` 6 and 8. A bare `cargo update`
-    then fails with `failed to select a version for the requirement zip` and
-    writes nothing; filtered through `grep`, that looked like "nothing to
-    update" on 2026-10-16 while 38 crates, `rustls` with four advisories among
-    them, were behind. Until both crates accept `zip` 9, update every other
-    crate by name: `cargo update -p <name>@<version> ...` for every registry
-    package in `Cargo.lock` except `zip`. A locked yanked version is allowed;
-    only a re-resolve refuses it.
+  - **Run it unfiltered and read its exit code.** A failed `cargo update`
+    writes nothing and prints no `Updating` lines, so a `grep` or `tail` over
+    its output reads as "nothing to update". That happened on 2026-10-16 with
+    38 crates behind, `rustls` with four advisories among them.
+  - **Then confirm the lockfile changed:** whenever cargo printed `Updating`
+    lines, `git diff --stat -- src-tauri/Cargo.lock` must list it. On
+    2026-09-30 `cargo update` printed 55 updates and exited 0 three times in a
+    row without writing the file.
+  - **If it fails with `failed to select a version for the requirement zip`,**
+    the yanked `zip` releases are the cause: since 2026-10-13 every `zip`
+    except 9.0.3 is yanked, and `libduckdb-sys` (build script) and
+    `rust_xlsxwriter` still require `zip` 6 and 8. A version already in the
+    lockfile may stay there; only a fresh resolve refuses it. So update every
+    other crate by name, which keeps `zip` locked:
+    ```sh
+    cd src-tauri
+    cargo update $(python3 -c 'import re;s=open("Cargo.lock").read();print(" ".join(f"-p {n}@{v}" for n,v,r in re.findall(r"name = \"([^\"]+)\"\nversion = \"([^\"]+)\"\n(source = \"registry)?",s) if r and n!="zip"))')
+    ```
+    Drop this once both crates accept `zip` 9: a bare `cargo update` then
+    succeeds again.
   - Review output for major version bumps — check changelogs before proceeding.
 - [ ] Update npm dependencies: `npm update && npm outdated`
   - `npm outdated` shows remaining major-version updates. Review individually.
@@ -802,7 +816,8 @@ locally — CI does. `npx tauri build` is only for a local desktop artifact.
 
 **Windows** — nothing to copy. An installed copy picks the release up through
 the in-app updater; a fresh machine installs from the release's
-`dblitz_<version>_x64-setup.exe`.
+`dblitz_<version>_x64-setup.exe`, or `dblitz_<version>_arm64-setup.exe` on
+Windows on ARM.
 
 **macOS** — deploy the just-released build to this machine through the
 Homebrew cask. Run `brew update` first so brew's tap clone
@@ -867,7 +882,7 @@ To overwrite a pre-existing non-brew install, use `brew install --cask --force d
 ```bash
 # Full release process (replace x.y.z with actual version)
 rustup update stable
-cd src-tauri && cargo update && cd ..
+cd src-tauri && cargo update; echo "exit: $?"; cd ..   # unfiltered; on the zip error see step 1
 git diff --stat -- src-tauri/Cargo.lock   # must list the lockfile if cargo printed updates
 npm update && npm outdated
 npm audit
@@ -964,6 +979,7 @@ npx kill-port 1420
 dblitz/
 ├── src/                          # Svelte frontend
 │   ├── routes/
+│   │   ├── +layout.ts            # prerender = true, ssr = false
 │   │   └── +page.svelte          # App shell
 │   ├── lib/
 │   │   ├── store.svelte.ts       # Global reactive state
@@ -987,6 +1003,7 @@ dblitz/
 │   │   ├── lib.rs                # Tauri commands, setup, Windows/macOS glue
 │   │   ├── db.rs                 # Database facade + db::bench_api
 │   │   ├── db/                   # schema, query, filters, sql, export, types, util
+│   │   ├── pq/                   # Parquet through embedded DuckDB
 │   │   ├── config.rs             # Per-DB and app config persistence
 │   │   └── updates.rs            # Pure update/provenance logic
 │   ├── examples/                 # rowid_seek + filtered_scroll benchmarks
@@ -1000,7 +1017,8 @@ dblitz/
 ├── scripts/                      # release-preflight.mjs, smoke-test.mjs,
 │                                 # sign-windows.{cmd,ps1}, verify-signature.ps1
 ├── .github/                      # Workflows, dependabot, tauri-linux-deps.txt
-├── package.json                  # npm config
+├── package.json                  # npm config; `imports` maps #lib to src/lib
+├── vite.config.js                # Vite + SvelteKit config (there is no svelte.config.js)
 ├── AGENTS.md                     # Architecture and project conventions
 ├── SECURITY.md                   # Reporting policy
 ├── CHANGELOG.md                  # Version history

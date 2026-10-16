@@ -1,5 +1,5 @@
-import type { ColumnFilter, ColumnFilterValue, ColumnPreset } from "$lib/ipc";
-import type { Theme } from "$lib/store.svelte";
+import type { ColumnFilter, ColumnFilterValue, ColumnPreset } from "#lib/ipc.ts";
+import type { Theme } from "#lib/store.svelte.ts";
 
 export function orderColumns(columns: string[], configuredOrder: string[]): string[] {
   if (configuredOrder.length === 0) return columns;

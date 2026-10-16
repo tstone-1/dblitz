@@ -1,17 +1,17 @@
 <script lang="ts">
   import "../app.css";
-  import { dev } from "$app/environment";
+  import { dev } from "$app/env";
   import { onMount } from "svelte";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-  import { getInitialFile, toggleDevtools } from "$lib/ipc";
-  import { openSucceeded } from "$lib/openOutcome";
-  import { appState, initTheme, openDatabase } from "$lib/store.svelte";
-  import { update } from "$lib/updateState.svelte";
-  import Toolbar from "$lib/components/Toolbar.svelte";
-  import AppBanners from "$lib/components/AppBanners.svelte";
-  import DatabaseStructure from "$lib/components/DatabaseStructure.svelte";
-  import BrowseData from "$lib/components/BrowseData.svelte";
-  import ExecuteSQL from "$lib/components/ExecuteSQL.svelte";
+  import { getInitialFile, toggleDevtools } from "#lib/ipc.ts";
+  import { openSucceeded } from "#lib/openOutcome.ts";
+  import { appState, initTheme, openDatabase } from "#lib/store.svelte.ts";
+  import { update } from "#lib/updateState.svelte.ts";
+  import Toolbar from "#lib/components/Toolbar.svelte";
+  import AppBanners from "#lib/components/AppBanners.svelte";
+  import DatabaseStructure from "#lib/components/DatabaseStructure.svelte";
+  import BrowseData from "#lib/components/BrowseData.svelte";
+  import ExecuteSQL from "#lib/components/ExecuteSQL.svelte";
 
   // Opening a database while another one is open needs no explicit close, and
   // this path deliberately does not do one: the backend swaps the connection

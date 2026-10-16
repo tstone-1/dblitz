@@ -5,6 +5,15 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.10.3] - Unreleased
+
+### Changed
+- **The frontend runs on SvelteKit 3** (with `@sveltejs/adapter-static` 4).
+  Nothing changes for users. For development: SvelteKit's configuration moved
+  from `svelte.config.js` into the `sveltekit()` plugin in `vite.config.js`,
+  `$lib` imports are `#lib` subpath imports declared in `package.json`, and
+  `$app/environment` is `$app/env`.
+
 ## [26.10.2] - 2026-10-16
 
 ### Added

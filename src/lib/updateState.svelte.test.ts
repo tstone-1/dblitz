@@ -10,21 +10,21 @@ import type { DownloadEvent, PendingUpdate } from "./updaterCommands";
 
 // The adapter is the seam: it owns every @tauri-apps/plugin-* import, so mocking
 // it here is what lets the state machine be tested without a Tauri runtime.
-vi.mock("$lib/updaterCommands", () => ({
+vi.mock("#lib/updaterCommands.ts", () => ({
   checkForUpdates: vi.fn(),
   relaunch: vi.fn(),
   openExternal: vi.fn(),
 }));
 
-vi.mock("$lib/ipc", () => ({
+vi.mock("#lib/ipc.ts", () => ({
   updateStatus: vi.fn(),
   getCheckForUpdatesOnStartup: vi.fn(),
   setCheckForUpdatesOnStartup: vi.fn(),
 }));
 
-const { checkForUpdates, relaunch, openExternal } = await import("$lib/updaterCommands");
+const { checkForUpdates, relaunch, openExternal } = await import("#lib/updaterCommands.ts");
 const { updateStatus, getCheckForUpdatesOnStartup, setCheckForUpdatesOnStartup } =
-  await import("$lib/ipc");
+  await import("#lib/ipc.ts");
 
 const checkMock = vi.mocked(checkForUpdates);
 const relaunchMock = vi.mocked(relaunch);

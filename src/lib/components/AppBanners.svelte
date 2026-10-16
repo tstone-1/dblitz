@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { appState } from "$lib/store.svelte";
-  import { update } from "$lib/updateState.svelte";
+  import { appState } from "#lib/store.svelte.ts";
+  import { update } from "#lib/updateState.svelte.ts";
 
   // App-global status bars: the error bar, the notice bar and the two update
   // bars. They are not toolbar content -- they belong to the window, not to the

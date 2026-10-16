@@ -1,4 +1,4 @@
-import type { QueryResult } from "$lib/ipc";
+import type { QueryResult } from "#lib/ipc.ts";
 
 // =============================================================================
 // Reload / generation protocol (the whole picture, front to back)
