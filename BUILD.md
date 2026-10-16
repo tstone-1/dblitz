@@ -655,6 +655,16 @@ leg reads every signature back.
 - [ ] Update Rust toolchain: `rustup update stable`
 - [ ] Update Rust dependencies: `cd src-tauri && cargo update`
   - Confirm the update landed in the file, not only in cargo's output: `git diff --stat -- src-tauri/Cargo.lock` must list the lockfile whenever cargo printed `Updating` lines. On 2026-09-30 `cargo update` printed 55 updates and exited 0 three times in a row without writing the lockfile.
+  - **Read cargo's exit code, not only its output.** Since 2026-10-13 every
+    `zip` release except 9.0.3 is yanked, while `libduckdb-sys` (build script)
+    and `rust_xlsxwriter` still require `zip` 6 and 8. A bare `cargo update`
+    then fails with `failed to select a version for the requirement zip` and
+    writes nothing; filtered through `grep`, that looked like "nothing to
+    update" on 2026-10-16 while 38 crates, `rustls` with four advisories among
+    them, were behind. Until both crates accept `zip` 9, update every other
+    crate by name: `cargo update -p <name>@<version> ...` for every registry
+    package in `Cargo.lock` except `zip`. A locked yanked version is allowed;
+    only a re-resolve refuses it.
   - Review output for major version bumps — check changelogs before proceeding.
 - [ ] Update npm dependencies: `npm update && npm outdated`
   - `npm outdated` shows remaining major-version updates. Review individually.
@@ -750,7 +760,8 @@ git push origin vYY.M.MICRO
 
 Pushing the `vYY.M.MICRO` tag triggers `.github/workflows/release.yml`, which
 runs the quality gate, creates a draft release, builds and uploads every
-platform artifact (Windows, macOS `aarch64` + `x64` DMGs, Linux), flips the
+platform artifact (Windows x64 + ARM, macOS `aarch64` + `x64` DMGs, Linux), checks
+`latest.json` has an entry for all five, flips the
 release to published, then auto-bumps the Homebrew cask in
 `tstone-1/homebrew-dblitz`. You do **not** build the cross-platform artifacts
 locally — CI does. `npx tauri build` is only for a local desktop artifact.
@@ -781,7 +792,7 @@ locally — CI does. `npx tauri build` is only for a local desktop artifact.
 
 > **Gotcha — transient `publish`-job cancellation.** The `publish` job (a
 > one-line `gh release edit --draft=false`) is occasionally **cancelled** by a
-> GitHub Actions infra flake even when all four build legs succeed; `update-tap`
+> GitHub Actions infra flake even when all five build legs succeed; `update-tap`
 > then shows `skipped` and the release is left as a draft with all assets
 > present. This is not a code failure. Re-run just the tail jobs — the builds are
 > not rebuilt: `gh run rerun <run-id> --failed`, then re-watch. (Seen on both

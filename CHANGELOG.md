@@ -5,7 +5,7 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
-## [26.10.2] - Unreleased
+## [26.10.2] - 2026-10-16
 
 ### Added
 - **Windows on ARM builds.** Each release now has an `arm64` installer
@@ -13,6 +13,11 @@ Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
   natively for ARM and code-signed like the x64 files. Until now an ARM
   computer ran the x64 build under emulation; an installed ARM build updates to
   the next ARM build through the in-app updater.
+
+### Security
+- **The in-app updater's TLS library is updated** to rustls 0.23.46, which
+  fixes four advisories published on 2026-10-14 (RUSTSEC-2026-0346 to 0349).
+  Tauri is updated to 2.12.4 and the updater plugin to 2.14.0.
 
 ## [26.10.1] - 2026-10-08
 
