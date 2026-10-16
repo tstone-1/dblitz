@@ -3,7 +3,7 @@
 > **Distribution model:** **macOS release builds are signed with a Developer ID
 > identity and notarized by Apple** (since 26.7.6) — users open them normally.
 > **Windows release builds are signed with a Certum Open Source Code Signing
-> certificate** (releases after 26.10.0), by the Windows leg of `release.yml` —
+> certificate** (releases after 26.10.0), by the two Windows legs of `release.yml` —
 > see [Windows code signing](#windows-code-signing). A local Windows build is
 > unsigned. Local and fork macOS builds stay ad-hoc signed
 > (`"signingIdentity": "-"` in `tauri.conf.json`) unless you export
@@ -72,8 +72,9 @@ cd src-tauri && cargo fmt --check
 `cargo check --target x86_64-pc-windows-msvc` cannot run there: `ring` and
 `libsqlite3-sys` have C build scripts and the MSVC toolchain does not exist on
 macOS. `cfg(windows)` code edited on a Mac is verified by reading plus the
-Windows leg of `.github/workflows/checks.yml`, and nothing else - push the
-branch and read that job before tagging. On Windows, WSL covers the Linux leg
+two Windows legs of `.github/workflows/checks.yml` (`windows-latest` and
+`windows-11-arm`), and nothing else - push the branch and read those jobs
+before tagging. On Windows, WSL covers the Linux leg
 the same way (see AGENTS.md).
 
 ## Build Output
@@ -421,8 +422,10 @@ ships looking green.
 
 **Status: wired up 2026-10-08, first used by the release after 26.10.0.** The
 installer, the uninstaller it writes, `dblitz.exe` inside it and the portable
-`dblitz.exe` on the release page are signed by the Windows leg of
-`release.yml`. 26.10.0 and everything before it is unsigned.
+`dblitz.exe` on the release page are signed by the Windows legs of
+`release.yml`: `windows-latest` builds x64, `windows-11-arm` builds Windows on
+ARM natively. The ARM portable exe is uploaded as `dblitz-arm64.exe`, so the
+two legs do not overwrite each other's file. 26.10.0 and everything before it is unsigned.
 
 This is **independent of the updater's minisign key**, like the Apple
 signature: Windows reads the code signature, an installed dblitz reads the
@@ -461,7 +464,7 @@ Certum supports one way to use the key: log in to its desktop program with the
 account's e-mail address and a six-digit code, after which the certificate
 appears in the user's certificate store. A hosted runner has no person and no
 phone, so the login is done by [`ssign`](https://github.com/Le-Syl21/ssign)
-(MIT), an **unofficial** client for the SimplySign service. The Windows leg:
+(MIT), an **unofficial** client for the SimplySign service. Each Windows leg:
 
 1. Fails at once if either secret is empty.
 2. Takes `ssign` v0.1.7, built from the pinned commit
@@ -494,7 +497,7 @@ place: `CERTUM_EMAIL`, and `CERTUM_OTP_URI`, the whole `otpauth://` address
 Certum shows once at activation. Keep the whole address and not only its
 `secret`: `ssign` reads `algorithm`, `digits` and `period` from it, and an
 authenticator that assumes SHA-1 shows six digits that are refused. Only the
-Windows leg names the environment, so the Linux and macOS legs cannot read the
+Windows legs name the environment, so the Linux and macOS legs cannot read the
 secrets. The environment accepts the `main` branch and `v*` tags.
 
 Setting it up, once (not yet done for this repository on 2026-10-08):
@@ -809,8 +812,10 @@ To overwrite a pre-existing non-brew install, use `brew install --cask --force d
 - [ ] Confirm the tap cask bumped to the new version (both `sha256` lines updated)
 - [ ] **The updater manifest exists and covers every platform.** A release with no
       `latest.json` looks entirely green (see the Updater section above), so check
-      it explicitly — expect `darwin-aarch64`, `darwin-x86_64`, `windows-x86_64`
-      and `linux-x86_64` keys, and a non-empty `signature` on each:
+      it explicitly — expect `darwin-aarch64`, `darwin-x86_64`, `windows-x86_64`,
+      `windows-aarch64` and `linux-x86_64` keys, and a non-empty `signature` on
+      each. The `publish` job refuses to publish without all five; this reads the
+      published file:
       ```sh
       curl -sL https://github.com/tstone-1/dblitz/releases/latest/download/latest.json \
         | python3 -m json.tool
@@ -818,13 +823,14 @@ To overwrite a pre-existing non-brew install, use `brew install --cask --force d
 - [ ] An older install actually offers the update (the point of all of the above):
       launch a previous build and confirm the bar appears within ~10 s
 - **Windows:**
-  - [ ] The release has a `-setup.exe`, its `.sig` and `dblitz.exe`, and no
-        `.msi`: `gh release view vYY.M.MICRO --json assets -q '.assets[].name'`
+  - [ ] The release has `_x64-setup.exe` and `_arm64-setup.exe`, their `.sig`
+        files, `dblitz.exe` and `dblitz-arm64.exe`, and no `.msi`:
+        `gh release view vYY.M.MICRO --json assets -q '.assets[].name'`
   - [ ] The published files are signed. CI gates this on the files it built;
         this reads the ones users download. On a Windows computer, after
         downloading both, expect `Valid` and the signer twice:
         ```powershell
-        Get-AuthenticodeSignature .\dblitz.exe, .\dblitz_*_x64-setup.exe |
+        Get-AuthenticodeSignature .\dblitz.exe, .\dblitz-arm64.exe, .\dblitz_*-setup.exe |
           Format-List Path, Status, @{n='Signer';e={$_.SignerCertificate.Subject}}
         ```
   - [ ] Run exe from build output to verify it works

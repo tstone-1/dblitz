@@ -174,7 +174,7 @@ jobs:
           cat > "$RUNNER_TEMP/notes.md" <<'NOTES'
           See [CHANGELOG.md](https://github.com/tstone-1/dblitz/blob/main/CHANGELOG.md) for details.
 
-          **Windows** - take the `-setup.exe`, or the portable `dblitz.exe`. Both are code-signed; the publisher reads *Open Source Developer Timo Stein*. The certificate is new, so SmartScreen can still warn on first launch: choose *More info*, check the publisher, then *Run anyway*. There is no `.msi` after 26.10.0: if you installed dblitz from one, uninstall it once in Windows *Settings* > *Apps* and install the `-setup.exe`. See the [code signing policy](https://github.com/tstone-1/dblitz#code-signing-policy).
+          **Windows** - take the `x64-setup.exe`, or the portable `dblitz.exe`; on Windows on ARM, the `arm64-setup.exe` or `dblitz-arm64.exe`. All of them are code-signed; the publisher reads *Open Source Developer Timo Stein*. The certificate is new, so SmartScreen can still warn on first launch: choose *More info*, check the publisher, then *Run anyway*. There is no `.msi` after 26.10.0: if you installed dblitz from one, uninstall it once in Windows *Settings* > *Apps* and install the `-setup.exe`. See the [code signing policy](https://github.com/tstone-1/dblitz#code-signing-policy).
           NOTES
           gh release create ${{ github.ref_name }} --draft --title "dblitz ${{ github.ref_name }}" --notes-file "$RUNNER_TEMP/notes.md"
           echo "release_id=$(gh release view ${{ github.ref_name }} --json databaseId -q .databaseId)" >> "$GITHUB_OUTPUT"
@@ -186,7 +186,7 @@ jobs:
       # SERIAL, deliberately. tauri-action builds the updater's `latest.json` by
       # read-modify-write against the release asset: download the existing one,
       # merge this platform's entries, delete it, re-upload. That is not atomic.
-      # With four legs running at once — two of them macOS — several can read the
+      # With five legs running at once — two of them macOS, two Windows — several can read the
       # same pre-merge state, and the last upload wins, silently dropping the
       # other platforms' entries. Nothing fails; the published release just
       # quietly updates one platform. Serializing costs wall-clock and nothing
@@ -194,13 +194,26 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          # `signs-windows` marks the one leg that signs with the Certum
+          # `signs-windows` marks the two legs that sign with the Certum
           # certificate. It is a flag and not a path: `github.workspace` is
           # empty inside a matrix, so every path is put together in the step
           # that uses it.
+          #
+          # Windows on ARM is built natively on an ARM runner and not
+          # cross-compiled with `--target aarch64-pc-windows-msvc`: without a
+          # target the output stays in `target/release`, which every Windows
+          # step below reads, and the verify step can run the installer it
+          # checks. tauri-action names the updater entry after the runner's
+          # architecture, `windows-aarch64`. `windows-arch` is the name the
+          # NSIS bundler gives the architecture in the installer's file name.
           - os: windows-latest
             target: ''
             signs-windows: true
+            windows-arch: x64
+          - os: windows-11-arm
+            target: ''
+            signs-windows: true
+            windows-arch: arm64
           - os: macos-latest
             target: aarch64-apple-darwin
             signs-windows: false
@@ -214,15 +227,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     # The Certum login is two secrets of the environment `signing` and of no
     # other place, and the environment accepts the main branch and `v*` tags
-    # only. The Windows leg alone names it; the other three get the empty
+    # only. The two Windows legs alone name it; the other three get the empty
     # string, which is no environment, so they cannot read the login at all.
     environment: ${{ matrix.signs-windows && 'signing' || '' }}
     # One SimplySign code is good for one login. A second job logging in inside
     # the same 30 seconds fails, and repeated failed logins can lock the
     # account, so everything in this repository that signs shares the group
-    # `certum-signing` and nothing in it is cancelled. `sign-rehearsal.yml` is
-    # the other member. The other legs get a group of their own each, so this
-    # adds no waiting to them: `max-parallel: 1` already runs them in turn.
+    # `certum-signing` and nothing in it is cancelled: both Windows legs and
+    # `sign-rehearsal.yml`. Each Windows leg logs in once, minutes after the
+    # other, and removes its session before it ends. The other legs get a
+    # group of their own each, so this adds no waiting to them:
+    # `max-parallel: 1` already runs them in turn.
     #
     # A concurrency group ends at the repository. The same certificate signs
     # other projects, and nothing here can see their runs: do not start a
@@ -236,7 +251,7 @@ jobs:
     # release leg past 20 minutes, so this is deliberately generous -- it exists
     # to stop a hung notarization submission or a wedged runner, not to police
     # build time. Note this bounds ONE leg: the matrix is max-parallel: 1, so
-    # the job's wall clock is up to four of these in series.
+    # the job's wall clock is up to five of these in series.
     timeout-minutes: 90
     permissions:
       # tauri-action uploads installers to the draft release; the DMG staple
@@ -545,6 +560,8 @@ jobs:
       - name: Verify the Windows build is signed
         if: matrix.signs-windows
         shell: pwsh
+        env:
+          WINDOWS_ARCH: ${{ matrix.windows-arch }}
         run: |
           $signer = 'Open Source Developer Timo Stein'
           $conf = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
@@ -552,7 +569,7 @@ jobs:
           $bundle = 'src-tauri/target/release/bundle'
           # Named by version and not found by pattern, so a file of another
           # version left in the folder cannot be taken for this build's.
-          $setup = "$bundle/nsis/${name}_$($conf.version)_x64-setup.exe"
+          $setup = "$bundle/nsis/${name}_$($conf.version)_$($env:WINDOWS_ARCH)-setup.exe"
           if (-not (Test-Path $setup)) { Write-Output "::error::no installer at $setup"; exit 1 }
           $setup = (Resolve-Path $setup).Path
           $msi = @(Get-ChildItem "$bundle/msi" -Filter "${name}_$($conf.version)_*.msi" -ErrorAction SilentlyContinue)
@@ -560,6 +577,20 @@ jobs:
           $portable = "src-tauri/target/release/$name.exe"
           if (-not (Test-Path $portable)) { Write-Output "::error::no executable at $portable"; exit 1 }
           $portable = (Resolve-Path $portable).Path
+
+          # The executable is for the architecture the leg is named for. The
+          # leg builds for its runner's architecture, so a runner label that
+          # resolves to another machine would otherwise publish an x64 build
+          # under the arm64 name, and the updater would hand it to ARM users
+          # as theirs. The machine field of the PE header says which it is.
+          $machines = @{ x64 = 0x8664; arm64 = 0xAA64 }
+          $bytes = [IO.File]::ReadAllBytes($portable)
+          $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+          Write-Output ("$portable machine: 0x{0:X4}" -f $machine)
+          if (-not $machines.ContainsKey($env:WINDOWS_ARCH) -or $machine -ne $machines[$env:WINDOWS_ARCH]) {
+            Write-Output ("::error::$portable is machine 0x{0:X4}, not $env:WINDOWS_ARCH" -f $machine); exit 1
+          }
 
           scripts/verify-signature.ps1 -Signer $signer -Path $setup, $portable
           if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -662,13 +693,25 @@ jobs:
             || { echo "::error::Gatekeeper does not see this as notarized"; exit 1; }
           echo "macOS build verified: Developer ID signed, notarized, stapled."
 
-      # The file the Verify step above read: Tauri signs it where it was built,
-      # before it packs it into the installer.
+      # The file the Verify step above read. The x64 file keeps the name
+      # `dblitz.exe`, which links to the release page already point at; the
+      # ARM file is uploaded as `dblitz-arm64.exe`, so the two legs do not
+      # `--clobber` each other's asset.
       - name: Upload portable exe
-        if: matrix.os == 'windows-latest'
+        if: matrix.signs-windows
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload ${{ github.ref_name }} src-tauri/target/release/dblitz.exe --clobber
+          WINDOWS_ARCH: ${{ matrix.windows-arch }}
+        run: |
+          $portable = 'src-tauri/target/release/dblitz.exe'
+          if ($env:WINDOWS_ARCH -ne 'x64') {
+            $named = Join-Path $env:RUNNER_TEMP "dblitz-$($env:WINDOWS_ARCH).exe"
+            Copy-Item $portable $named -Force
+            $portable = $named
+          }
+          gh release upload $env:GITHUB_REF_NAME $portable --clobber
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
   publish:
     needs: build
@@ -679,6 +722,32 @@ jobs:
       # `gh release edit --draft=false`.
       contents: write
     steps:
+      # A leg that uploads no updater entry is green (BUILD.md, "Post-release
+      # Verification"), and with five legs merging into one latest.json a
+      # missing platform is easy to overlook. Read the manifest on the draft
+      # and refuse to publish unless every platform is in it, with a URL and
+      # a signature. The list is the build matrix: a leg added there is added
+      # here.
+      - name: Check the updater manifest covers every platform
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release download "${{ github.ref_name }}" --repo "${{ github.repository }}" \
+            --pattern latest.json -D manifest
+          missing=""
+          for platform in darwin-aarch64 darwin-x86_64 windows-x86_64 windows-aarch64 linux-x86_64; do
+            jq -e --arg p "$platform" \
+              '.platforms[$p] | (.url // "") != "" and (.signature // "") != ""' \
+              manifest/latest.json > /dev/null || missing="$missing $platform"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::latest.json has no complete entry for:$missing"
+            jq '.platforms | keys' manifest/latest.json
+            exit 1
+          fi
+          echo "latest.json covers every platform."
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

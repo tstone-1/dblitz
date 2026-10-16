@@ -303,8 +303,9 @@ https://github.com/tstone-1/dblitz/releases
 
 Each release ships:
 
-- **Windows** — NSIS installer (`*-setup.exe`) and a portable `dblitz.exe`, both
-  code-signed
+- **Windows** — NSIS installer and a portable exe, all code-signed, for x64
+  (`*_x64-setup.exe`, `dblitz.exe`) and for Windows on ARM
+  (`*_arm64-setup.exe`, `dblitz-arm64.exe`)
 - **macOS** — `.dmg` and `.app.tar.gz` for both Intel (`x64`) and Apple Silicon
   (`aarch64`)
 - **Linux** — `.deb`, `.rpm`, and `.AppImage` (all x86_64)

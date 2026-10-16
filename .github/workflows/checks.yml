@@ -60,12 +60,14 @@ jobs:
     # for clippy and again for the tests; `[profile.dev.build-override]` in
     # Cargo.toml now makes both share one build. With its debug info on too,
     # Linux and Windows hit the previous 45-minute limit. A warm cache is 2-4 min on every OS.
-    # One value covers all three legs, so it is set from the slowest.
+    # One value covers every leg, so it is set from the slowest.
     timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # windows-11-arm because the release builds Windows on ARM natively:
+        # without this leg the first ARM compile of a change is a release tag.
+        os: [ubuntu-latest, windows-latest, windows-11-arm, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

@@ -94,15 +94,28 @@ describe("release workflow Windows signing", () => {
     expect(steps(build).length).toBeGreaterThan(10);
   });
 
-  it("marks exactly one leg as signing, and it is the Windows one", () => {
+  it("marks the two Windows legs as signing, and no other", () => {
     const legs = build.split(/\n {10}- os: /).slice(1);
-    expect(legs.length).toBe(4);
+    expect(legs.length).toBe(5);
     const signing = legs.filter((leg) => /^\s*signs-windows: true$/m.test(leg));
-    expect(signing.length).toBe(1);
-    expect(signing[0].startsWith("windows-latest")).toBe(true);
+    expect(signing.map((leg) => leg.split("\n")[0])).toEqual(["windows-latest", "windows-11-arm"]);
     for (const leg of legs) {
       expect(leg).toMatch(/^\s*signs-windows: (true|false)$/m);
     }
+  });
+
+  it("builds Windows on ARM natively and names each Windows leg's architecture", () => {
+    const legs = build.split(/\n {10}- os: /).slice(1);
+    const arch = (os: string) => {
+      const leg = legs.find((l) => l.startsWith(`${os}\n`));
+      expect(leg).toBeDefined();
+      // No `--target`: the Windows steps read `target/release`, where only a
+      // build for the runner's own architecture lands.
+      expect(leg).toMatch(/^\s*target: ''$/m);
+      return /^\s*windows-arch: (\w+)$/m.exec(leg ?? "")?.[1];
+    };
+    expect(arch("windows-latest")).toBe("x64");
+    expect(arch("windows-11-arm")).toBe("arm64");
   });
 
   it("gives the signing environment to that leg only", () => {
@@ -185,9 +198,28 @@ describe("release workflow Windows signing", () => {
     expect(step).toContain("scripts/verify-signature.ps1 -Signer $signer -Path $setup, $portable");
     expect(step).toContain("'uninstall.exe'");
     expect(step).toContain("scripts/verify-signature.ps1 -Signer $signer -Path $installed.FullName");
+    // The installer is found by the leg's architecture, and the executable
+    // is checked to be built for it.
+    expect(step).toContain("WINDOWS_ARCH: ${{ matrix.windows-arch }}");
+    expect(step).toContain('$setup = "$bundle/nsis/${name}_$($conf.version)_$($env:WINDOWS_ARCH)-setup.exe"');
+    expect(step).toContain("$machines = @{ x64 = 0x8664; arm64 = 0xAA64 }");
+    expect(step).toContain("$machine -ne $machines[$env:WINDOWS_ARCH]");
     // The upload takes the file the step read.
     expect(steps(build)[upload]).toContain("src-tauri/target/release/dblitz.exe");
     expect(step).toContain('$portable = "src-tauri/target/release/$name.exe"');
+  });
+
+  it("uploads one portable exe per Windows leg, under names that do not collide", () => {
+    const upload = steps(build).find((s) => s.startsWith("name: Upload portable exe\n"));
+    expect(upload).toBeDefined();
+    // Both Windows legs, not only the one on `windows-latest`.
+    expect(upload).toMatch(/^ {8}if: matrix\.signs-windows$/m);
+    expect(upload).toContain("WINDOWS_ARCH: ${{ matrix.windows-arch }}");
+    // x64 keeps `dblitz.exe`; any other arch is renamed before the upload,
+    // because `--clobber` would otherwise replace the other leg's file.
+    expect(upload).toContain("if ($env:WINDOWS_ARCH -ne 'x64') {");
+    expect(upload).toContain('"dblitz-$($env:WINDOWS_ARCH).exe"');
+    expect(upload).toContain("gh release upload $env:GITHUB_REF_NAME $portable --clobber");
   });
 });
 

@@ -5,6 +5,15 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.10.2] - Unreleased
+
+### Added
+- **Windows on ARM builds.** Each release now has an `arm64` installer
+  (`dblitz_<version>_arm64-setup.exe`) and a portable `dblitz-arm64.exe`, built
+  natively for ARM and code-signed like the x64 files. Until now an ARM
+  computer ran the x64 build under emulation; an installed ARM build updates to
+  the next ARM build through the in-app updater.
+
 ## [26.10.1] - 2026-10-08
 
 ### Changed

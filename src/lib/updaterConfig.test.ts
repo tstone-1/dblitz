@@ -92,7 +92,7 @@ describe("release workflow updater wiring", () => {
   it("serializes the build matrix", () => {
     // tauri-action builds latest.json by read-modify-write against the release
     // asset: download the existing one, merge this platform's entries, delete
-    // it, re-upload. dblitz has FOUR concurrent legs, two of which are macOS,
+    // it, re-upload. dblitz has FIVE legs, two macOS and two Windows,
     // so parallel runs can both read the pre-merge state and the later upload
     // silently drops the earlier platform's entry. Nothing fails; the release
     // just quietly updates one platform.
@@ -105,6 +105,21 @@ describe("release workflow updater wiring", () => {
     // and no manifest, and the only symptom is users never updating.
     expect(workflow).toContain("TAURI_SIGNING_PRIVATE_KEY:");
     expect(workflow).toContain("TAURI_SIGNING_PRIVATE_KEY_PASSWORD:");
+  });
+
+  it("refuses to publish a release whose manifest is missing a platform", () => {
+    // A leg that uploads no updater entry is green, so the manifest is read
+    // back on the draft before `publish` flips it.
+    const publish = workflow.slice(workflow.indexOf("\n  publish:"), workflow.indexOf("\n  update-tap:"));
+    const check = publish.indexOf("- name: Check the updater manifest covers every platform");
+    const flip = publish.indexOf("- name: Publish release");
+    expect(check).toBeGreaterThan(-1);
+    expect(flip).toBeGreaterThan(check);
+    expect(publish).toContain(
+      "for platform in darwin-aarch64 darwin-x86_64 windows-x86_64 windows-aarch64 linux-x86_64; do",
+    );
+    expect(publish).toContain('(.url // "") != "" and (.signature // "") != ""');
+    expect(publish).toContain("exit 1");
   });
 
   it("points the Windows manifest entry at the NSIS installer", () => {
