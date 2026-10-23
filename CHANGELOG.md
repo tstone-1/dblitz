@@ -5,7 +5,7 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
-## [26.10.3] - Unreleased
+## [26.10.3] - 2026-10-23
 
 ### Changed
 - **The frontend runs on SvelteKit 3** (with `@sveltejs/adapter-static` 4).
@@ -13,6 +13,20 @@ Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
   from `svelte.config.js` into the `sveltekit()` plugin in `vite.config.js`,
   `$lib` imports are `#lib` subpath imports declared in `package.json`, and
   `$app/environment` is `$app/env`.
+- **Parquet files are read by DuckDB 2.0** (the `duckdb` crate 1.20000.0, up
+  from DuckDB 1.5). Tauri is updated to 2.12.5, `rust_xlsxwriter` to 0.101.0,
+  and the frontend dependencies to their latest compatible releases.
+
+### Security
+- **The in-app updater's certificate verification is updated** to
+  rustls-webpki 0.103.16, which fixes RUSTSEC-2026-0382 (distrusted
+  intermediate certificates could be accepted). The bundled root certificate
+  lists move to 1.0.11 (RUSTSEC-2026-0381 and 0383).
+- **XLSX export and the DuckDB build use `zip` 9**, which fixes
+  RUSTSEC-2026-0367 to 0369. These advisories concern extracting archives,
+  which dblitz does not do in either place. The updater plugin still depends on
+  `zip` 4, for which no fixed release of the plugin exists yet; an update
+  payload is only unpacked after its signature has been verified.
 
 ## [26.10.2] - 2026-10-16
 

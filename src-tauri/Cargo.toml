@@ -1,6 +1,6 @@
 [package]
 name = "dblitz"
-version = "26.10.2"
+version = "26.10.3"
 description = "Read-only SQLite and Parquet browser"
 # Matches the repository's LICENSE file; declared here so `cargo` and any
 # generated metadata carry it too.
@@ -20,21 +20,21 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.40.1", features = ["bundled", "hooks", "column_decltype"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "hooks", "column_decltype"] }
 # Parquet files are read through an embedded DuckDB (src/pq/). `bundled` alone
 # has no Parquet reader - the `parquet` feature is what links it in. Measured
 # 2026-09-28 on a 10-core M-series Mac: +35.7 MB to a stripped binary and a
 # 147 s cold build (1,009 s of CPU), so a cold CI leg grows by several minutes.
-duckdb = { version = "1.10505.0", features = ["bundled", "parquet"] }
+duckdb = { version = "1.20000.0", features = ["bundled", "parquet"] }
 regex = "1.13"
 sha2 = "0.11"
 hex = "0.4"
 dirs = "7"
-parking_lot = "0.12"
+parking_lot = "0.13"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rust_xlsxwriter = "0.99.0"
-tauri-plugin-opener = "2.5.4"
+rust_xlsxwriter = "0.101.0"
+tauri-plugin-opener = "2.7.2"
 # In-app updater. Fetches the `latest.json` manifest published by release.yml,
 # verifies the payload against `plugins.updater.pubkey` in tauri.conf.json
 # (minisign — the ONLY cryptographic control on the update path, since dblitz
