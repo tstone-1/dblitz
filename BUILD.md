@@ -667,19 +667,11 @@ leg reads every signature back.
     lines, `git diff --stat -- src-tauri/Cargo.lock` must list it. On
     2026-09-30 `cargo update` printed 55 updates and exited 0 three times in a
     row without writing the file.
-  - **If it fails with `failed to select a version for the requirement zip`,**
-    the yanked `zip` releases are the cause: since 2026-10-13 every `zip`
-    except 9.0.3 is yanked, and `libduckdb-sys` (build script) and
-    `rust_xlsxwriter` still require `zip` 6 and 8. A version already in the
-    lockfile may stay there; only a fresh resolve refuses it. So update every
-    other crate by name, which keeps `zip` locked:
-    ```sh
-    cd src-tauri
-    cargo update $(python3 -c 'import re;s=open("Cargo.lock").read();print(" ".join(f"-p {n}@{v}" for n,v,r in re.findall(r"name = \"([^\"]+)\"\nversion = \"([^\"]+)\"\n(source = \"registry)?",s) if r and n!="zip"))')
-    ```
-    Drop this once both crates accept `zip` 9: a bare `cargo update` then
-    succeeds again.
   - Review output for major version bumps — check changelogs before proceeding.
+    **The `duckdb` crate hides DuckDB's major in its minor:** `1.10505` is
+    DuckDB 1.5.5 and `1.20000` is DuckDB 2.0, so cargo treats an engine major
+    as a compatible update and takes it without asking. Read the `duckdb`
+    line of the output as a possible major.
 - [ ] Update npm dependencies: `npm update && npm outdated`
   - `npm outdated` shows remaining major-version updates. Review individually.
 - [ ] No Rust vulnerabilities: `cd src-tauri && cargo audit` (install: `cargo install cargo-audit`)
@@ -783,7 +775,11 @@ locally — CI does. `npx tauri build` is only for a local desktop artifact.
 **Release hygiene checks:**
 - [ ] Local tag matches the version files exactly: `git describe --tags --exact-match`
 - [ ] GitHub has the pushed tag: `git ls-remote --tags origin vYY.M.MICRO`
-- [ ] Release workflow succeeded end-to-end: `gh run watch <run-id> --exit-status`
+- [ ] Release workflow succeeded end-to-end: `gh run watch <run-id> --exit-status`.
+  `gh run watch` can fail with an HTTP 401 from the annotations API while the
+  run itself is healthy; treat that as no answer and poll
+  `gh run view <run-id> --json status,conclusion,jobs` until `status` is
+  `completed`, then check `conclusion` and every job.
 - [ ] Published (not draft) GitHub release exists for the tag: `gh release view vYY.M.MICRO --json isDraft`
 
 > **Gotcha — notarization returns HTTP 403 "A required agreement is missing
@@ -882,7 +878,7 @@ To overwrite a pre-existing non-brew install, use `brew install --cask --force d
 ```bash
 # Full release process (replace x.y.z with actual version)
 rustup update stable
-cd src-tauri && cargo update; echo "exit: $?"; cd ..   # unfiltered; on the zip error see step 1
+cd src-tauri && cargo update; echo "exit: $?"; cd ..   # unfiltered; read the exit code
 git diff --stat -- src-tauri/Cargo.lock   # must list the lockfile if cargo printed updates
 npm update && npm outdated
 npm audit
