@@ -1,7 +1,7 @@
 {
   "name": "dblitz",
   "version": "26.10.4",
-  "description": "Read-only SQLite and Parquet browser",
+  "description": "Read-only browser for SQLite, Parquet, CSV and JSON files",
   "type": "module",
   "imports": {
     "#lib": "./src/lib",

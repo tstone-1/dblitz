@@ -27,7 +27,7 @@ advisory and the changelog, say so and you will get it.
 
 ## What is in scope
 
-dblitz is a **read-only** viewer for SQLite and Parquet files that opens files
+dblitz is a **read-only** viewer for SQLite, Parquet, CSV and JSON files that opens files
 you point it at. The things most worth reporting follow from that:
 
 - **Anything that lets dblitz write.** The read-only guarantee is enforced in
