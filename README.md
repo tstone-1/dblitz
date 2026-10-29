@@ -2,7 +2,10 @@
 
 [![Checks][checks-badge]][checks-url]
 
-A fast, read-only SQLite and Parquet browser. Built with Tauri, Svelte, and Rust.
+A fast, read-only browser for SQLite, Parquet, CSV and JSON files. Built with Tauri,
+Svelte, and Rust.
+
+![Browse Data: a 2,500-row customers table filtered to one country and sorted by join date](docs/images/browse.png)
 
 ## Why dblitz?
 
@@ -11,7 +14,7 @@ a quick look at a database file and wished for a tool that's strictly read-only,
 persists every view setting per file, and is engineered for large tables —
 that's dblitz.
 
-It's a single-purpose viewer: **SQLite and Parquet files, read-only only.** If
+It's a single-purpose viewer: **SQLite, Parquet, CSV and JSON files, read-only.** If
 you need to edit data, DB Browser for SQLite is excellent. If you need to talk
 to many different database engines, DBeaver covers you. dblitz is for
 inspecting local data files quickly and safely.
@@ -185,6 +188,25 @@ Parquet: opening (dblitz counts each SQLite table at open; Parquet keeps the
 count in its footer), building a filtered or sorted view, and whole-table
 queries in the SQL editor, where DuckDB reads only the columns a query uses.
 
+### CSV and JSON files
+
+CSV, TSV and JSON files open the same way as Parquet: one table named `data`,
+read by DuckDB, with the same read-only layers. They have no magic bytes, so
+dblitz recognises them by extension: `.csv` and `.tsv` (the delimiter and the
+header row are detected, and the Structure tab says what was found), and
+`.json`, `.jsonl` and `.ndjson` (an array of objects, or one object per line).
+Column types are DuckDB's guess from the data; a nested JSON object shows as a
+`STRUCT`, a JSON array as a `LIST`.
+
+dblitz reads the whole file when it opens it, so a large CSV takes longer to
+open than a Parquet file of the same data, and from then on pages, filters and
+sorts like one. The SQL editor reads the file itself for each query.
+
+The installer does not make dblitz the app for these files. On Windows,
+**Settings > Show dblitz in "Open with"** adds it to Explorer's "Open with" menu
+for them, and your default app stays the default; the uninstaller removes the
+entries. On macOS, dblitz is listed in Finder's "Open With" menu.
+
 ### Remembers what you set
 
 For every database you open, dblitz persists:
@@ -207,7 +229,8 @@ and in the recent-files dropdown, so PROD and QA stay visually distinct.
 ## Features
 
 **Browsing**
-- Open `.db`, `.sqlite`, `.sqlite3`, `.db3` — plus an **All Files** filter in the
+- Open `.db`, `.sqlite`, `.sqlite3`, `.db3`, `.parquet`, `.csv`, `.tsv`,
+  `.json`, `.jsonl` and `.ndjson` — plus an **All Files** filter in the
   Open dialog, because a SQLite database is identified by its header, not its
   name (`data.bin` and `cache.dat` open fine)
 - Virtualized data grid; rowid-indexed seek paging for unfiltered scrolling in
@@ -239,8 +262,20 @@ and in the recent-files dropdown, so PROD and QA stay visually distinct.
 **Schema and SQL**
 - Browse tables, columns, primary keys, defaults, and raw `CREATE` SQL for every
   object in `sqlite_master` (tables, indexes, views, triggers)
-- SELECT-only SQL editor with CodeMirror syntax highlighting and schema-aware
-  autocomplete (table and column names)
+- SELECT-only SQL editor with syntax highlighting and suggestions that fit the
+  cursor position: tables after `FROM`/`JOIN`, a table's columns after
+  `alias.`, the columns of the tables in the query first (with their type),
+  and functions with their arguments
+- Errors are underlined while you type, with the message Execute would show,
+  before anything runs; a misspelt name gets "Replace with ..." fixes, and
+  Execute stays disabled until the query is valid
+- Several queries in one editor: Execute runs the selection, or the
+  highlighted statement under the cursor
+
+  ![Typing a join with column suggestions, then running it](docs/images/sql-editor.gif)
+
+  ![A misspelt column underlined before the query runs, with a Replace with total_eur fix](docs/images/sql-check.png)
+
 - Results capped at 50,000 rows with a clear truncation message
 - SQL history persisted in the WebView's local storage
 
@@ -276,7 +311,8 @@ Cmd on macOS, Ctrl elsewhere; dblitz labels them for the platform you are on.
 
 | Shortcut | What it does |
 |----------|--------------|
-| Ctrl+Enter | Run the statement in the SQL editor |
+| Ctrl+Enter | Run the selection, or the statement under the cursor, in the SQL editor |
+| Ctrl+Space | Show suggestions in the SQL editor (Ctrl on every platform); Tab accepts one |
 | Ctrl+F | Find text in the grid |
 | F3 or Ctrl+G | Next match (Shift for the previous one) |
 | Ctrl+Shift+F | Open the column finder (Browse Data) |
@@ -434,8 +470,12 @@ SQL query history is stored in the WebView's `localStorage` under the key
 
 See [BUILD.md](BUILD.md) for prerequisites, dev workflow, code-quality checks,
 build commands, and the release procedure. The Architecture section of
-[AGENTS.md](AGENTS.md) describes how the backend is laid out — the `db`
-submodules, the rowid paging and caching rules, and the four read-only layers.
+[docs/agent-notes.md](docs/agent-notes.md) describes how the backend is laid
+out — the `db` submodules, the rowid paging and caching rules, and the four
+read-only layers; [AGENTS.md](AGENTS.md) indexes it.
+
+The screenshots show a synthetic coffee-roaster database, every row invented;
+`uv run scripts/make-demo-db.py` rebuilds the same file from a fixed seed.
 
 ## Contributing
 

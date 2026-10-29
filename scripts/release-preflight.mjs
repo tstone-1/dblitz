@@ -122,10 +122,43 @@ export function checkReleaseContract(input) {
     return failures;
   }
 
+  failures.push(...checkVersionFiles(version, input, ` (from tag ${input.tag})`));
+
+  // The release notes point readers at CHANGELOG.md, so a heading still marked
+  // Unreleased publishes a release that documents itself as unreleased.
+  const heading = new RegExp(
+    `^## \\[${version.replace(/\./g, "\\.")}\\] - (.+)$`,
+    "m",
+  ).exec(input.changelog);
+  if (!heading) {
+    failures.push(`CHANGELOG.md has no "## [${version}] - <date>" heading.`);
+  } else if (!/^\d{4}-\d{2}-\d{2}$/.test(heading[1].trim())) {
+    failures.push(
+      `CHANGELOG.md heading for ${version} reads "${heading[1].trim()}"; it must be a YYYY-MM-DD release date.`,
+    );
+  }
+
+  return failures;
+}
+
+/**
+ * Compare `version` against the five version files (six sites), without the
+ * tag and changelog checks. Shared with `scripts/bump-version.mjs`, which runs
+ * it on what it just wrote.
+ *
+ * @param {string} version
+ * @param {Omit<ReleaseContractInput, "tag" | "changelog">} input
+ * @param {string} [source] Appended to each message, e.g. ` (from tag v26.8.2)`.
+ * @returns {string[]}
+ */
+export function checkVersionFiles(version, input, source = "") {
+  /** @type {string[]} */
+  const failures = [];
+
   /** @type {(label: string, actual: string | null | undefined) => void} */
   const expect = (label, actual) => {
     if (actual !== version) {
-      failures.push(`${label} is ${actual ?? "missing"}, expected ${version} (from tag ${input.tag}).`);
+      failures.push(`${label} is ${actual ?? "missing"}, expected ${version}${source}.`);
     }
   };
 
@@ -176,20 +209,6 @@ export function checkReleaseContract(input) {
   const tauri = parseJson("src-tauri/tauri.conf.json", input.tauriConf);
   if (tauri) expect("src-tauri/tauri.conf.json version", tauri.version);
 
-  // The release notes point readers at CHANGELOG.md, so a heading still marked
-  // Unreleased publishes a release that documents itself as unreleased.
-  const heading = new RegExp(
-    `^## \\[${version.replace(/\./g, "\\.")}\\] - (.+)$`,
-    "m",
-  ).exec(input.changelog);
-  if (!heading) {
-    failures.push(`CHANGELOG.md has no "## [${version}] - <date>" heading.`);
-  } else if (!/^\d{4}-\d{2}-\d{2}$/.test(heading[1].trim())) {
-    failures.push(
-      `CHANGELOG.md heading for ${version} reads "${heading[1].trim()}"; it must be a YYYY-MM-DD release date.`,
-    );
-  }
-
   return failures;
 }
 
@@ -239,14 +258,18 @@ export function readReleaseFiles(root, readText) {
  * `import.meta.main` (Node >= 24.2; .nvmrc pins 24) answers directly, with no
  * path comparison to get wrong. The fallback is kept for an off-pin runtime and
  * compares REAL paths, which is the closest a string comparison gets to right.
+ *
+ * Exported for `bump-version.mjs`, which passes its own `import.meta`.
+ *
+ * @param {ImportMeta} [meta]
  */
-function isMainModule() {
-  if (typeof import.meta.main === "boolean") return import.meta.main;
+export function isMainModule(meta = import.meta) {
+  if (typeof meta.main === "boolean") return meta.main;
   if (!process.argv[1]) return false;
   try {
     return (
       realpathSync(process.argv[1]) ===
-      realpathSync(fileURLToPath(import.meta.url))
+      realpathSync(fileURLToPath(meta.url))
     );
   } catch {
     return false;

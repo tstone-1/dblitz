@@ -19,3 +19,6 @@ docs/reviews/
 src-tauri/icons/64x64.png
 src-tauri/icons/android/
 src-tauri/icons/ios/
+
+# Output of scripts/make-demo-db.py
+/demo/

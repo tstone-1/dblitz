@@ -563,7 +563,7 @@ impl ConfigStore {
 }
 
 // Thin Tauri-command-facing wrappers over the OS-default store. Their
-// signatures are the app's stable config API (called from lib.rs commands);
+// signatures are the app's stable config API (called from commands.rs);
 // they exist only to bind the OS config dir so callers don't have to.
 
 pub fn load_config(db_path: &str) -> FileConfig {

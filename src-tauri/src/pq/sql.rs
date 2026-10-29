@@ -15,26 +15,90 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::lockdown::{LockedDb, Refusal};
 use super::sql_literal;
-use crate::db::SqlResult;
+use crate::db::{SqlCheck, SqlResult};
 
 /// Same cap and truncation rule as the SQLite tab (`db::sql`).
 const SQL_RESULT_LIMIT: usize = 50_000;
 
+/// The message Execute shows for a classifier refusal. `validate_sql` shows
+/// the same text, so the editor's live check reads exactly like the error
+/// Execute would have produced.
+fn refusal_message(refusal: Refusal) -> String {
+    match refusal {
+        Refusal::Invalid(e) => e,
+        Refusal::NotOne(n) => {
+            format!("dblitz runs one statement at a time - this query has {n}. Select the one to run.")
+        }
+        Refusal::NotSelect => "dblitz is a read-only viewer - only SELECT queries (including FROM-first, DESCRIBE and SUMMARIZE) can run on a Parquet file.".to_string(),
+    }
+}
+
+/// The editor's live check: the classifier alone, which prepares (and so
+/// parses and binds) the statement on the locked side connection without
+/// running it.
+pub(crate) fn validate_sql(db: &LockedDb, sql: &str) -> SqlCheck {
+    let trimmed = sql.trim();
+    if trimmed.is_empty() {
+        return SqlCheck::ok();
+    }
+    let lead = sql.len() - sql.trim_start().len();
+    match db.classify(trimmed) {
+        Ok(()) => SqlCheck::ok(),
+        Err(r) => {
+            let message = refusal_message(r);
+            let offset = duckdb_error_offset(trimmed, &message).map(|o| lead + o);
+            SqlCheck::problem(sql, message, offset)
+        }
+    }
+}
+
+/// Where a DuckDB error points, as a byte offset into `sql`.
+///
+/// The C API has no error position, but the message ends with an excerpt and
+/// a marker under the offending token:
+///
+/// ```text
+/// LINE 3:   nosuch
+///           ^^^^^^
+/// ```
+///
+/// The marker's column counts characters, and a long line is shown as a
+/// window starting (and possibly ending) with `...`. The excerpt is matched
+/// against the real source line before the column is trusted, so a message in
+/// some other shape yields `None` rather than an underline in the wrong place.
+pub(crate) fn duckdb_error_offset(sql: &str, message: &str) -> Option<usize> {
+    let lines: Vec<&str> = message.lines().collect();
+    let (i, rest) = lines
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, l)| l.strip_prefix("LINE ").map(|r| (i, r)))?;
+    let (num, excerpt) = rest.split_once(": ")?;
+    let line_no: usize = num.parse().ok()?;
+    let marker = lines.get(i + 1)?;
+    let prefix_chars = "LINE ".len() + num.len() + ": ".len();
+    let caret_col = marker
+        .chars()
+        .position(|c| c == '^')?
+        .checked_sub(prefix_chars)?;
+
+    let (excerpt, col_in_excerpt) = match excerpt.strip_prefix("...") {
+        Some(e) => (e, caret_col.checked_sub(3)?),
+        None => (excerpt, caret_col),
+    };
+    let excerpt = excerpt.strip_suffix("...").unwrap_or(excerpt);
+
+    let source_line = sql.split('\n').nth(line_no.checked_sub(1)?)?;
+    let line_start = source_line.as_ptr() as usize - sql.as_ptr() as usize;
+    let at = source_line.find(excerpt)?;
+    let token = source_line[at..].char_indices().nth(col_in_excerpt)?.0;
+    Some(line_start + at + token)
+}
+
 pub(crate) fn execute_sql(db: &LockedDb, sql: &str, generation: &AtomicU64) -> SqlResult {
     let sql = sql.trim();
-    match db.classify(sql) {
-        Ok(()) => {}
-        Err(Refusal::Invalid(e)) => return SqlResult::error(e),
-        Err(Refusal::NotOne(n)) => {
-            return SqlResult::error(format!(
-                "dblitz runs one statement at a time - this query has {n}."
-            ))
-        }
-        Err(Refusal::NotSelect) => {
-            return SqlResult::error(
-                "dblitz is a read-only viewer - only SELECT queries (including FROM-first, DESCRIBE and SUMMARIZE) can run on a Parquet file.".to_string(),
-            )
-        }
+    if let Err(r) = db.classify(sql) {
+        return SqlResult::error(refusal_message(r));
     }
     let conn = db.conn();
     let source = format!("query({})", sql_literal(sql));
@@ -134,7 +198,12 @@ mod tests {
     fn db(rows: u64) -> LockedDb {
         let dir = scratch_dir("sql");
         let file = fixture(&dir, rows);
-        LockedDb::open(file.to_str().unwrap(), dir.join("spill").to_str().unwrap()).unwrap()
+        LockedDb::open(
+            file.to_str().unwrap(),
+            crate::pq::FileFormat::Parquet,
+            dir.join("spill").to_str().unwrap(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -178,5 +247,135 @@ mod tests {
     fn a_syntax_error_is_duckdbs_own_message() {
         let r = execute_sql(&db(10), "SELEC 1", &AtomicU64::new(0));
         assert!(r.error.unwrap().contains("syntax error"));
+    }
+
+    #[test]
+    fn validate_matches_execute_and_never_runs_the_statement() {
+        let db = db(10);
+        let gen = AtomicU64::new(0);
+        for sql in [
+            "SELECT nosuch FROM data",
+            "SELEC 1",
+            "CREATE TABLE t AS SELECT 1",
+            "SELECT 1; SELECT 2",
+        ] {
+            let check = validate_sql(&db, sql);
+            assert!(check.error.is_some(), "{sql:?} should not pass the check");
+            assert_eq!(check.error, execute_sql(&db, sql, &gen).error, "{sql:?}");
+        }
+        assert_eq!(validate_sql(&db, "SELECT id FROM data"), SqlCheck::ok());
+        // The offset indexes the text as sent, leading whitespace included.
+        let check = validate_sql(
+            &db,
+            "
+  SELECT nosuch FROM data",
+        );
+        assert_eq!(check.offset, Some(10));
+        // Binding without running: an endless range validates at once.
+        let started = std::time::Instant::now();
+        assert_eq!(
+            validate_sql(&db, "SELECT count(*) FROM range(9223372036854775807)"),
+            SqlCheck::ok()
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn the_duckdb_error_marker_becomes_an_offset_on_the_right_line() {
+        // Messages captured from DuckDB itself (2026-10-29).
+        let m = "Binder Error: Referenced column \"nosuch\" not found in FROM clause!
+Candidate bindings: \"name\"
+
+LINE 3:   nosuch
+          ^^^^^^";
+        let sql = "SELECT id,
+  -- note
+  nosuch
+FROM data";
+        let at = duckdb_error_offset(sql, m).unwrap();
+        assert_eq!(&sql[at..at + 6], "nosuch");
+
+        let m = "Binder Error: x
+
+LINE 1: SELECT 'äöü', nosuch FROM data
+                      ^^^^^^";
+        let sql = "SELECT 'äöü', nosuch FROM data";
+        let at = duckdb_error_offset(sql, m).unwrap();
+        assert_eq!(&sql[at..at + 6], "nosuch");
+    }
+
+    #[test]
+    fn a_windowed_excerpt_is_found_in_the_long_line() {
+        let sql = format!("SELECT {} nosuch FROM data", "id + ".repeat(60));
+        let r = validate_sql(&db(10), &sql);
+        assert!(r.error.as_deref().unwrap().contains("LINE 1: ..."), "{r:?}");
+        let at = r.offset.unwrap();
+        assert_eq!(&sql[at..at + 6], "nosuch");
+    }
+
+    #[test]
+    fn a_marker_that_does_not_match_the_source_gives_no_offset() {
+        // The excerpt is not in the statement: guessing would underline the
+        // wrong text, so the answer is None.
+        let m = "Parser Error: x
+
+LINE 1: SELECT other
+        ^^^^^";
+        assert_eq!(duckdb_error_offset("SELEC 1", m), None);
+        assert_eq!(
+            duckdb_error_offset("SELEC 1", "Parser Error: no excerpt at all"),
+            None
+        );
+        assert_eq!(
+            duckdb_error_offset(
+                "SELEC 1",
+                "LINE 9: SELEC 1
+        ^"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn every_function_the_editor_suggests_exists_in_the_bundled_duckdb() {
+        let list: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../src/lib/components/sqlFunctions.json"
+        ))
+        .unwrap();
+        let names: Vec<&str> = list["duckdb"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.len() > 40,
+            "the list should not be empty or truncated"
+        );
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        // `coalesce` and `ifnull` are parser special forms, absent from the
+        // catalog, so a name the catalog lacks is asked of the parser: an
+        // arity complaint means it exists, "does not exist" means it does not.
+        let exists = |name: &str| -> bool {
+            let in_catalog = conn
+                .query_row(
+                    "SELECT count(*) FROM duckdb_functions() WHERE function_name = ?",
+                    [name],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+                > 0;
+            in_catalog
+                || match conn.prepare(&format!("SELECT {name}(1, 2)")) {
+                    Ok(_) => true,
+                    Err(e) => !e.to_string().contains("does not exist"),
+                }
+        };
+        let missing: Vec<&str> = names.iter().copied().filter(|n| !exists(n)).collect();
+        assert!(missing.is_empty(), "not in this DuckDB: {missing:?}");
+        assert!(
+            !exists("no_such_function_xyz"),
+            "control: the lookup can say no"
+        );
     }
 }

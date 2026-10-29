@@ -9,8 +9,9 @@ import {
   loadViewConfig,
   saveViewConfig as saveViewConfigCmd,
   getColumns,
+  sqlEngine as sqlEngineCmd,
 } from "#lib/ipc.ts";
-import type { TableInfo, ColumnInfo, FileConfig, ViewConfig } from "#lib/ipc.ts";
+import type { TableInfo, ColumnInfo, FileConfig, ViewConfig, SqlEngine } from "#lib/ipc.ts";
 
 export interface SqlHistoryEntry {
   sql: string;
@@ -72,6 +73,8 @@ export const appState = $state({
   notice: null as string | null,
   tableColumns: {} as Record<string, string[]>, // table name -> column names for autocomplete
   tableColumnTypes: {} as Record<string, Record<string, string>>, // table -> col -> declared type (for xlsx export)
+  // Which engine answers the SQL tab; picks the editor's function list.
+  sqlEngine: "sqlite" as SqlEngine,
   fileConfig: { tables: {}, tint: null, label: null } as FileConfig,
   sqlHistory: loadSqlHistory(),
   theme: loadTheme(),
@@ -114,6 +117,9 @@ async function runOpenDatabase(path: string, request: number) {
         typeMap[t.name] = tmap;
       } catch { /* best-effort: autocomplete works without columns */ }
     }));
+    // Best-effort like the columns above: a failure leaves the SQLite
+    // function list in the editor, which costs suggestions, not correctness.
+    const engine: SqlEngine = (await sqlEngineCmd().catch(() => null)) ?? "sqlite";
     if (request !== databaseRequestGeneration) return;
 
     // Single synchronous publish - auto-select effect sees consistent state.
@@ -124,6 +130,7 @@ async function runOpenDatabase(path: string, request: number) {
     appState.fileConfig = config;
     appState.tableColumns = colMap;
     appState.tableColumnTypes = typeMap;
+    appState.sqlEngine = engine;
     // Bump BEFORE `tables` so that by the time the reset+auto-select effect
     // fires (Svelte batches effects to after this synchronous publish), the
     // new generation is already visible alongside the fresh tables.

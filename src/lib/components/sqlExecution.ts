@@ -33,8 +33,12 @@ interface ExecutedQuery {
 export interface SqlExecutionDeps {
   /** Current database-open generation. Inject `() => appState.dbOpenGeneration`. */
   getGeneration: () => number;
-  /** Raw editor text. */
+  /** The text to run: the editor selection when there is one, else all of it. */
   getSql: () => string;
+  /** Why the text cannot run, from the editor's live check of THIS text, or
+   *  null. A known-bad statement is not sent: Execute would refuse it with the
+   *  same message, and the run would replace the previous result with it. */
+  getBlockReason?: () => string | null;
   isRunning: () => boolean;
   setRunning: (running: boolean) => void;
   setResult: (result: SqlResult | null) => void;
@@ -79,6 +83,7 @@ export function createSqlExecution(deps: SqlExecutionDeps): () => Promise<void> 
     // button is disabled) would fire a concurrent invoke and a duplicate
     // history entry. Ctrl+Enter while running is simply ignored (not a cancel).
     if (deps.isRunning()) return;
+    if (deps.getBlockReason?.()) return;
     const trimmed = deps.getSql().trim();
     if (!trimmed) return;
 

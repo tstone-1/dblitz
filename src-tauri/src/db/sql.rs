@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use super::types::{DbState, SqlResult};
+use super::types::{DbState, SqlCheck, SqlResult};
 use super::util::read_row;
 
 // Execute SQL materializes the whole result set in one IPC round-trip (Rust
@@ -79,6 +79,94 @@ fn is_attach_or_detach(sql: &str) -> bool {
     after("attach") || after("detach")
 }
 
+/// Why a statement cannot run, found without running it.
+#[derive(Debug, PartialEq)]
+pub(crate) struct SqlProblem {
+    pub message: String,
+    /// Byte offset of the offending token in the TRIMMED statement, when the
+    /// engine reports one (SQLite >= 3.38 does for syntax and name errors).
+    pub offset: Option<usize>,
+}
+
+impl SqlProblem {
+    fn plain(message: &str) -> Self {
+        SqlProblem {
+            message: message.to_string(),
+            offset: None,
+        }
+    }
+}
+
+/// Every gate a statement passes before it may step, in one place, shared by
+/// `execute_sql` and `validate_sql`. The live check in the editor is only
+/// worth having if it can never disagree with Execute, and two copies of these
+/// gates would drift.
+///
+/// `sql` must already be trimmed. The returned statement has not stepped.
+pub(crate) fn prepare_checked<'c>(
+    conn: &'c rusqlite::Connection,
+    sql: &str,
+) -> Result<rusqlite::Statement<'c>, SqlProblem> {
+    // ATTACH/DETACH don't modify the main database file, so sqlite3's
+    // `stmt.readonly()` reports them as read-only. But they let users
+    // bring other database files into the connection — which violates
+    // dblitz's "this viewer cannot reach beyond the file you opened"
+    // promise. Reject them at the input boundary before prepare.
+    if is_attach_or_detach(sql) {
+        return Err(SqlProblem::plain(
+            "dblitz is a read-only viewer - ATTACH and DETACH are not allowed.",
+        ));
+    }
+
+    let stmt = conn.prepare(sql).map_err(|e| match e {
+        // rusqlite's Display for this variant appends the whole statement
+        // ("... in <sql> at offset N"); the editor underlines the token
+        // instead, so the message alone is the readable form.
+        rusqlite::Error::SqlInputError { msg, offset, .. } => SqlProblem {
+            message: msg,
+            offset: usize::try_from(offset).ok(),
+        },
+        rusqlite::Error::MultipleStatement => {
+            SqlProblem::plain(
+                "dblitz runs one statement at a time - this query has more than one. Select the one to run.",
+            )
+        }
+        other => SqlProblem {
+            message: other.to_string(),
+            offset: None,
+        },
+    })?;
+
+    if !stmt.readonly() {
+        return Err(SqlProblem::plain(
+            "dblitz is a read-only viewer - write statements (INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, etc.) are not supported.",
+        ));
+    }
+    Ok(stmt)
+}
+
+/// Check a statement without running it: the editor's live error check.
+///
+/// Returns `None` when no verdict is available right now: no database open,
+/// or the SQL tab's connection is busy running a query. It takes the lock with
+/// `try_lock` on purpose, so a check typed during a 30-second query answers at
+/// once instead of queueing behind it, and can never delay Execute by more
+/// than one prepare.
+pub fn validate_sql(state: &DbState, sql: &str) -> Option<SqlCheck> {
+    let guard = state.aux_conn.try_lock()?;
+    let conn = guard.as_ref()?;
+    let trimmed = sql.trim();
+    if trimmed.is_empty() {
+        return Some(SqlCheck::ok());
+    }
+    let lead = sql.len() - sql.trim_start().len();
+    let check = match prepare_checked(conn, trimmed) {
+        Ok(_) => SqlCheck::ok(),
+        Err(p) => SqlCheck::problem(sql, p.message, p.offset.map(|o| lead + o)),
+    };
+    Some(check)
+}
+
 pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
     // The SQL tab runs on the SECONDARY connection, not the Browse Data one.
     // Every command used to share one connection, so an ad-hoc `SELECT 1`
@@ -95,27 +183,10 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
 
     let trimmed = sql.trim();
 
-    // ATTACH/DETACH don't modify the main database file, so sqlite3's
-    // `stmt.readonly()` reports them as read-only. But they let users
-    // bring other database files into the connection — which violates
-    // dblitz's "this viewer cannot reach beyond the file you opened"
-    // promise. Reject them at the input boundary before prepare.
-    if is_attach_or_detach(trimmed) {
-        return SqlResult::error(
-            "dblitz is a read-only viewer - ATTACH and DETACH are not allowed.".to_string(),
-        );
-    }
-
-    let mut stmt = match conn.prepare(trimmed) {
+    let mut stmt = match prepare_checked(conn, trimmed) {
         Ok(s) => s,
-        Err(e) => return SqlResult::error(e.to_string()),
+        Err(p) => return SqlResult::error(p.message),
     };
-
-    if !stmt.readonly() {
-        return SqlResult::error(
-            "dblitz is a read-only viewer - write statements (INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, etc.) are not supported.".to_string(),
-        );
-    }
 
     let col_count = stmt.column_count();
     let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
@@ -515,7 +586,8 @@ mod tests {
     #[test]
     fn execute_sql_rejects_multi_statement_payload() {
         // `rusqlite::Connection::prepare` refuses multi-statement input
-        // outright with "Multiple statements provided". That is a stronger
+        // outright (`Error::MultipleStatement`, reworded by `prepare_checked`
+        // because the SQL tab can run a selection). That is a stronger
         // guarantee than "only first runs" — there's no way to smuggle a
         // DROP behind a leading SELECT. Pin the behavior so a future
         // switch to `execute_batch` would trip the test.
@@ -527,7 +599,7 @@ mod tests {
         );
         let err = result.error.unwrap();
         assert!(
-            err.contains("Multiple statements"),
+            err.contains("one statement at a time"),
             "expected multi-statement rejection, got: {err}"
         );
 
@@ -881,5 +953,181 @@ mod tests {
 
         close_database(&state);
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- validate_sql: the editor's live check ----
+
+    #[test]
+    fn validate_sql_reports_the_syntax_error_offset_in_the_text_that_was_sent() {
+        // The leading spaces are part of what the editor sends; the offset has
+        // to index THAT text, not the trimmed statement SQLite saw.
+        let (state, path) = setup_temp_db_with_table();
+        let check = validate_sql(&state, "  SELEC name FROM users").unwrap();
+        assert!(
+            check.error.as_deref().unwrap().contains("syntax error"),
+            "{check:?}"
+        );
+        assert_eq!(check.offset, Some(2));
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_sql_locates_an_unknown_column() {
+        let (state, path) = setup_temp_db_with_table();
+        let check = validate_sql(&state, "SELECT nmae FROM users").unwrap();
+        assert_eq!(check.error.as_deref(), Some("no such column: nmae"));
+        assert_eq!(check.offset, Some(7));
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_sql_offset_counts_utf16_units_not_bytes() {
+        // 'ä' and 'ö' are two bytes each in UTF-8 and one unit each in UTF-16.
+        // SQLite reports byte 15; CodeMirror needs 13.
+        let (state, path) = setup_temp_db_with_table();
+        let sql = "SELECT 'äö', nmae FROM users";
+        let check = validate_sql(&state, sql).unwrap();
+        assert_eq!(check.error.as_deref(), Some("no such column: nmae"));
+        assert_eq!(check.offset, Some(13));
+        assert_eq!(
+            &sql.encode_utf16().skip(13).take(4).collect::<Vec<_>>(),
+            &"nmae".encode_utf16().collect::<Vec<_>>()
+        );
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_sql_agrees_with_execute_sql_on_every_rejection() {
+        // The property the editor's Execute gate depends on: the live check
+        // never blocks a statement Execute would run, and never passes one
+        // Execute would refuse at prepare time. Each input is run through
+        // both; the rejected ones never step, so running them is safe.
+        let (state, path) = setup_temp_db_with_table();
+        let inputs = [
+            "SELECT name FROM users",
+            "SELECT nmae FROM users",
+            "SELEC 1",
+            "SELECT * FROM nosuchtable",
+            "DROP TABLE users",
+            "INSERT INTO users (name) VALUES ('x')",
+            "ATTACH DATABASE ':memory:' AS other",
+            "/* c */ ; DETACH main",
+            "SELECT 1; SELECT 2",
+            "PRAGMA journal_mode=wal",
+            "BEGIN",
+        ];
+        for sql in inputs {
+            let check = validate_sql(&state, sql).unwrap();
+            let run = execute_sql(&state, sql);
+            assert_eq!(
+                check.error, run.error,
+                "check and execute disagree on {sql:?}"
+            );
+        }
+        // A positive control, so an always-erroring pair cannot pass.
+        assert_eq!(
+            validate_sql(&state, "SELECT name FROM users").unwrap(),
+            SqlCheck::ok()
+        );
+        let still_there = execute_sql(&state, "SELECT COUNT(*) FROM users");
+        assert_eq!(still_there.rows[0][0].as_deref(), Some("1"));
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_sql_prepares_without_stepping() {
+        // An unbounded recursive CTE never finishes if stepped, so a check
+        // that returns at all proves nothing ran.
+        let (state, path) = setup_temp_db_with_table();
+        let started = std::time::Instant::now();
+        let check = validate_sql(
+            &state,
+            "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c",
+        );
+        assert_eq!(check, Some(SqlCheck::ok()));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_sql_gives_no_verdict_instead_of_waiting_for_a_busy_connection() {
+        let (state, path) = setup_temp_db_with_table();
+        let state = std::sync::Arc::new(state);
+        let holder_state = std::sync::Arc::clone(&state);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let guard = holder_state.aux_conn.lock();
+            tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(guard);
+        });
+        rx.recv().unwrap();
+        assert_eq!(validate_sql(&state, "SELECT 1"), None);
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        // Control: the same call answers once the connection is free.
+        assert_eq!(validate_sql(&state, "SELECT 1"), Some(SqlCheck::ok()));
+        close_database(&state);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validate_sql_gives_no_verdict_with_no_database_open() {
+        assert_eq!(validate_sql(&DbState::new(), "SELECT 1"), None);
+    }
+
+    #[test]
+    fn every_function_the_editor_suggests_exists_in_the_bundled_sqlite() {
+        // The editor's SQLite function list is hand-written. This bundled
+        // SQLite is built without SQLITE_ENABLE_MATH_FUNCTIONS, so sqrt, ln and
+        // pow do not exist here, and a list copied from the SQLite docs would
+        // suggest functions that fail with "no such function".
+        let list: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../src/lib/components/sqlFunctions.json"
+        ))
+        .unwrap();
+        let names: Vec<&str> = list["sqlite"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.len() > 40,
+            "the list should not be empty or truncated"
+        );
+        let conn = Connection::open_in_memory().unwrap();
+        let mut missing = vec![];
+        for name in &names {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM pragma_function_list WHERE name = ?1",
+                    [name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if n == 0 {
+                missing.push(*name);
+            }
+        }
+        assert!(missing.is_empty(), "not in this SQLite: {missing:?}");
+        // Control: the lookup does report a function this build lacks.
+        let sqrt: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_function_list WHERE name = 'sqrt'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            sqrt, 0,
+            "control: sqrt should be missing without SQLITE_ENABLE_MATH_FUNCTIONS"
+        );
     }
 }

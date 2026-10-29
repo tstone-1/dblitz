@@ -5,6 +5,49 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.10.4] - Unreleased
+
+### Added
+- **CSV and JSON files open like Parquet files.** `.csv` and `.tsv` (delimiter
+  and header row detected), `.json`, `.jsonl` and `.ndjson` open as one table
+  named `data`, read by DuckDB with the same read-only layers, and page, filter
+  and sort like a Parquet file. The Structure tab shows the detected delimiter
+  and header row. The Open dialog has CSV and JSON filters.
+- **Windows: Settings > Show dblitz in "Open with" for CSV and JSON files.**
+  Off by default. It adds dblitz to Explorer's "Open with" menu for these
+  files without changing the default app; the uninstaller removes the entries.
+  On macOS, dblitz is listed in Finder's "Open With" menu for them.
+- **The SQL editor suggests what fits where the cursor is.** After `FROM` or
+  `JOIN` it offers tables; after `alias.` or `table.` that table's columns;
+  elsewhere the columns of the tables the query names come first, with their
+  type, then functions with their arguments and a short description, keywords,
+  and the remaining columns. An empty editor offers three query templates.
+  Names that need quoting are inserted quoted. Write keywords are never
+  suggested. Parquet files get DuckDB's functions, SQLite files SQLite's.
+- **The SQL editor checks the query while you type.** About 0.4 s after the
+  last keystroke, dblitz prepares the statement without running it and
+  underlines the problem with the same message Execute would show: syntax
+  errors, unknown tables, columns and functions, write statements, and more
+  than one statement. A misspelt name gets "Replace with ..." fixes. While the
+  current text has a known error, Execute is disabled and the error is shown
+  next to it.
+- **The editor can hold several queries.** Execute runs the selection when
+  there is one ("Execute selection"). Without a selection, and with more than
+  one statement in the editor, it runs the statement under the cursor
+  ("Execute statement"), which is highlighted; with the cursor right after a
+  statement's `;`, that statement. With a single statement, Execute runs all
+  of it as before.
+- Brackets and quotes close themselves, matching brackets are highlighted, and
+  Tab accepts a suggestion.
+
+### Changed
+- SQLite syntax errors in the SQL tab no longer repeat the whole query after
+  the message ("... in SELECT ... at offset 7"); the editor underlines the spot
+  instead.
+- DuckDB is updated to 2.0.1 (the `duckdb` crate 1.20000.1), the Tauri dialog
+  and updater plugins to 2.8.4 and 2.14.1, Apache Arrow to 60.1, and the
+  frontend dependencies to their latest compatible releases.
+
 ## [26.10.3] - 2026-10-23
 
 ### Changed

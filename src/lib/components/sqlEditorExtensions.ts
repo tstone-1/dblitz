@@ -16,19 +16,30 @@
  * keymap in the facet regardless of the order the extensions are listed in.
  */
 
-import { EditorView, keymap, placeholder as phPlugin } from "@codemirror/view";
+import {
+  Decoration,
+  EditorView,
+  ViewPlugin,
+  keymap,
+  placeholder as phPlugin,
+  type DecorationSet,
+  type ViewUpdate,
+} from "@codemirror/view";
 import { Prec, type Extension, type Compartment } from "@codemirror/state";
 import { sql, SQLite } from "@codemirror/lang-sql";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { searchKeymap } from "@codemirror/search";
-import { syntaxHighlighting, HighlightStyle } from "@codemirror/language";
+import { syntaxHighlighting, HighlightStyle, bracketMatching } from "@codemirror/language";
 import {
+  acceptCompletion,
   autocompletion,
+  closeBrackets,
   closeBracketsKeymap,
-  type CompletionContext,
-  type Completion,
 } from "@codemirror/autocomplete";
 import { tags } from "@lezer/highlight";
+import type { SqlCheck } from "#lib/ipc.ts";
+import { sqlCompletionSource, type SqlSchema } from "./sqlCompletion";
+import { runnableRange, sqlLinter, type CheckReport, type RunnableRange } from "./sqlLint";
 
 /** Editor theme. Colors come from the app's CSS variables, so the only thing
  *  this needs to know is whether CodeMirror should treat itself as dark. */
@@ -60,6 +71,27 @@ export function buildTheme(dark: boolean): Extension {
         backgroundColor: `color-mix(in srgb, var(--accent) ${dark ? 25 : 20}%, transparent) !important`,
       },
       ".cm-scroller": { overflow: "auto" },
+      ".cm-tooltip": {
+        backgroundColor: "var(--bg-secondary)",
+        color: "var(--text-primary)",
+        border: "1px solid var(--border-color)",
+      },
+      ".cm-tooltip-autocomplete > ul > li[aria-selected]": {
+        backgroundColor: `color-mix(in srgb, var(--accent) ${dark ? 30 : 22}%, transparent)`,
+        color: "var(--text-primary)",
+      },
+      ".cm-completionDetail": { color: "var(--text-muted)", fontStyle: "normal", marginLeft: "1em" },
+      ".cm-completionMatchedText": { textDecoration: "none", color: "var(--accent)", fontWeight: "600" },
+      ".cm-completionInfo": { maxWidth: "320px", whiteSpace: "normal" },
+      ".cm-diagnostic-error": { borderLeftColor: "var(--error)" },
+      ".cm-diagnosticAction": { backgroundColor: "var(--accent)", color: "var(--bg-primary)" },
+      ".cm-activeStatement": {
+        backgroundColor: `color-mix(in srgb, var(--accent) ${dark ? 7 : 5}%, transparent)`,
+      },
+      "&.cm-focused .cm-matchingBracket": {
+        backgroundColor: `color-mix(in srgb, var(--accent) ${dark ? 30 : 22}%, transparent)`,
+        outline: "none",
+      },
     },
     { dark },
   );
@@ -80,21 +112,22 @@ export const highlightStyle = HighlightStyle.define([
 /**
  * The SQL language support.
  *
- * Built ONCE, at module load, and never rebuilt: the editor overrides
- * completion with `columnCompleter` below, which disables lang-sql's own
- * schema-driven completion entirely, so the `schema` this used to be handed had
- * no effect on anything -- it was only ever reachable through the completion
- * source that is switched off. What lang-sql still contributes is highlighting,
- * and that depends on the dialect alone. dblitz ships SQLite, so the shipped
- * `SQLite` dialect is both more correct than the hand-rolled keyword list it
- * replaces (it knows SQLite's types, builtins and quoting rules) and free.
+ * Built ONCE, at module load, and never rebuilt: completion is overridden by
+ * `sqlCompletionSource` (see `sqlCompletion.ts`), which reads the schema
+ * through a getter, so lang-sql's own schema-driven completion is switched off
+ * and its `schema` option would have no effect. What lang-sql contributes is
+ * the parser and highlighting, and those depend on the dialect alone. The
+ * `SQLite` dialect is used for Parquet files too: DuckDB quotes strings and
+ * identifiers the same way, and the editor only highlights with it.
  */
 export const sqlLanguage: Extension = sql({
   dialect: SQLite,
   upperCaseKeywords: true,
 });
 
-/** The execute bindings, at the highest precedence available. */
+/** The execute bindings, at the highest precedence available. Tab accepts
+ *  an open completion and otherwise falls through (`acceptCompletion` returns
+ *  false), so Tab still moves focus out of the editor when nothing is open. */
 export function executeKeymap(onexecute: () => void): Extension {
   const run = () => {
     onexecute();
@@ -104,6 +137,7 @@ export function executeKeymap(onexecute: () => void): Extension {
     keymap.of([
       { key: "Ctrl-Enter", run },
       { key: "Meta-Enter", run },
+      { key: "Tab", run: acceptCompletion },
     ]),
   );
 }
@@ -118,51 +152,54 @@ export function baseKeymap(): Extension {
   ]);
 }
 
-/**
- * Column-name completion.
- *
- * Deliberately a global source (not `table.` scoped): the point is to suggest
- * every column in the database from anywhere in the statement. It reads the
- * completion list through a getter so a schema change only has to rebuild the
- * array -- the extension itself never has to be replaced.
- */
-export function columnCompletion(getCompletions: () => Completion[]): Extension {
-  return autocompletion({
-    override: [
-      (ctx: CompletionContext) => {
-        const word = ctx.matchBefore(/\w+/);
-        if (!word || word.from === word.to) return null;
-        return { from: word.from, options: getCompletions(), validFor: /^\w*$/ };
-      },
-    ],
-  });
+const activeStatementMark = Decoration.mark({ class: "cm-activeStatement" });
+
+function activeStatementDecorations(view: EditorView): DecorationSet {
+  const r = runnableRange(view.state);
+  return r.kind === "statement" && r.to > r.from
+    ? Decoration.set([activeStatementMark.range(r.from, r.to)])
+    : Decoration.none;
 }
 
-/** Build the completion list for a `{ table: [column, ...] }` schema map. */
-export function buildColumnCompletions(
-  schema: Record<string, string[]>,
-): Completion[] {
-  const seen = new Set<string>();
-  const out: Completion[] = [];
-  for (const [table, cols] of Object.entries(schema)) {
-    for (const col of cols) {
-      if (seen.has(col)) continue;
-      seen.add(col);
-      out.push({ label: col, type: "property", detail: table });
+/**
+ * Tints the statement Ctrl/Cmd+Enter will run when the editor holds several
+ * and nothing is selected. Without it, running one statement out of many is a
+ * surprise; with a single statement nothing is tinted, because all of it runs.
+ */
+export const activeStatementHighlight = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet;
+    constructor(view: EditorView) {
+      this.decorations = activeStatementDecorations(view);
     }
-  }
-  return out;
-}
+    update(update: ViewUpdate) {
+      if (update.docChanged || update.selectionSet) {
+        this.decorations = activeStatementDecorations(update.view);
+      }
+    }
+  },
+  { decorations: (v) => v.decorations },
+);
 
 export interface EditorExtensionOptions {
   dark: boolean;
   placeholder: string;
   /** Compartment the caller reconfigures when the app theme changes. */
   themeCompartment: Compartment;
-  /** Live column completions; read on every completion request. */
-  getCompletions: () => Completion[];
+  /** Live schema for completion and quick fixes; read on every request. */
+  getSchema: () => SqlSchema;
+  /** The backend's prepare-only check (`validate_sql`). */
+  check: (sql: string) => Promise<SqlCheck | null>;
+  /** The database-open generation, so a cached verdict never outlives its file. */
+  getGeneration: () => number;
+  /** Every verdict of the live check, for the Execute gate. */
+  onCheck: (report: CheckReport) => void;
   onexecute: () => void;
   onDocChanged: (value: string) => void;
+  /** What Execute would run now; reported on every edit and cursor move. */
+  onRunnableChanged: (runnable: RunnableRange) => void;
+  /** Live-check debounce in ms; tests shorten it. */
+  lintDelay?: number;
 }
 
 /**
@@ -180,11 +217,22 @@ export function buildEditorExtensions(o: EditorExtensionOptions): Extension[] {
     o.themeCompartment.of(buildTheme(o.dark)),
     sqlLanguage,
     syntaxHighlighting(highlightStyle),
-    columnCompletion(o.getCompletions),
+    closeBrackets(),
+    bracketMatching(),
+    autocompletion({ override: [sqlCompletionSource(o.getSchema)] }),
+    sqlLinter({
+      check: o.check,
+      getSchema: o.getSchema,
+      getGeneration: o.getGeneration,
+      onCheck: o.onCheck,
+      delay: o.lintDelay,
+    }),
+    activeStatementHighlight,
     phPlugin(o.placeholder),
     EditorView.lineWrapping,
     EditorView.updateListener.of((update) => {
       if (update.docChanged) o.onDocChanged(update.state.doc.toString());
+      if (update.docChanged || update.selectionSet) o.onRunnableChanged(runnableRange(update.state));
     }),
   ];
 }

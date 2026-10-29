@@ -25,7 +25,7 @@ rusqlite = { version = "0.40.2", features = ["bundled", "hooks", "column_decltyp
 # has no Parquet reader - the `parquet` feature is what links it in. Measured
 # 2026-09-28 on a 10-core M-series Mac: +35.7 MB to a stripped binary and a
 # 147 s cold build (1,009 s of CPU), so a cold CI leg grows by several minutes.
-duckdb = { version = "1.20000.0", features = ["bundled", "parquet"] }
+duckdb = { version = "1.20000.0", features = ["bundled", "json", "parquet"] }
 regex = "1.13"
 sha2 = "0.11"
 hex = "0.4"
@@ -48,7 +48,8 @@ tauri-plugin-process = "2"
 [target.'cfg(windows)'.dependencies]
 # Win32_System_Registry backs `windows_install_provenance` in lib.rs: it reads
 # the NSIS installer's recorded InstallLocation to tell an installed build from
-# the portable dblitz.exe, which decides whether the updater may offer Install.
+# the portable dblitz.exe, which decides whether the updater may offer Install,
+# and writes the opt-in "Open with" entries for CSV and JSON (platform/open_with.rs).
 windows = { version = "0.62", features = [
     "Win32_System_Registry",
     "Win32_UI_Shell",

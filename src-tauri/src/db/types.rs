@@ -231,3 +231,36 @@ pub struct SqlResult {
     /// can render the rows and a banner together.
     pub truncated: bool,
 }
+
+/// The SQL editor's live check of one statement, made without running it.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct SqlCheck {
+    /// The message Execute would show, or `None` when the statement would run.
+    pub error: Option<String>,
+    /// Where the problem is, as a UTF-16 index into the text that was sent
+    /// (CodeMirror positions are UTF-16), when the engine reports one.
+    pub offset: Option<usize>,
+}
+
+impl SqlCheck {
+    pub fn ok() -> Self {
+        SqlCheck {
+            error: None,
+            offset: None,
+        }
+    }
+
+    /// `byte_offset` indexes `sql`; it is converted to UTF-16 here so no
+    /// caller can hand the frontend a byte index that lands one character late
+    /// for every non-ASCII character before it. An offset that is not a char
+    /// boundary (it never should be) is dropped rather than guessed at.
+    pub fn problem(sql: &str, message: String, byte_offset: Option<usize>) -> Self {
+        let offset = byte_offset
+            .and_then(|b| sql.get(..b))
+            .map(|prefix| prefix.encode_utf16().count());
+        SqlCheck {
+            error: Some(message),
+            offset,
+        }
+    }
+}

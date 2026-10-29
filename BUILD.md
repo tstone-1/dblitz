@@ -616,7 +616,7 @@ download counts on 2026-10-08).
 
 What it costs somebody who did install from it: a copy installed from the
 `.msi` is not offered an in-app update. `windows_install_provenance` in
-`lib.rs` recognises an installed copy by the registry key the NSIS installer
+`platform/windows.rs` recognises an installed copy by the registry key the NSIS installer
 writes, which an MSI install does not have, so such a copy counts as portable
 and is told to download the new version. Running the `-setup.exe` over it
 leaves two installed copies, the MSI's and the new one. The release notes say
@@ -684,25 +684,19 @@ leg reads every signature back.
 - [ ] All changes tested and working: `npm run tauri dev`
 
 **Version & documentation:**
-- [ ] Update version in all five files:
-  - `src-tauri/Cargo.toml` (line 3)
-  - `src-tauri/tauri.conf.json` (line 4)
-  - `package.json` (line 3)
-  - `package-lock.json` — **both** the top-level `"version"` and the one under
-    `packages[""]`. Use `npm version <v> --no-git-tag-version`, which edits
-    `package.json` and both lockfile entries in one go; hand-editing
-    `package.json` alone leaves the lockfile behind on the previous version
-    (26.7.6 shipped that way).
-  - `src-tauri/Cargo.lock` — do **not** hand-edit. Run `cd src-tauri && cargo check`
-    after bumping `Cargo.toml`; it rewrites the lock's own `dblitz` entry. Skipping
-    this leaves a stale version committed, and nothing fails, because the next
-    build regenerates it.
-- [ ] Verify all version files agree — this is exactly what CI's `preflight` job
-  runs, so a green answer here means the tag will not be rejected:
+- [ ] Write the release's notes under its `## [YY.M.MICRO] - Unreleased` heading
+  in `CHANGELOG.md`.
+- [ ] Bump all five version files and date that heading in one step:
   ```bash
-  node scripts/release-preflight.mjs vYY.M.MICRO
+  node scripts/bump-version.mjs next --release     # or an explicit YY.M.MICRO
   ```
-- [ ] Update `CHANGELOG.md` with new version entry and date
+  `next` is the next CalVer for today's date. The script edits `package.json`,
+  both `package-lock.json` sites, `src-tauri/Cargo.toml`, the crate's own entry
+  in `src-tauri/Cargo.lock` and `src-tauri/tauri.conf.json`, then runs the same
+  check as CI's `preflight` job on what it wrote, so `[OK]` means the tag will
+  not be rejected. Without `--release` it bumps the files and leaves the heading
+  `Unreleased`. Check the result any time with
+  `node scripts/release-preflight.mjs vYY.M.MICRO`.
 - [ ] Read the release notes written out in `release.yml` (`create-release`,
   the `NOTES` block). They are a literal, so nothing fails when a sentence in
   them has become false.
@@ -884,13 +878,10 @@ npm update && npm outdated
 npm audit
 cd src-tauri && cargo audit && cd ..
 npm run quality
-# Update version: npm version <v> --no-git-tag-version covers package.json +
-# package-lock.json; edit Cargo.toml and tauri.conf.json by hand, then
-# `cd src-tauri && cargo check` to rewrite Cargo.lock's own dblitz entry
-# Update CHANGELOG.md (dated heading -- preflight rejects "Unreleased")
-# Verify all five version files and the changelog heading -- the same script
-# CI's preflight job runs, so a green answer here means the tag is accepted
-node scripts/release-preflight.mjs vYY.M.MICRO
+# Notes go under "## [YY.M.MICRO] - Unreleased" in CHANGELOG.md first. Then bump
+# all five version files and date the heading; the script ends with the same
+# check CI's preflight job runs, so [OK] means the tag is accepted
+node scripts/bump-version.mjs next --release
 npx tauri build
 git status --porcelain && git diff --stat   # review the whole tree before staging
 # Explicit pathspec, never `git add -A` -- this repo is public (see step 3)
@@ -916,12 +907,13 @@ Versions follow [CalVer](https://calver.org/) using the `YY.M.MICRO` format:
 
 Examples: `26.4.0` (first April 2026 release), `26.4.1` (second), `26.5.0` (first May release).
 
-Version must be updated in five files:
+Version must be updated in five files; `node scripts/bump-version.mjs` does all
+of them (see the release checklist), and the list is why it exists:
 - `src-tauri/Cargo.toml` - Rust package version
-- `src-tauri/Cargo.lock` - the crate's own entry. Not hand-edited: `cargo check`
-  after the `Cargo.toml` bump rewrites it. Nothing fails when it drifts, because
-  the next build regenerates it - which is how it was still on 26.8.1 while
-  26.8.2 was being staged.
+- `src-tauri/Cargo.lock` - the crate's own entry. The bump script edits only
+  that entry's `version` line, the change `cargo check` would make. Nothing
+  fails when it drifts, because the next build regenerates it - which is how it
+  was still on 26.8.1 while 26.8.2 was being staged.
 - `src-tauri/tauri.conf.json` - Tauri app version
 - `package.json` - npm package version
 - `package-lock.json` - npm lockfile, in **two** places (top-level `"version"`
@@ -988,6 +980,8 @@ dblitz/
 │   │       ├── virtualRows.svelte.ts     # Chunked virtual row source
 │   │       ├── cellSelection.svelte.ts   # Grid selection rectangles
 │   │       ├── sqlEditorExtensions.ts    # CodeMirror setup (keymaps, dialect)
+│   │       ├── sqlCompletion.ts          # Context-aware autocomplete
+│   │       ├── sqlLint.ts                # Live error check + pre-run guards
 │   │       ├── sqlExecution.ts           # Session-owned SQL execution
 │   │       ├── clipboardTable.ts         # HTML + RFC 4180 clipboard payloads
 │   │       └── platformKeys.ts           # Cmd vs Ctrl labels
@@ -996,7 +990,10 @@ dblitz/
 ├── src-tauri/                    # Rust backend
 │   ├── src/
 │   │   ├── main.rs               # Entry point
-│   │   ├── lib.rs                # Tauri commands, setup, Windows/macOS glue
+│   │   ├── lib.rs                # Setup, plugins, command registration
+│   │   ├── commands.rs           # The #[tauri::command] functions
+│   │   ├── launch.rs             # Launch argument + OS document-open handoff
+│   │   ├── platform/             # windows.rs, macos.rs, open_with.rs: OS-only glue
 │   │   ├── db.rs                 # Database facade + db::bench_api
 │   │   ├── db/                   # schema, query, filters, sql, export, types, util
 │   │   ├── pq/                   # Parquet through embedded DuckDB
@@ -1009,8 +1006,10 @@ dblitz/
 │   ├── Cargo.lock                # Carries the crate's own version
 │   ├── tauri.conf.json           # Tauri config
 │   ├── tauri.windows.conf.json   # Windows only: bundle the NSIS installer, no MSI
+│   ├── tauri.macos.conf.json     # macOS only: CSV/JSON as an alternate viewer
+│   ├── windows/hooks.nsh         # Uninstaller removes the CSV/JSON "Open with" entries
 │   └── tauri.signing.conf.json   # Release overlay: the Windows sign command
-├── scripts/                      # release-preflight.mjs, smoke-test.mjs,
+├── scripts/                      # bump-version.mjs, release-preflight.mjs, smoke-test.mjs,
 │                                 # sign-windows.{cmd,ps1}, verify-signature.ps1
 ├── .github/                      # Workflows, dependabot, tauri-linux-deps.txt
 ├── package.json                  # npm config; `imports` maps #lib to src/lib

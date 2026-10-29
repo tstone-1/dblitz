@@ -28,7 +28,7 @@ use std::ffi::{CStr, CString};
 use std::sync::Arc;
 
 use super::raw::RawDb;
-use super::sql_literal;
+use super::{sql_literal, FileFormat};
 
 pub(crate) struct LockedDb {
     raw: RawDb,
@@ -48,18 +48,23 @@ pub(crate) enum Refusal {
 impl LockedDb {
     /// Opens an in-memory database with a `data` view over `path` and locks
     /// it. `temp_dir` is the one directory it may spill to.
-    pub(crate) fn open(path: &str, temp_dir: &str) -> Result<Self, String> {
-        Self::open_inner(path, temp_dir, true)
+    pub(crate) fn open(path: &str, format: FileFormat, temp_dir: &str) -> Result<Self, String> {
+        Self::open_inner(path, format, temp_dir, true)
     }
 
     /// The same instance without the settings lock - only for the tests that
     /// prove the lock is what stops a write, not DuckDB's defaults.
     #[cfg(test)]
     fn open_unlocked(path: &str, temp_dir: &str) -> Result<Self, String> {
-        Self::open_inner(path, temp_dir, false)
+        Self::open_inner(path, FileFormat::Parquet, temp_dir, false)
     }
 
-    fn open_inner(path: &str, temp_dir: &str, lock: bool) -> Result<Self, String> {
+    fn open_inner(
+        path: &str,
+        format: FileFormat,
+        temp_dir: &str,
+        lock: bool,
+    ) -> Result<Self, String> {
         let locked = LockedDb {
             raw: RawDb::open_in_memory()?,
         };
@@ -73,8 +78,9 @@ impl LockedDb {
                  SET allow_community_extensions = false;
                  SET memory_limit = '{mem}';
                  SET temp_directory = {tmp};
-                 CREATE VIEW data AS SELECT * FROM read_parquet({file});",
+                 CREATE VIEW data AS SELECT * FROM {reader};",
                 mem = super::MEMORY_LIMIT,
+                reader = format.reader(&file),
             ))
             .map_err(|e| e.to_string())?;
         if lock {
@@ -171,7 +177,12 @@ mod tests {
         let dir = scratch_dir("lockdown");
         let file = fixture(&dir, 100);
         let tmp = dir.join("spill");
-        let db = LockedDb::open(file.to_str().unwrap(), tmp.to_str().unwrap()).unwrap();
+        let db = LockedDb::open(
+            file.to_str().unwrap(),
+            FileFormat::Parquet,
+            tmp.to_str().unwrap(),
+        )
+        .unwrap();
         (db, dir)
     }
 

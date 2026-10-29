@@ -2,50 +2,58 @@
   import { onMount, onDestroy } from "svelte";
   import { EditorView } from "@codemirror/view";
   import { EditorState, Compartment } from "@codemirror/state";
-  import type { Completion } from "@codemirror/autocomplete";
   import { appState } from "#lib/store.svelte.ts";
-  import {
-    buildColumnCompletions,
-    buildEditorExtensions,
-    buildTheme,
-  } from "./sqlEditorExtensions";
+  import { validateSql } from "#lib/ipc.ts";
+  import { buildEditorExtensions, buildTheme } from "./sqlEditorExtensions";
+  import { runnableRange } from "./sqlLint";
+  import type { SqlSchema } from "./sqlCompletion";
+  import { requestRecheck, type CheckReport, type RunnableRange } from "./sqlLint";
 
   interface Props {
     value: string;
+    /** What Execute would run: the selection, the statement at the cursor,
+     *  or all of it (see runnableRange in sqlLint.ts). Called at mount and
+     *  whenever it changes. */
+    onrunnable?: (runnable: RunnableRange) => void;
     onchange?: (value: string) => void;
     onexecute?: () => void;
+    /** Every verdict of the live check; see sqlLint.ts. */
+    oncheck?: (report: CheckReport) => void;
     placeholder?: string;
-    schema?: Record<string, string[]>; // table -> column names
   }
 
   let {
     value = $bindable(""),
+    onrunnable = undefined,
     onchange = undefined,
     onexecute = undefined,
+    oncheck = undefined,
     placeholder = "Enter SQL query...",
-    schema = {},
   }: Props = $props();
 
   let container: HTMLDivElement;
   let view: EditorView | undefined;
   let themeCompartment = new Compartment();
   let updating = false; // prevent feedback loop
+  let last: RunnableRange | undefined; // last runnable reported
 
-  // Plain (non-reactive) cache read through a getter by the completion source,
-  // so a schema change only rebuilds this array -- the extension itself never
-  // has to be reconfigured, and the SQL language support is never rebuilt (it
-  // depends on the dialect alone; see sqlEditorExtensions.ts).
-  let cachedCompletions: Completion[] = [];
+  // Plain (non-reactive) snapshot read through a getter by the completion
+  // source and the linter, so a schema change only replaces this object -- no
+  // extension is reconfigured, and the SQL language support is never rebuilt
+  // (it depends on the dialect alone; see sqlEditorExtensions.ts).
+  let schema: SqlSchema = { columns: {}, types: {}, engine: "sqlite" };
 
   onMount(() => {
-    cachedCompletions = buildColumnCompletions(schema);
     const state = EditorState.create({
       doc: value,
       extensions: buildEditorExtensions({
         dark: appState.theme === "dark",
         placeholder,
         themeCompartment,
-        getCompletions: () => cachedCompletions,
+        getSchema: () => schema,
+        check: validateSql,
+        getGeneration: () => appState.dbOpenGeneration,
+        onCheck: (report) => oncheck?.(report),
         onexecute: () => onexecute?.(),
         onDocChanged: (newVal) => {
           if (updating) return;
@@ -54,10 +62,17 @@
           onchange?.(newVal);
           updating = false;
         },
+        onRunnableChanged: (next) => {
+          if (next.text === last?.text && next.kind === last.kind) return;
+          last = next;
+          onrunnable?.(next);
+        },
       }),
     });
 
     view = new EditorView({ state, parent: container });
+    last = runnableRange(view.state);
+    onrunnable?.(last);
   });
 
   // Sync external value changes into editor
@@ -82,11 +97,18 @@
     }
   });
 
-  // Rebuild the column completion list when the schema changes. Nothing is
-  // reconfigured: the completion source reads `cachedCompletions` through a
-  // getter, so replacing the array is the whole update.
+  // A new database (or a reopen) changes what is valid: replace the schema
+  // snapshot and re-check the current text against the new file at once,
+  // rather than leaving the previous file's verdict on screen until the next
+  // keystroke.
   $effect(() => {
-    cachedCompletions = buildColumnCompletions(schema);
+    schema = {
+      columns: appState.tableColumns,
+      types: appState.tableColumnTypes,
+      engine: appState.sqlEngine,
+    };
+    void appState.dbOpenGeneration;
+    if (view) requestRecheck(view);
   });
 
   onDestroy(() => {

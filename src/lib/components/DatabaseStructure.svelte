@@ -95,7 +95,7 @@
 </script>
 
 {#if !appState.dbPath}
-  <div class="empty">Open a SQLite database or Parquet file to view its structure.</div>
+  <div class="empty">Open a SQLite database, or a Parquet, CSV or JSON file, to view its structure.</div>
 {:else}
   <div class="structure-layout">
     <div class="toggle-bar">

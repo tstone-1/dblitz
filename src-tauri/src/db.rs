@@ -30,12 +30,13 @@ pub use export::export_to_xlsx;
 pub(crate) use filters::{contains_pattern, parse_criteria, Criterion};
 pub use query::{count_rows, query_table};
 pub use schema::{get_columns, get_schema, open_database};
-pub use sql::execute_sql;
+pub use sql::{execute_sql, validate_sql};
 pub use types::{
-    ColumnFilter, ColumnInfo, DbState, QueryRequest, QueryResult, SchemaEntry, SqlResult, TableInfo,
+    ColumnFilter, ColumnInfo, DbState, QueryRequest, QueryResult, SchemaEntry, SqlCheck, SqlResult,
+    TableInfo,
 };
 pub(crate) use util::{ErrCtx, StrErr};
-// Re-exported for tests only: `lib.rs` pins the launch-path fix against the URI
+// Re-exported for tests only: `launch.rs` pins the launch-path fix against the URI
 // this actually produces, rather than against a restatement of the rule.
 #[cfg(test)]
 pub(crate) use util::path_to_sqlite_uri;

@@ -16,8 +16,23 @@
   import { createSqlExecution } from "./sqlExecution";
   import { currentModKeyLabel } from "./platformKeys";
   import { resolveResultColumnColors } from "./sqlTable";
+  import { blockReasonFor, type CheckReport, type RunnableRange } from "./sqlLint";
 
   let sql = $state("");
+  // What the editor says Execute would run: the selection, the statement at
+  // the cursor when there are several, or all of it. Null until the editor
+  // has loaded, when the whole text is the only answer.
+  let runnable = $state<RunnableRange | null>(null);
+  // The editor's latest live-check verdict (see sqlLint.ts).
+  let lastCheck = $state<CheckReport | null>(null);
+  let runnableKind = $derived(runnable?.kind ?? "all");
+  let runnableSql = $derived(runnable ? runnable.text : sql);
+  // Non-null only while the verdict is about exactly the text Execute would
+  // run, in the open database. A verdict still pending for newer text blocks
+  // nothing.
+  let blockReason = $derived(
+    blockReasonFor(lastCheck, runnableSql, appState.dbOpenGeneration),
+  );
   let result = $state<SqlResult | null>(null);
   // The query that produced `result` — the editor `sql` may change afterwards,
   // so color lookup must key off what actually ran, not the current text.
@@ -45,9 +60,6 @@
   // has to pick one, and naming Ctrl on a Mac names the combination nobody
   // presses there.
   const modKey = currentModKeyLabel();
-
-  // Schema for autocomplete: { tableName: [col1, col2, ...] }
-  let sqlSchema = $derived(appState.tableColumns);
 
   // Reuse the per-table column colors from Browse Data for result columns that
   // came from the query's primary (FROM) table. The resolution logic lives in
@@ -86,7 +98,8 @@
   // rule is testable. Everything reactive stays here and is injected.
   const executeSql = createSqlExecution({
     getGeneration: () => appState.dbOpenGeneration,
-    getSql: () => sql,
+    getSql: () => runnableSql,
+    getBlockReason: () => blockReason,
     isRunning: () => running,
     setRunning: (value) => { running = value; },
     setResult: (value) => { result = value; },
@@ -144,12 +157,20 @@
 </script>
 
 {#if !appState.dbPath}
-  <div class="empty">Open a SQLite database or Parquet file to execute SQL.</div>
+  <div class="empty">Open a SQLite database, or a Parquet, CSV or JSON file, to execute SQL.</div>
 {:else}
   <div class="sql-layout">
     <div class="editor-area">
       <div class="editor-header">
-        <span class="hint">Read-only — {modKey}+Enter to execute</span>
+        {#if blockReason}
+          <span class="hint block-reason" title={blockReason}>{blockReason}</span>
+        {:else if runnableKind === "selection"}
+          <span class="hint">Read-only — {modKey}+Enter runs the selection</span>
+        {:else if runnableKind === "statement"}
+          <span class="hint">Read-only — {modKey}+Enter runs the highlighted statement</span>
+        {:else}
+          <span class="hint">Read-only — {modKey}+Enter to execute · Ctrl+Space for suggestions</span>
+        {/if}
         <button
           onclick={() => (showHistory = !showHistory)}
           class="history-btn"
@@ -161,16 +182,26 @@
             Cancel
           </button>
         {:else}
-          <button onclick={executeSql} class="run-btn" disabled={!sql.trim()}>
-            Execute
+          <button
+            onclick={executeSql}
+            class="run-btn"
+            disabled={!runnableSql.trim() || !!blockReason}
+            title={blockReason ?? undefined}
+          >
+            {runnableKind === "selection"
+              ? "Execute selection"
+              : runnableKind === "statement"
+                ? "Execute statement"
+                : "Execute"}
           </button>
         {/if}
       </div>
       {#if SqlEditorComponent}
         <SqlEditorComponent
           bind:value={sql}
+          onrunnable={(r) => (runnable = r)}
           onexecute={executeSql}
-          schema={sqlSchema}
+          oncheck={(report) => (lastCheck = report)}
           placeholder="Enter a SELECT query (read-only)..."
         />
       {:else}
@@ -279,6 +310,14 @@
     color: var(--text-muted);
     font-size: 11px;
     margin-right: auto;
+  }
+
+  .block-reason {
+    color: var(--error);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .editor-loading {

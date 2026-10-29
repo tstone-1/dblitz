@@ -825,4 +825,96 @@ mod tests {
             "no such table: other"
         );
     }
+
+    /// A CSV with `rows` lines in a deliberately non-sorted order of `price`,
+    /// so a sorted view differs from file order.
+    fn csv_session(rows: u64, header: &str) -> ParquetSession {
+        let dir = scratch_dir("query_csv");
+        let path = dir.join("rows.csv");
+        let mut text = format!("{header}\n");
+        for i in 0..rows {
+            text.push_str(&format!("{i},item {i},{}\n", (i * 7919) % 1000));
+        }
+        std::fs::write(&path, text).unwrap();
+        ParquetSession::open(path.to_str().unwrap()).unwrap()
+    }
+
+    fn price_req(offset: i64, limit: i64) -> QueryRequest {
+        QueryRequest {
+            sort_column: Some("price".into()),
+            sort_asc: false,
+            ..req(offset, limit)
+        }
+    }
+
+    #[test]
+    fn a_csv_pages_in_file_order_through_the_row_number_path() {
+        let s = csv_session(2500, "id,name,price");
+        assert!(s.row_numbers, "a loaded CSV must page by rowid, not OFFSET");
+        let g = AtomicU64::new(0);
+        for offset in [0, 999, 2400] {
+            let r = query_table(&s, &req(offset, 100), &g).unwrap();
+            assert_eq!(
+                ids(&r),
+                (offset..(offset + 100).min(2500)).collect::<Vec<_>>()
+            );
+            assert_eq!(r.total_rows, Some(2500));
+        }
+    }
+
+    #[test]
+    fn a_sorted_csv_view_agrees_with_both_sort_paths() {
+        // The expected order: price descending, ties in file order.
+        let mut expected: Vec<(i64, i64)> = (0..2500).map(|i| (i, (i * 7919) % 1000)).collect();
+        expected.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let want: Vec<i64> = expected.iter().skip(1200).take(50).map(|e| e.0).collect();
+        let g = AtomicU64::new(0);
+
+        let listed = csv_session(2500, "id,name,price");
+        assert_eq!(
+            ids(&query_table(&listed, &price_req(1200, 50), &g).unwrap()),
+            want
+        );
+
+        let mut cached = csv_session(2500, "id,name,price");
+        cached.order_list_max_cells = 0;
+        assert_eq!(
+            ids(&query_table(&cached, &price_req(1200, 50), &g).unwrap()),
+            want
+        );
+        assert!(
+            sorted_into_the_cache(&cached),
+            "the sort cache path was not taken"
+        );
+    }
+
+    /// A column named `rowid` hides the table's own `rowid`, so `data_rn`
+    /// would number rows by the file's values. Such a file pages by OFFSET.
+    #[test]
+    fn a_csv_with_its_own_rowid_column_pages_without_row_numbers() {
+        let s = csv_session(300, "rowid,name,price");
+        assert!(!s.row_numbers);
+        let r = query_table(&s, &req(250, 10), &AtomicU64::new(0)).unwrap();
+        assert_eq!(ids(&r), (250..260).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_json_array_and_ndjson_both_page_in_file_order() {
+        let dir = scratch_dir("query_json");
+        let array = dir.join("rows.json");
+        let lines = dir.join("rows.ndjson");
+        let items: Vec<String> = (0..1500)
+            .map(|i| format!(r#"{{"id": {i}, "tag": {{"k": "v{i}"}}}}"#))
+            .collect();
+        std::fs::write(&array, format!("[{}]", items.join(",\n"))).unwrap();
+        std::fs::write(&lines, items.join("\n")).unwrap();
+        let g = AtomicU64::new(0);
+        for path in [array, lines] {
+            let s = ParquetSession::open(path.to_str().unwrap()).unwrap();
+            let r = query_table(&s, &req(1100, 3), &g).unwrap();
+            assert_eq!(ids(&r), [1100, 1101, 1102], "{}", path.display());
+            // A nested object is a STRUCT, rendered by DuckDB's own cast.
+            assert_eq!(r.rows[0][1].as_deref(), Some("{'k': v1100}"));
+        }
+    }
 }

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "fileAssociations": [
+      {
+        "ext": ["db", "sqlite", "sqlite3", "db3"],
+        "mimeType": "application/x-sqlite3",
+        "description": "SQLite Database"
+      },
+      {
+        "ext": ["parquet"],
+        "mimeType": "application/vnd.apache.parquet",
+        "description": "Parquet File"
+      },
+      {
+        "ext": ["csv"],
+        "contentTypes": ["public.comma-separated-values-text"],
+        "role": "Viewer",
+        "rank": "Alternate"
+      },
+      {
+        "ext": ["tsv"],
+        "contentTypes": ["public.tab-separated-values-text"],
+        "role": "Viewer",
+        "rank": "Alternate"
+      },
+      {
+        "ext": ["json"],
+        "role": "Viewer",
+        "rank": "Alternate"
+      },
+      {
+        "ext": ["jsonl", "ndjson"],
+        "role": "Viewer",
+        "rank": "Alternate"
+      }
+    ]
+  }
+}

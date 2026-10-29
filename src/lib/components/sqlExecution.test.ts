@@ -31,6 +31,7 @@ function harness() {
     running: false,
     result: null as SqlResult | null,
     executedSql: "",
+    blockReason: null as string | null,
   };
   const history: SqlHistoryEntry[] = [];
   const calls: string[] = [];
@@ -39,6 +40,7 @@ function harness() {
   const execute = createSqlExecution({
     getGeneration: () => state.generation,
     getSql: () => state.sql,
+    getBlockReason: () => state.blockReason,
     isRunning: () => state.running,
     setRunning: (running) => { state.running = running; },
     setResult: (r) => { state.result = r; },
@@ -157,5 +159,27 @@ describe("createSqlExecution", () => {
 
     expect(h.calls).toEqual([]);
     expect(h.state.running).toBe(false);
+  });
+});
+
+describe("the live-check gate", () => {
+  it("sends nothing while the editor's check blocks the current text", async () => {
+    const h = harness();
+    h.state.blockReason = "no such column: nmae";
+    await h.execute();
+    expect(h.calls).toEqual([]);
+    expect(h.state.running).toBe(false);
+    expect(h.history).toEqual([]);
+  });
+
+  it("runs once the block is gone", async () => {
+    // Control: the same harness runs when nothing blocks it, so the test above
+    // cannot pass on a harness that never runs anything.
+    const h = harness();
+    h.state.blockReason = null;
+    const run = h.execute();
+    h.settle(result());
+    await run;
+    expect(h.calls).toEqual(["SELECT 1"]);
   });
 });

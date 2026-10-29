@@ -1,6 +1,14 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
-  import { getExportDir, setExportDir, getRecentFiles, clearRecentFiles, type RecentFile } from "#lib/ipc.ts";
+  import {
+    getExportDir,
+    setExportDir,
+    getRecentFiles,
+    clearRecentFiles,
+    getOpenWithRegistration,
+    setOpenWithRegistration,
+    type RecentFile,
+  } from "#lib/ipc.ts";
   import { appState, openDatabase, closeDatabase, setTheme, saveViewConfig } from "#lib/store.svelte.ts";
   import { update } from "#lib/updateState.svelte.ts";
   import { fileName, parentDir, TINT_PRESETS, tintPillStyle, toolbarTintStyle } from "./toolbarUtils";
@@ -28,6 +36,8 @@
   let recentFiles = $state<RecentFile[]>([]);
   // `null` means "not loaded yet"; an empty string means "use the temp default".
   let exportDir = $state<string | null>(null);
+  // `null` hides the section: not loaded yet, or not Windows.
+  let openWith = $state<boolean | null>(null);
 
   async function toggleSettings() {
     if (showSettings) {
@@ -43,6 +53,22 @@
     } catch (e) {
       console.error("Failed to load export folder:", e);
       exportDir = "";
+    }
+    try {
+      openWith = await getOpenWithRegistration();
+    } catch (e) {
+      console.error("Failed to read the Open with setting:", e);
+    }
+  }
+
+  async function toggleOpenWith(enabled: boolean) {
+    try {
+      await setOpenWithRegistration(enabled);
+      openWith = enabled;
+    } catch (e) {
+      console.error("Failed to change the Open with setting:", e);
+      appState.error = `Could not change the "Open with" entries: ${e}`;
+      openWith = await getOpenWithRegistration().catch(() => openWith);
     }
   }
 
@@ -70,13 +96,16 @@
   async function handleOpen() {
     const path = await open({
       // SQLite stays first so it is the default. The All Files fallback is not
-      // optional: both formats are identified by their content, not their
+      // optional: SQLite and Parquet are identified by their content, not their
       // name (the backend checks for Parquet's `PAR1` magic), and files like
       // data.bin or cache.dat are common in the wild — without this they
-      // cannot be opened through the dialog at all.
+      // cannot be opened through the dialog at all. CSV and JSON have no
+      // magic bytes, so the backend recognises them by these extensions only.
       filters: [
         { name: "SQLite", extensions: ["db", "sqlite", "sqlite3", "db3"] },
         { name: "Parquet", extensions: ["parquet"] },
+        { name: "CSV", extensions: ["csv", "tsv"] },
+        { name: "JSON", extensions: ["json", "jsonl", "ndjson"] },
         { name: "All Files", extensions: ["*"] },
       ],
       multiple: false,
@@ -158,7 +187,7 @@
 
 <div class="toolbar" style={toolbarStyle}>
   <div class="open-btn-group">
-    <button onclick={handleOpen} class="open-btn" title="Open a SQLite database or Parquet file">
+    <button onclick={handleOpen} class="open-btn" title="Open a SQLite database, or a Parquet, CSV or JSON file">
       Open DB
     </button>
     <button
@@ -269,6 +298,20 @@
             >Reset</button>
           </div>
         </div>
+
+        {#if openWith !== null}
+          <div class="settings-section">
+            <div class="settings-label">CSV and JSON Files</div>
+            <label class="update-startup-toggle" title="Adds dblitz to Explorer's 'Open with' menu for .csv, .tsv, .json, .jsonl and .ndjson files. Your default app for them stays the default.">
+              <input
+                type="checkbox"
+                checked={openWith}
+                onchange={(e) => void toggleOpenWith((e.currentTarget as HTMLInputElement).checked)}
+              />
+              Show dblitz in "Open with"
+            </label>
+          </div>
+        {/if}
 
         <div class="settings-section">
           <div class="settings-label">Updates</div>

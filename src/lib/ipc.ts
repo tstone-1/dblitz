@@ -212,7 +212,7 @@ export function loadViewConfig(): Promise<FileConfig> {
  * lookup KEY, not a destination: the config lands at
  * `<app-config-dir>/<sha256(path)[..16]>.json`, so no value can direct a write
  * outside dblitz's own config directory. See `save_view_config` in
- * `src-tauri/src/lib.rs` for the full contract.
+ * `src-tauri/src/commands.rs` for the full contract.
  *
  * Callers go through `saveViewConfig()` in store.svelte.ts, which captures the
  * path at enqueue time and serialises the saves.
@@ -257,6 +257,30 @@ export function viewProgress(): Promise<number | null> {
 /** Run an arbitrary (read-only) SQL statement. */
 export function executeSql(sql: string): Promise<SqlResult> {
   return invoke<SqlResult>("execute_sql", { sql });
+}
+
+/** The SQL editor's live check of one statement, made without running it. */
+export interface SqlCheck {
+  /** The message Execute would show, or null when the statement would run. */
+  error: string | null;
+  /** UTF-16 index of the offending token in the text that was sent. */
+  offset: number | null;
+}
+
+/**
+ * Check a statement through every gate Execute applies, without running it.
+ * Resolves to null when no verdict is available (nothing open, or the SQL tab
+ * is busy running a query).
+ */
+export function validateSql(sql: string): Promise<SqlCheck | null> {
+  return invoke<SqlCheck | null>("validate_sql", { sql });
+}
+
+export type SqlEngine = "sqlite" | "duckdb";
+
+/** Which engine answers the SQL tab for the open file. */
+export function sqlEngine(): Promise<SqlEngine> {
+  return invoke<SqlEngine>("sql_engine");
 }
 
 /**
@@ -308,4 +332,17 @@ export function getCheckForUpdatesOnStartup(): Promise<boolean> {
 /** Persist the automatic-update-check opt-out. */
 export function setCheckForUpdatesOnStartup(enabled: boolean): Promise<void> {
   return invoke("set_check_for_updates_on_startup", { enabled });
+}
+
+/**
+ * Whether dblitz is in Explorer's "Open with" list for CSV and JSON files;
+ * `null` where the setting does not exist (macOS and Linux).
+ */
+export function getOpenWithRegistration(): Promise<boolean | null> {
+  return invoke<boolean | null>("get_open_with_registration");
+}
+
+/** Add dblitz to, or remove it from, "Open with" for CSV and JSON files (Windows). */
+export function setOpenWithRegistration(enabled: boolean): Promise<void> {
+  return invoke("set_open_with_registration", { enabled });
 }

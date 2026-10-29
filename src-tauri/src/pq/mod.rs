@@ -1,8 +1,18 @@
-//! Parquet files, read through an embedded DuckDB.
+//! Parquet, CSV and JSON files, read through an embedded DuckDB. The names
+//! (`ParquetSession`, `db::open_parquet`) predate CSV and JSON; one session
+//! type serves all three, and [`FileFormat`] is the only difference.
 //!
-//! A Parquet file is presented as ONE table named `data`, both in the sidebar
-//! and to the SQL tab, so every IPC command keeps the shape the SQLite path
-//! already returns and the frontend needs no second code path.
+//! A file is presented as ONE table named `data`, both in the sidebar and to
+//! the SQL tab, so every IPC command keeps the shape the SQLite path already
+//! returns and the frontend needs no second code path.
+//!
+//! **CSV and JSON are loaded into the browse instance once, as a table.**
+//! Paging and the sort cache need a stable row number (`file_row_number`),
+//! which only `read_parquet` provides. A table's `rowid` is that number for a
+//! table filled in file order, so `data_rn` exposes it under the same name and
+//! [`query`] needs no format of its own. Reading the text file per page
+//! instead would re-parse all of it for every page and every sort. The SQL
+//! tab's instance reads the file per query, as it does for Parquet.
 //!
 //! Two DuckDB instances, mirroring the SQLite `conn`/`aux_conn` split:
 //!
@@ -51,10 +61,50 @@ const MEMORY_LIMIT: &str = "2GB";
 /// on Windows an open file cannot be deleted anyway.
 const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
+/// The file formats DuckDB reads for dblitz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileFormat {
+    Parquet,
+    Csv,
+    Json,
+}
+
+impl FileFormat {
+    /// Which DuckDB format `path` is, or `None` for the SQLite path.
+    ///
+    /// Parquet is detected by content, so a renamed Parquet file still opens.
+    /// CSV and JSON have no magic bytes, so they go by extension: `.csv` and
+    /// `.tsv` (DuckDB's sniffer finds the delimiter either way), `.json`,
+    /// `.jsonl` and `.ndjson` (`read_json` tells an array from one object per
+    /// line). Anything else goes to SQLite unchanged, so opening a file that is
+    /// neither errors exactly as before.
+    pub fn of(path: &str) -> Option<FileFormat> {
+        if is_parquet(path) {
+            return Some(FileFormat::Parquet);
+        }
+        let ext = Path::new(path)
+            .extension()?
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        match ext.as_str() {
+            "csv" | "tsv" => Some(FileFormat::Csv),
+            "json" | "jsonl" | "ndjson" => Some(FileFormat::Json),
+            _ => None,
+        }
+    }
+
+    /// The table function that reads `file`, an already-quoted SQL literal.
+    pub(crate) fn reader(self, file: &str) -> String {
+        match self {
+            FileFormat::Parquet => format!("read_parquet({file})"),
+            FileFormat::Csv => format!("read_csv({file})"),
+            FileFormat::Json => format!("read_json({file})"),
+        }
+    }
+}
+
 /// `true` when the file starts AND ends with the Parquet magic `PAR1`.
-/// Detection is by content, not extension: anything else goes to the SQLite
-/// path unchanged, so opening a non-SQLite file errors exactly as before.
-pub fn is_parquet(path: &str) -> bool {
+fn is_parquet(path: &str) -> bool {
     fn check(path: &str) -> std::io::Result<bool> {
         let mut f = std::fs::File::open(path)?;
         let len = f.metadata()?.len();
@@ -182,7 +232,10 @@ impl ParquetSession {
     /// returned session is touched, so a failure leaves whatever the caller
     /// had open intact.
     pub fn open(path: &str) -> Result<Self, String> {
+        let format = FileFormat::of(path)
+            .ok_or_else(|| format!("{path} is not a Parquet, CSV or JSON file"))?;
         let file = sql_literal(path);
+        let reader = format.reader(&file);
         let spill_dir = session_path("spill", "");
         // DuckDB creates its temp directory on the first spill, but not that
         // directory's parents - on a machine that never ran dblitz, every
@@ -209,27 +262,55 @@ impl ParquetSession {
                 "SET autoinstall_known_extensions = false;
                  SET autoload_known_extensions = false;
                  SET memory_limit = '{MEMORY_LIMIT}';
-                 SET temp_directory = {spill};
-                 CREATE VIEW data AS SELECT * FROM read_parquet({file});"
+                 SET temp_directory = {spill};"
             ))
+            .map_err(|e| e.to_string())?;
+        let source = match format {
+            FileFormat::Parquet => reader.clone(),
+            // `preserve_insertion_order` is DuckDB's default, so the table is
+            // filled in file order and `rowid` counts lines (or array items).
+            FileFormat::Csv | FileFormat::Json => {
+                browse
+                    .execute_batch(&format!(
+                        "CREATE TABLE file_rows AS SELECT * FROM {reader};"
+                    ))
+                    .map_err(|e| e.to_string())?;
+                "file_rows".to_string()
+            }
+        };
+        browse
+            .execute_batch(&format!("CREATE VIEW data AS SELECT * FROM {source};"))
             .map_err(|e| e.to_string())?;
 
         let columns = describe(browse)?;
-        let row_numbers = !columns.iter().any(|c| c.name == "file_row_number");
+        // A column of the file's own named `file_row_number` would collide
+        // with the one `data_rn` adds, and one named `rowid` hides a table's
+        // `rowid`; either sends every view to `LIMIT/OFFSET` ([`query`]).
+        let row_numbers = !columns.iter().any(|c| {
+            c.name.eq_ignore_ascii_case("file_row_number")
+                || (format != FileFormat::Parquet && c.name.eq_ignore_ascii_case("rowid"))
+        });
         if row_numbers {
+            let rn = match format {
+                FileFormat::Parquet => {
+                    format!("SELECT * FROM read_parquet({file}, file_row_number = true)")
+                }
+                FileFormat::Csv | FileFormat::Json => {
+                    "SELECT *, rowid AS file_row_number FROM file_rows".to_string()
+                }
+            };
             browse
-                .execute_batch(&format!(
-                    "CREATE VIEW data_rn AS SELECT * FROM read_parquet({file}, file_row_number = true);"
-                ))
+                .execute_batch(&format!("CREATE VIEW data_rn AS {rn};"))
                 .map_err(|e| e.to_string())?;
         }
-        // Answered from the footer, not by scanning: 18 ms cold on 50M rows.
+        // Parquet answers from the footer, not by scanning: 18 ms cold on 50M
+        // rows. CSV and JSON count the table loaded above.
         let total_rows: i64 = browse
             .query_row("SELECT count(*) FROM data", [], |r| r.get(0))
             .map_err(|e| e.to_string())?;
-        let schema_sql = describe_file(browse, path, &file, total_rows)?;
+        let schema_sql = describe_file(browse, path, format, &file, total_rows)?;
 
-        let sql = lockdown::LockedDb::open(path, &spill_dir.to_string_lossy())?;
+        let sql = lockdown::LockedDb::open(path, format, &spill_dir.to_string_lossy())?;
         let browse_interrupt = browse.interrupt_handle();
         let builder = raw.side_handle();
         let sql_interrupt = sql.interrupt_handle();
@@ -275,6 +356,13 @@ impl ParquetSession {
 
     pub fn execute_sql(&self, sql: &str, generation: &AtomicU64) -> crate::db::SqlResult {
         sql::execute_sql(&self.sql.lock(), sql, generation)
+    }
+
+    /// `None` while the SQL tab's instance is busy running a query; see
+    /// `db::validate_sql` for why this never waits for the lock.
+    pub fn validate_sql(&self, sql: &str) -> Option<crate::db::SqlCheck> {
+        let db = self.sql.try_lock()?;
+        Some(sql::validate_sql(&db, sql))
     }
 
     pub fn count_rows(
@@ -352,7 +440,45 @@ fn describe(conn: &Connection) -> Result<Vec<ColumnInfo>, String> {
 
 /// The Structure tab's text for the file: a comment header with what the
 /// footer says, then the view the SQL tab queries. The frontend appends `;`.
-fn describe_file(conn: &Connection, path: &str, file: &str, rows: i64) -> Result<String, String> {
+fn describe_file(
+    conn: &Connection,
+    path: &str,
+    format: FileFormat,
+    file: &str,
+    rows: i64,
+) -> Result<String, String> {
+    let name = Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string());
+    let view = format!(
+        "CREATE VIEW data AS SELECT * FROM {}",
+        format.reader(&sql_literal(&name))
+    );
+    match format {
+        FileFormat::Parquet => {}
+        FileFormat::Csv => {
+            // What DuckDB's sniffer decided, since every column type follows from it.
+            let (delimiter, header): (String, bool) = conn
+                .query_row(
+                    &format!("SELECT Delimiter, HasHeader FROM sniff_csv({file})"),
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            let delimiter = match delimiter.as_str() {
+                "\t" => "tab".to_string(),
+                d => format!("'{d}'"),
+            };
+            let header = if header { "yes" } else { "no" };
+            return Ok(format!(
+                "-- CSV file: {name}\n-- Rows: {rows}\n-- Delimiter: {delimiter}\n-- Header row: {header}\n{view}"
+            ));
+        }
+        FileFormat::Json => {
+            return Ok(format!("-- JSON file: {name}\n-- Rows: {rows}\n{view}"));
+        }
+    }
     let (created_by, row_groups): (Option<String>, i64) = conn
         .query_row(
             &format!("SELECT created_by, num_row_groups FROM parquet_file_metadata({file})"),
@@ -369,10 +495,6 @@ fn describe_file(conn: &Connection, path: &str, file: &str, rows: i64) -> Result
             |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
-    let name = Path::new(path)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string());
     let mut s = format!("-- Parquet file: {name}\n-- Rows: {rows}\n-- Row groups: {row_groups}\n");
     if let Some(c) = compression.filter(|c| !c.is_empty()) {
         s.push_str(&format!("-- Compression: {c}\n"));
@@ -380,10 +502,7 @@ fn describe_file(conn: &Connection, path: &str, file: &str, rows: i64) -> Result
     if let Some(c) = created_by.filter(|c| !c.is_empty()) {
         s.push_str(&format!("-- Created by: {}\n", c.replace('\n', " ")));
     }
-    s.push_str(&format!(
-        "CREATE VIEW data AS SELECT * FROM read_parquet({})",
-        sql_literal(&name)
-    ));
+    s.push_str(&view);
     Ok(s)
 }
 
@@ -441,6 +560,81 @@ pub(crate) mod tests {
         std::fs::write(&other, b"PAR1 but not at the end").unwrap();
         assert!(!is_parquet(other.to_str().unwrap()));
         assert!(!is_parquet(dir.join("missing").to_str().unwrap()));
+    }
+
+    #[test]
+    fn csv_and_json_are_detected_by_extension_and_parquet_by_content() {
+        let dir = scratch_dir("detect-format");
+        let of = |name: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, "a\n1\n").unwrap();
+            FileFormat::of(p.to_str().unwrap())
+        };
+        assert_eq!(of("x.csv"), Some(FileFormat::Csv));
+        assert_eq!(of("X.TSV"), Some(FileFormat::Csv));
+        assert_eq!(of("x.json"), Some(FileFormat::Json));
+        assert_eq!(of("x.jsonl"), Some(FileFormat::Json));
+        assert_eq!(of("x.NDJSON"), Some(FileFormat::Json));
+        assert_eq!(of("x.txt"), None);
+        assert_eq!(of("x.sqlite"), None);
+        assert_eq!(of("csv"), None, "a bare name is not an extension");
+        // Content wins over the extension for Parquet.
+        let renamed = dir.join("really.csv");
+        std::fs::copy(fixture(&dir, 3), &renamed).unwrap();
+        assert_eq!(
+            FileFormat::of(renamed.to_str().unwrap()),
+            Some(FileFormat::Parquet)
+        );
+    }
+
+    #[test]
+    fn a_tsv_reports_what_the_sniffer_decided() {
+        let dir = scratch_dir("tsv");
+        let path = dir.join("people.tsv");
+        std::fs::write(&path, "name\tage\nAda\t36\nBen\t41\n").unwrap();
+        let s = ParquetSession::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(s.tables()[0].row_count, 2);
+        let cols = s.get_columns("data").unwrap();
+        assert_eq!(cols[1].name, "age");
+        assert_eq!(cols[1].col_type, "BIGINT");
+        let schema = s.get_schema()[0].sql.clone().unwrap();
+        assert_eq!(
+            schema,
+            "-- CSV file: people.tsv\n-- Rows: 2\n-- Delimiter: tab\n-- Header row: yes\n\
+             CREATE VIEW data AS SELECT * FROM read_csv('people.tsv')"
+        );
+    }
+
+    #[test]
+    fn the_sql_tab_reads_the_opened_csv_and_no_other_file() {
+        let dir = scratch_dir("csv-sql");
+        let path = dir.join("rows.csv");
+        let other = dir.join("other.csv");
+        std::fs::write(&path, "id,price\n1,9.5\n2,12.0\n3,4.25\n").unwrap();
+        std::fs::write(&other, "secret\n42\n").unwrap();
+        let s = ParquetSession::open(path.to_str().unwrap()).unwrap();
+        let g = AtomicU64::new(0);
+        let r = s.execute_sql("SELECT sum(price) FROM data WHERE id > 1", &g);
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.rows[0][0].as_deref(), Some("16.25"));
+        let escape = format!(
+            "SELECT * FROM read_csv({})",
+            sql_literal(other.to_str().unwrap())
+        );
+        let r = s.execute_sql(&escape, &g);
+        assert!(r.rows.is_empty(), "read another file: {:?}", r.rows);
+        assert!(r.error.is_some());
+    }
+
+    #[test]
+    fn a_malformed_json_file_fails_to_open_with_duckdbs_message() {
+        let dir = scratch_dir("bad-json");
+        let path = dir.join("broken.json");
+        std::fs::write(&path, "[{\"a\": 1}, {\"a\": ").unwrap();
+        let err = ParquetSession::open(path.to_str().unwrap())
+            .err()
+            .expect("a truncated JSON file must not open");
+        assert!(err.to_lowercase().contains("json"), "{err}");
     }
 
     #[test]
