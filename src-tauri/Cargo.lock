@@ -936,7 +936,7 @@ dependencies = [
 
 [[package]]
 name = "dblitz"
-version = "26.10.3"
+version = "26.10.4"
 dependencies = [
  "dirs",
  "duckdb",
