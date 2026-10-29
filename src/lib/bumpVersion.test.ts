@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,7 +10,27 @@ import { bumpVersionFiles, nextVersion } from "../../scripts/bump-version.mjs";
 import { checkReleaseContract, readReleaseFiles } from "../../scripts/release-preflight.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const repoFiles = () => readReleaseFiles(root, (p) => readFileSync(p, "utf8"));
+// A version the repository will not reach, so these tests never bump to the current one.
+const TARGET = "99.1.0";
+
+/**
+ * The CHANGELOG with a pending section. A release commit dates the pending
+ * heading, so on a release tree there is none and `--release` refuses, as it
+ * should; the tests below must pass at every point of the cycle (they failed
+ * the release gate of 26.10.4 by assuming a pending section).
+ */
+function withPendingSection(changelog: string): string {
+  if (/^## \[[^\]]+\] - Unreleased$/m.test(changelog)) return changelog;
+  const at = changelog.search(/^## \[/m);
+  expect(at).toBeGreaterThan(0);
+  const section = "## [99.0.0] - Unreleased\n\n### Added\n- A note.\n\n";
+  return changelog.slice(0, at) + section + changelog.slice(at);
+}
+
+const repoFiles = () => {
+  const files = readReleaseFiles(root, (p) => readFileSync(p, "utf8"));
+  return { ...files, changelog: withPendingSection(files.changelog) };
+};
 const repoVersion = () => (JSON.parse(repoFiles().packageJson) as { version: string }).version;
 
 /** Lines that differ between two texts of the same line count. */
@@ -36,26 +56,26 @@ describe("nextVersion", () => {
 describe("bumpVersionFiles on the repository's own files", () => {
   it("produces a tree the release preflight accepts", () => {
     const files = repoFiles();
-    const bumped = bumpVersionFiles(files, "26.11.0", { releaseDate: "2026-11-03" });
-    expect(checkReleaseContract({ tag: "v26.11.0", ...bumped })).toEqual([]);
+    const bumped = bumpVersionFiles(files, TARGET, { releaseDate: "2026-11-03" });
+    expect(checkReleaseContract({ tag: `v${TARGET}`, ...bumped })).toEqual([]);
     // Control: the unbumped tree fails the same check, so the pass above is the bump's doing.
-    expect(checkReleaseContract({ tag: "v26.11.0", ...files })).not.toEqual([]);
+    expect(checkReleaseContract({ tag: `v${TARGET}`, ...files })).not.toEqual([]);
   });
 
   it("changes the version lines and nothing else", () => {
     const files = repoFiles();
     const old = repoVersion();
-    const bumped = bumpVersionFiles(files, "26.11.0", { releaseDate: "2026-11-03" });
-    expect(changedLines(files.packageJson, bumped.packageJson)).toEqual(['  "version": "26.11.0",']);
+    const bumped = bumpVersionFiles(files, TARGET, { releaseDate: "2026-11-03" });
+    expect(changedLines(files.packageJson, bumped.packageJson)).toEqual([`  "version": "${TARGET}",`]);
     expect(changedLines(files.packageLock, bumped.packageLock)).toEqual([
-      '  "version": "26.11.0",',
-      '      "version": "26.11.0",',
+      `  "version": "${TARGET}",`,
+      `      "version": "${TARGET}",`,
     ]);
-    expect(changedLines(files.cargoToml, bumped.cargoToml)).toEqual(['version = "26.11.0"']);
-    expect(changedLines(files.cargoLock, bumped.cargoLock)).toEqual(['version = "26.11.0"']);
+    expect(changedLines(files.cargoToml, bumped.cargoToml)).toEqual([`version = "${TARGET}"`]);
+    expect(changedLines(files.cargoLock, bumped.cargoLock)).toEqual([`version = "${TARGET}"`]);
     expect(changedLines(files.tauriConf, bumped.tauriConf)).toHaveLength(1);
-    expect(changedLines(files.changelog, bumped.changelog)).toEqual(["## [26.11.0] - 2026-11-03"]);
-    expect(old).not.toBe("26.11.0");
+    expect(changedLines(files.changelog, bumped.changelog)).toEqual([`## [${TARGET}] - 2026-11-03`]);
+    expect(old).not.toBe(TARGET);
   });
 });
 
@@ -134,6 +154,8 @@ describe("the bump CLI", () => {
     ]) {
       copyFileSync(join(root, f), join(dir, f));
     }
+    const changelog = join(dir, "CHANGELOG.md");
+    writeFileSync(changelog, withPendingSection(readFileSync(changelog, "utf8")));
     return dir;
   }
   const node = (dir: string, ...args: string[]) =>
@@ -142,13 +164,13 @@ describe("the bump CLI", () => {
   it("writes every file and leaves a tree the preflight CLI accepts", () => {
     const dir = copyTree();
     try {
-      const run = node(dir, "scripts/bump-version.mjs", "26.11.0", "--release", "2026-11-03");
+      const run = node(dir, "scripts/bump-version.mjs", TARGET, "--release", "2026-11-03");
       expect(run.stderr).toBe("");
       expect(run.status).toBe(0);
-      expect(run.stdout).toContain(`[OK] ${repoVersion()} -> 26.11.0`);
+      expect(run.stdout).toContain(`[OK] ${repoVersion()} -> ${TARGET}`);
       const written = readReleaseFiles(dir, (p) => readFileSync(p, "utf8"));
-      expect((JSON.parse(written.tauriConf) as { version: string }).version).toBe("26.11.0");
-      const pre = node(dir, "scripts/release-preflight.mjs", "v26.11.0");
+      expect((JSON.parse(written.tauriConf) as { version: string }).version).toBe(TARGET);
+      const pre = node(dir, "scripts/release-preflight.mjs", `v${TARGET}`);
       expect(pre.status).toBe(0);
       expect(pre.stdout).toContain("[OK] Release preflight");
     } finally {

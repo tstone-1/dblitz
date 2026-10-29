@@ -697,6 +697,9 @@ leg reads every signature back.
   not be rejected. Without `--release` it bumps the files and leaves the heading
   `Unreleased`. Check the result any time with
   `node scripts/release-preflight.mjs vYY.M.MICRO`.
+- [ ] Run `npm run quality` again on the bumped tree. The gate above ran before
+  the bump, and the tag points at this tree: 26.10.4's first tag failed CI's
+  `quality` job on tests that passed until the CHANGELOG heading was dated.
 - [ ] Read the release notes written out in `release.yml` (`create-release`,
   the `NOTES` block). They are a literal, so nothing fails when a sentence in
   them has become false.
