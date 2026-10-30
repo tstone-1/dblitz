@@ -786,7 +786,7 @@ pub(crate) mod tests {
         assert_eq!(r.rows[0][0].as_deref(), Some("-"));
         let view = sql_view_definition(&s);
         assert!(
-            view.contains("auto_detect") && !view.contains("-1"),
+            view.contains("auto_detect") && !view.contains("sample_size"),
             "the view must not scan the file on every bind: {view}"
         );
         assert_eq!(
@@ -857,7 +857,10 @@ pub(crate) mod tests {
         assert!(r.error.is_none(), "{:?}", r.error);
         assert_eq!(r.rows[0][0].as_deref(), Some("2"));
         let view = sql_view_definition(&s);
-        assert!(view.contains("columns") && !view.contains("-1"), "{view}");
+        assert!(
+            view.contains("columns") && !view.contains("sample_size"),
+            "{view}"
+        );
         assert!(s.get_schema()[0]
             .sql
             .as_deref()
