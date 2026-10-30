@@ -31,6 +31,7 @@ entry holds the reasoning, the incident and the tests that pin it.
 - *Type-checking runs on TypeScript 7 through `svelte-check --tsgo`* — TS 6 stays installed on purpose; the wrapper fails a svelte-check run that crashed with exit 0.
 - *Vitest's global environment is `node`* — DOM tests opt in per file with a `@vitest-environment jsdom` pragma.
 - *A green gate on one OS says nothing about a `cfg`-gated symbol on another* — 26.8.1 failed on Linux over an import only Windows/macOS used; annotate types on every `cfg` arm, check the other OS before tagging.
+- *A substring check over text holding a scratch path depends on the process id* — `contains("-1")` matched the pid in a temp path and failed the 26.10.5 tag run only; assert the option by its name.
 - *A Windows machine can run the Linux gate through WSL* — the recipe, with its own target dir; Linux runs ten fewer Rust tests, all Windows-only.
 - *There is no Windows cross-check from macOS* — `ring` and `libsqlite3-sys` need MSVC; `cfg(windows)` code changed on a Mac is verified only by the Windows CI leg.
 - *A Windows machine can run the macOS gate on a Mac over ssh* — tar the uncommitted tree plus `build/` to a scratch folder and run the gate there; set `PATH` to `~/.cargo/bin`, ssh has none.
@@ -70,6 +71,7 @@ entry holds the reasoning, the incident and the tests that pin it.
 ### CI
 
 - *The three workflows, and the tests that pin them* — `checks.yml`, `release.yml`, `sign-rehearsal.yml`; three test files fail on any drift.
+- *`DirectoryNotEmpty` from `libduckdb-sys` on Windows is the restored rust-cache* — rust-cache's cleanup strips files from `target/duckdb-sources`, `.complete` included; a script now removes that folder after the restore.
 - *Every `uses:` is pinned to a full commit SHA* — the release job holds every signing secret; Dependabot advances pins monthly, `tauri-action` in a group of its own.
 - *`dtolnay/rust-toolchain` is pinned to tag `v1`* — where `toolchain` is a required input, so the `with:` block is load-bearing.
 - *Every job has a `timeout-minutes` with its observed maximum* — release legs are 90 minutes each and run one at a time.

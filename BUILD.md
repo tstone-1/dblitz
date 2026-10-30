@@ -797,6 +797,16 @@ locally — CI does. `npx tauri build` is only for a local desktop artifact.
 > appended to it. Rerun the build; nothing needs cleaning. (Seen once, 26.10.0,
 > right after `cargo update` moved `libduckdb-sys`.)
 
+> **Gotcha — `Checks` fails on Windows with `unpacking bundled DuckDB sources:
+> Os { code: 145, kind: DirectoryNotEmpty }`.** The restored Rust cache held
+> DuckDB's source folder without its `.complete` marker.
+> `scripts/drop-incomplete-duckdb-sources.sh` removes that folder after the
+> restore, so this should not come back. If it does, delete the
+> `v0-rust-backend-Windows_NT-*` caches with `gh cache delete <key>`, then
+> `gh run rerun <run-id> --failed`. (Seen on `26.10.5`, 2026-10-30, after the
+> `Cargo.lock` update; the release legs were not affected. Full account in
+> `docs/agent-notes.md`.)
+
 > **Gotcha — transient `publish`-job cancellation.** The `publish` job (a
 > one-line `gh release edit --draft=false`) is occasionally **cancelled** by a
 > GitHub Actions infra flake even when all five build legs succeed; `update-tap`

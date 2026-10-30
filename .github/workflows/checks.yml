@@ -87,6 +87,12 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
+      # A restored cache holds DuckDB's source folder without its files, which
+      # fails the next libduckdb-sys build script run. See the script's header.
+      - name: Remove incomplete DuckDB sources
+        shell: bash
+        run: bash scripts/drop-incomplete-duckdb-sources.sh src-tauri/target
+
       # Tauri 2 on Linux pulls in webkit2gtk-4.1 (Ubuntu 24.04+) and a few
       # X11/glib helpers via its build deps. Required for `cargo check`,
       # `cargo clippy`, and `cargo test` to compile the lib crate.
@@ -170,6 +176,10 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri -> target
+
+      - name: Remove incomplete DuckDB sources
+        shell: bash
+        run: bash scripts/drop-incomplete-duckdb-sources.sh src-tauri/target
 
       # The shared Tauri build list, plus the two extras only this job needs:
       # the WebDriver host tauri-driver proxies to, and a virtual display for

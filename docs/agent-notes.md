@@ -25,6 +25,10 @@ Read the section before working in its area.
 
 - **A green gate on one OS says nothing about a `cfg`-gated symbol on another, and `-D warnings` turns that into a hard build failure.** Hit cutting 26.8.1: `use updates::{InstallProvenance, UpdateStatus};` compiled clean on Windows and failed the Linux release leg with `error: unused import: InstallProvenance` — the only two places naming that type were `cfg(windows)` and `cfg(target_os = "macos")`, so on Linux the import was genuinely unused. Windows clippy structurally cannot see it. The tag had already been pushed; nothing published, because the `quality` job runs before `create-release`. Two habits: annotate the type on every arm of a `cfg` triple (`let provenance: InstallProvenance = ...`) so the name is used everywhere, and **check the other platform before pushing a tag** rather than after. `checks.yml`'s backend job covers all three OSes but only on push/PR, which a same-moment tag push races.
 
+### A substring check over text holding a scratch path depends on the process id
+
+- **A substring check over text holding a scratch path depends on the process id.** A `pq` test asserted `!view.contains("-1")` to prove the SQL tab's view does not rescan. The view definition holds the temp path, and on the 26.10.5 tag run that path held `-18004-49`, so the check failed in `quality` although the code was right. It had passed locally, because the local pid had no `-1` in that position. Nothing published, because `quality` runs before `create-release`. Assert the option by its name (`sample_size`), and read any negative `contains` over generated SQL as a check on the path as well.
+
 ### A Windows machine can run the Linux gate through WSL
 
 - **A Windows machine can run the Linux gate for real, through WSL**, which is the cheapest way to close half of the gap above. Install the same apt deps `.github/tauri-linux-deps.txt` lists plus rustup stable, then run the gate against the checkout over `/mnt/...`, giving it its own target dir so it cannot thrash the Windows one:
@@ -412,6 +416,37 @@ the `json` feature of the `duckdb` crate, because extension autoinstall is off.
 signing* below). All three are pinned and bounded;
 `src/lib/releaseWorkflow.test.ts`, `checksWorkflow.test.ts` and
 `windowsSigning.test.ts` fail on any drift.
+
+### `DirectoryNotEmpty` from `libduckdb-sys` on Windows is the restored rust-cache
+
+`Checks` failed on both Windows legs after the `Cargo.lock` update for 26.10.5:
+`unpacking bundled DuckDB sources: Os { code: 145, kind: DirectoryNotEmpty }`. The
+build script unpacks into a staging folder and renames it onto
+`target/duckdb-sources/<hash>`, and that rename fails when the folder exists without
+its `.complete` marker.
+
+The marker goes missing when the cache is saved. `rust-cache`'s `cleanTargetDir`
+treats a folder under `target` as a profile only if it has `build`, `.fingerprint`
+or `deps`. Any other folder it descends into, deleting every file and keeping the
+subfolders. So the cached `duckdb-sources/<hash>` is a tree of empty folders. The
+cache key does contain the lockfile hash, but the restore key falls back to the
+newest cache without it, so a `Cargo.lock` change restores that tree. On that run the
+Windows legs ran the build script again, and macOS and Linux did not compile
+`libduckdb-sys` at all, so they passed with the same folder. Why cargo reran it only
+on Windows is not known.
+
+`scripts/drop-incomplete-duckdb-sources.sh` now removes such a folder after the
+restore, in both `checks.yml` jobs that restore a Rust cache, and prints what it
+kept or removed. The release workflow does not run it: its legs log `No cache found`
+on a new tag, because a tag cannot restore a cache saved on another tag. A tag moved
+after a leg finished could hit the error. If the error comes back, delete the caches
+and rerun the failed jobs; the cold build passed that way:
+
+```bash
+gh cache list --key v0-rust-backend-Windows_NT
+gh cache delete <key>
+gh run rerun <run id> --failed
+```
 
 ### Every `uses:` is pinned to a full commit SHA
 
