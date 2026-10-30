@@ -101,6 +101,118 @@ impl FileFormat {
             FileFormat::Json => format!("read_json({file})"),
         }
     }
+
+    /// The same reader, deciding from every row instead of the first 20,480.
+    /// Not for the SQL tab's view: a view binds again on every prepare, and the
+    /// live check prepares after every keystroke ([`FullScan`]).
+    fn full_scan_reader(self, file: &str) -> String {
+        match self {
+            FileFormat::Parquet => self.reader(file),
+            FileFormat::Csv => format!("read_csv({file}, sample_size = -1)"),
+            FileFormat::Json => format!("read_json({file}, sample_size = -1)"),
+        }
+    }
+}
+
+/// What a CSV or JSON file needed when the first 20,480 rows did not describe
+/// it, as when a column of numbers holds a `-` further down.
+struct FullScan {
+    /// A reader with the scan's result written out, so it detects nothing when
+    /// it binds: 1 ms against 2 s on a 233 MB CSV.
+    pinned_reader: String,
+    /// Delimiter and header row, for CSV; the scan already found them.
+    dialect: Option<(String, bool)>,
+}
+
+/// Loads a CSV or JSON file into `file_rows`. The sample decides first because
+/// a full scan costs 13 times the load (2.2 s against 0.16 s on that file).
+/// `None` means the sample was enough. When the full scan fails too, the file
+/// is what is wrong, and the first error names the row.
+fn load_text_file(
+    conn: &Connection,
+    format: FileFormat,
+    file: &str,
+) -> Result<Option<FullScan>, String> {
+    match load_rows(conn, &format.reader(file)) {
+        Ok(()) => Ok(None),
+        Err(sampled) => load_full_scan(conn, format, file)
+            .map(Some)
+            .map_err(|_| sampled),
+    }
+}
+
+fn load_rows(conn: &Connection, reader: &str) -> Result<(), String> {
+    conn.execute_batch(&format!(
+        "CREATE TABLE file_rows AS SELECT * FROM {reader};"
+    ))
+    .map_err(|e| e.to_string())
+}
+
+fn load_full_scan(conn: &Connection, format: FileFormat, file: &str) -> Result<FullScan, String> {
+    if format == FileFormat::Csv {
+        let (pinned_reader, dialect) = pinned_csv_reader(conn, file)?;
+        load_rows(conn, &pinned_reader)?;
+        return Ok(FullScan {
+            pinned_reader,
+            dialect: Some(dialect),
+        });
+    }
+    load_rows(conn, &format.full_scan_reader(file))?;
+    let columns: String = conn
+        .query_row(
+            "SELECT string_agg('''' || replace(name, '''', '''''') || ''': ''' || type || '''', ', ' ORDER BY cid)
+             FROM pragma_table_info('file_rows')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(FullScan {
+        pinned_reader: format!("read_json({file}, columns = {{{columns}}})"),
+        dialect: None,
+    })
+}
+
+/// Sniffs every row and writes the result out as a `read_csv` call. Built from
+/// the fields because the sniffer's own `Prompt` column does not escape: a path
+/// or a column name with an apostrophe in it does not parse.
+fn pinned_csv_reader(conn: &Connection, file: &str) -> Result<(String, (String, bool)), String> {
+    // The sniffer reports an unset option as this text, where `read_csv` wants ''.
+    let option = |v: String| sql_literal(if v == "(empty)" { "" } else { &v });
+    conn.query_row(
+        &format!(
+            "SELECT Delimiter, Quote, Escape, NewLineDelimiter, Comment, SkipRows, HasHeader,
+                    array_to_string(list_transform(Columns, lambda c:
+                        '''' || replace(c.name, '''', '''''') || ''': ''' || c.type || ''''), ', '),
+                    DateFormat, TimestampFormat
+             FROM sniff_csv({file}, sample_size = -1)"
+        ),
+        [],
+        |r| {
+            let delimiter: String = r.get(0)?;
+            let header: bool = r.get(6)?;
+            let mut reader = format!(
+                "read_csv({file}, auto_detect = false, delim = {}, quote = {}, escape = {}, new_line = {}, comment = {}, skip = {}, header = {header}, columns = {{{}}}",
+                option(delimiter.clone()),
+                option(r.get(1)?),
+                option(r.get(2)?),
+                option(r.get(3)?),
+                option(r.get(4)?),
+                r.get::<_, i64>(5)?,
+                r.get::<_, String>(7)?,
+            );
+            for (name, value) in [
+                ("dateformat", r.get::<_, Option<String>>(8)?),
+                ("timestampformat", r.get::<_, Option<String>>(9)?),
+            ] {
+                if let Some(v) = value.filter(|v| v != "(empty)") {
+                    reader.push_str(&format!(", {name} = {}", sql_literal(&v)));
+                }
+            }
+            reader.push(')');
+            Ok((reader, (delimiter, header)))
+        },
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// `true` when the file starts AND ends with the Parquet magic `PAR1`.
@@ -265,16 +377,13 @@ impl ParquetSession {
                  SET temp_directory = {spill};"
             ))
             .map_err(|e| e.to_string())?;
+        let mut full_scan = None;
         let source = match format {
             FileFormat::Parquet => reader.clone(),
             // `preserve_insertion_order` is DuckDB's default, so the table is
             // filled in file order and `rowid` counts lines (or array items).
             FileFormat::Csv | FileFormat::Json => {
-                browse
-                    .execute_batch(&format!(
-                        "CREATE TABLE file_rows AS SELECT * FROM {reader};"
-                    ))
-                    .map_err(|e| e.to_string())?;
+                full_scan = load_text_file(browse, format, &file)?;
                 "file_rows".to_string()
             }
         };
@@ -308,9 +417,11 @@ impl ParquetSession {
         let total_rows: i64 = browse
             .query_row("SELECT count(*) FROM data", [], |r| r.get(0))
             .map_err(|e| e.to_string())?;
-        let schema_sql = describe_file(browse, path, format, &file, total_rows)?;
+        let schema_sql =
+            describe_file(browse, path, format, &file, total_rows, full_scan.as_ref())?;
 
-        let sql = lockdown::LockedDb::open(path, format, &spill_dir.to_string_lossy())?;
+        let sql_reader = full_scan.as_ref().map_or(&reader, |f| &f.pinned_reader);
+        let sql = lockdown::LockedDb::open(path, sql_reader, &spill_dir.to_string_lossy())?;
         let browse_interrupt = browse.interrupt_handle();
         let builder = raw.side_handle();
         let sql_interrupt = sql.interrupt_handle();
@@ -446,26 +557,36 @@ fn describe_file(
     format: FileFormat,
     file: &str,
     rows: i64,
+    full_scan: Option<&FullScan>,
 ) -> Result<String, String> {
     let name = Path::new(path)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string());
+    let shown_file = sql_literal(&name);
     let view = format!(
         "CREATE VIEW data AS SELECT * FROM {}",
-        format.reader(&sql_literal(&name))
+        if full_scan.is_some() {
+            format.full_scan_reader(&shown_file)
+        } else {
+            format.reader(&shown_file)
+        }
     );
     match format {
         FileFormat::Parquet => {}
         FileFormat::Csv => {
             // What DuckDB's sniffer decided, since every column type follows from it.
-            let (delimiter, header): (String, bool) = conn
-                .query_row(
-                    &format!("SELECT Delimiter, HasHeader FROM sniff_csv({file})"),
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .map_err(|e| e.to_string())?;
+            let (delimiter, header): (String, bool) =
+                match full_scan.and_then(|f| f.dialect.clone()) {
+                    Some(dialect) => dialect,
+                    None => conn
+                        .query_row(
+                            &format!("SELECT Delimiter, HasHeader FROM sniff_csv({file})"),
+                            [],
+                            |r| Ok((r.get(0)?, r.get(1)?)),
+                        )
+                        .map_err(|e| e.to_string())?,
+                };
             let delimiter = match delimiter.as_str() {
                 "\t" => "tab".to_string(),
                 d => format!("'{d}'"),
@@ -624,6 +745,135 @@ pub(crate) mod tests {
         let r = s.execute_sql(&escape, &g);
         assert!(r.rows.is_empty(), "read another file: {:?}", r.rows);
         assert!(r.error.is_some());
+    }
+
+    /// Good lines past DuckDB's 20,480-row sample.
+    const SAMPLED: u64 = 25_000;
+
+    /// `header`, then `SAMPLED` copies of `line`, then `late`.
+    fn with_late_row(path: &Path, header: &str, line: &str, late: &str) {
+        let mut text = format!("{header}\n");
+        for _ in 0..SAMPLED {
+            text.push_str(line);
+            text.push('\n');
+        }
+        text.push_str(late);
+        text.push('\n');
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// The SQL the locked instance's `data` view runs on every bind.
+    fn sql_view_definition(s: &ParquetSession) -> String {
+        let r = s.execute_sql(
+            "SELECT sql FROM duckdb_views() WHERE view_name = 'data'",
+            &AtomicU64::new(0),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        r.rows[0][0].clone().unwrap()
+    }
+
+    #[test]
+    fn a_csv_with_text_below_the_sample_opens_with_that_column_as_text() {
+        let dir = scratch_dir("csv-late-type");
+        let path = dir.join("late.csv");
+        with_late_row(&path, "name,node", "a,123", "b,-");
+        let s = ParquetSession::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(s.tables()[0].row_count, SAMPLED as i64 + 1);
+        let cols = s.get_columns("data").unwrap();
+        assert_eq!(cols[1].col_type, "VARCHAR");
+        let r = s.execute_sql("SELECT node FROM data WHERE name = 'b'", &AtomicU64::new(0));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.rows[0][0].as_deref(), Some("-"));
+        let view = sql_view_definition(&s);
+        assert!(
+            view.contains("auto_detect") && !view.contains("-1"),
+            "the view must not scan the file on every bind: {view}"
+        );
+        assert_eq!(
+            s.get_schema()[0].sql.clone().unwrap(),
+            format!(
+                "-- CSV file: late.csv\n-- Rows: {}\n-- Delimiter: ','\n-- Header row: yes\n\
+                 CREATE VIEW data AS SELECT * FROM read_csv('late.csv', sample_size = -1)",
+                SAMPLED + 1
+            )
+        );
+    }
+
+    #[test]
+    fn the_pinned_csv_reader_survives_what_the_sniffers_prompt_does_not() {
+        let dir = scratch_dir("csv-pinned").join("o'brien dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("it's.csv");
+        with_late_row(
+            &path,
+            "it's;\"a\"\"b\";day;seen",
+            "1;x;31/12/2024;31/12/2024 08:30:00",
+            // Text in the number column, and the first quote in the file.
+            "-;\"x;y\";01/02/2025;01/02/2025 09:45:00",
+        );
+        let s = ParquetSession::open(path.to_str().unwrap()).unwrap();
+        let cols = s.get_columns("data").unwrap();
+        let shape: Vec<(&str, &str)> = cols
+            .iter()
+            .map(|c| (c.name.as_str(), c.col_type.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("it's", "VARCHAR"),
+                ("a\"b", "VARCHAR"),
+                ("day", "DATE"),
+                ("seen", "TIMESTAMP")
+            ]
+        );
+        let r = s.execute_sql(
+            "SELECT \"a\"\"b\", day::VARCHAR, seen::VARCHAR FROM data WHERE \"it's\" = '-'",
+            &AtomicU64::new(0),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.rows[0][0].as_deref(), Some("x;y"));
+        assert_eq!(r.rows[0][1].as_deref(), Some("2025-02-01"));
+        assert_eq!(r.rows[0][2].as_deref(), Some("2025-02-01 09:45:00"));
+    }
+
+    #[test]
+    fn a_json_file_changing_below_the_sample_opens_with_every_key() {
+        let dir = scratch_dir("json-late");
+        let path = dir.join("late.jsonl");
+        with_late_row(
+            &path,
+            "{\"id\":0}",
+            "{\"id\":1}",
+            "{\"id\":\"-\",\"it's\":2}",
+        );
+        let s = ParquetSession::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(s.tables()[0].row_count, SAMPLED as i64 + 2);
+        let cols = s.get_columns("data").unwrap();
+        assert_eq!(cols[1].name, "it's");
+        let r = s.execute_sql(
+            "SELECT \"it's\" FROM data WHERE \"it's\" IS NOT NULL",
+            &AtomicU64::new(0),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.rows[0][0].as_deref(), Some("2"));
+        let view = sql_view_definition(&s);
+        assert!(view.contains("columns") && !view.contains("-1"), "{view}");
+        assert!(s.get_schema()[0]
+            .sql
+            .as_deref()
+            .unwrap()
+            .ends_with("read_json('late.jsonl', sample_size = -1)"));
+    }
+
+    #[test]
+    fn a_csv_the_full_scan_cannot_read_reports_the_first_error() {
+        let dir = scratch_dir("csv-bad");
+        let path = dir.join("bad.csv");
+        with_late_row(&path, "a,b", "1,2", "1,2,3,4,5");
+        let err = ParquetSession::open(path.to_str().unwrap())
+            .err()
+            .expect("a row with too many columns must not open");
+        assert!(err.contains("Expected Number of Columns"), "{err}");
     }
 
     #[test]

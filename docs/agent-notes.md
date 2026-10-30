@@ -150,6 +150,23 @@ the `json` feature of the `duckdb` crate, because extension autoinstall is off.
   function, with `allowed_paths` limited to it, as for Parquet. A load of a big CSV costs
   open time and memory that a Parquet open does not; the 2 GB `memory_limit` and the
   spill directory apply.
+- **A CSV or JSON load tries DuckDB's 20,480-row sample first, and only a failure pays
+  for a full scan (`load_text_file`).** A value below the sample that does not fit the
+  sampled type (`-` in a numeric column) is a conversion error at load, and a JSON key
+  first seen below it is an error too. `sample_size = -1` fixes both, but on a 233 MB CSV
+  it costs 2.2 s against 0.16 s for the load, and it must not reach the SQL tab: a view
+  binds again on every prepare, the live check prepares after every keystroke, and each
+  bind would cost 2 s against 1 ms. So the full-scan path hands `LockedDb` a reader with
+  the result written out: `auto_detect = false` plus dialect and columns for CSV, `columns`
+  for JSON. The CSV reader is built from `sniff_csv`'s fields because its `Prompt` column
+  does not escape (DuckDB 2.0.0): a path or column name with an apostrophe does not parse.
+  `count(*)` does not reproduce the failure, because projection pushdown skips the
+  conversion; use `SELECT *`. When the full scan fails too, the sampled error is reported,
+  because it names the line where the sniffer's says only that detection failed. Ragged
+  rows stay an error: `ignore_errors` would drop rows without saying so. Pinned by the
+  `pq::tests` `a_csv_with_text_below_the_sample_...`,
+  `the_pinned_csv_reader_survives_...`, `a_json_file_changing_below_the_sample_...` and
+  `a_csv_the_full_scan_cannot_read_...`.
 - **CSV and JSON get no installer file association; each platform offers a weaker one.**
   Tauri's NSIS association (`APP_ASSOCIATE`) writes `Software\Classes\.<ext>` itself, so
   dblitz would become the double-click handler for every CSV on a machine where the user

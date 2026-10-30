@@ -195,7 +195,9 @@ read by DuckDB, with the same read-only layers. They have no magic bytes, so
 dblitz recognises them by extension: `.csv` and `.tsv` (the delimiter and the
 header row are detected, and the Structure tab says what was found), and
 `.json`, `.jsonl` and `.ndjson` (an array of objects, or one object per line).
-Column types are DuckDB's guess from the data; a nested JSON object shows as a
+Column types are DuckDB's guess from the first 20,480 rows; if a later row does
+not fit that guess, dblitz reads every row to decide them, so the file takes
+longer to open and such a column shows as text. A nested JSON object shows as a
 `STRUCT`, a JSON array as a `LIST`.
 
 dblitz reads the whole file when it opens it, so a large CSV takes longer to

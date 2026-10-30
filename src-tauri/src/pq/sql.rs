@@ -198,12 +198,9 @@ mod tests {
     fn db(rows: u64) -> LockedDb {
         let dir = scratch_dir("sql");
         let file = fixture(&dir, rows);
-        LockedDb::open(
-            file.to_str().unwrap(),
-            crate::pq::FileFormat::Parquet,
-            dir.join("spill").to_str().unwrap(),
-        )
-        .unwrap()
+        let file = file.to_str().unwrap();
+        let reader = crate::pq::FileFormat::Parquet.reader(&crate::pq::sql_literal(file));
+        LockedDb::open(file, &reader, dir.join("spill").to_str().unwrap()).unwrap()
     }
 
     #[test]
