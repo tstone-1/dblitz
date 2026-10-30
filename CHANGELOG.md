@@ -5,6 +5,16 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.10.5] - 2026-10-30
+
+### Fixed
+- **A CSV or JSON file no longer fails to open because of a value far down in
+  the file.** Column types were decided from the first 20,480 rows, so a `-` in
+  a column of numbers on line 21,821 stopped the whole file with a conversion
+  error. dblitz now reads every row to decide the types when that happens, and
+  the Structure tab shows `sample_size = -1` for such a file. A row with the
+  wrong number of columns is still an error.
+
 ## [26.10.4] - 2026-10-29
 
 ### Added
