@@ -255,7 +255,7 @@ export function readReleaseFiles(root, readText) {
  *      /private/tmp. This one survived the first fix and was caught only by
  *      writing the regression test.
  *
- * `import.meta.main` (Node >= 24.2; .nvmrc pins 24) answers directly, with no
+ * `import.meta.main` (Node >= 24.2; .nvmrc pins 26) answers directly, with no
  * path comparison to get wrong. The fallback is kept for an off-pin runtime and
  * compares REAL paths, which is the closest a string comparison gets to right.
  *

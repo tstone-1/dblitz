@@ -5,9 +5,9 @@ Read the section before working in its area.
 
 ## Development
 
-### Node is pinned to 24, and `@types/node` with it
+### Node is pinned to 26, and `@types/node` with it
 
-- Node is pinned to 24 in `.nvmrc`, and every CI `setup-node` step reads it via `node-version-file` so there is a single source of truth. `@types/node` is deliberately held on the matching major — `npm outdated` will keep offering a newer one; taking it means type-checking against an API surface the shipped runtime does not have. Bump `.nvmrc` and `@types/node` together or not at all.
+- Node is pinned to 26 in `.nvmrc`, and every CI `setup-node` step reads it via `node-version-file` so there is a single source of truth. `@types/node` is deliberately held on the matching major — `npm outdated` will keep offering a newer one; taking it means type-checking against an API surface the shipped runtime does not have. Bump `.nvmrc` and `@types/node` together or not at all.
 
 ### A green local gate can be measured against the wrong dependency
 

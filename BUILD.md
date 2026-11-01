@@ -12,7 +12,7 @@
 
 ## Prerequisites
 
-- **Node.js** 24 (for frontend tooling). Pinned in `.nvmrc`; every CI
+- **Node.js** 26 (for frontend tooling). Pinned in `.nvmrc`; every CI
   `setup-node` step reads that file via `node-version-file`, so there is one
   source of truth. `@types/node` is held on the matching major deliberately —
   type-checking against a newer API surface than the runtime CI ships on passes
