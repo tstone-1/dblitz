@@ -210,3 +210,30 @@ describe("workflow jobs are bounded and least-privileged", () => {
     expect(readText(".github/tauri-linux-deps.txt")).toContain("libayatana-appindicator3-dev");
   });
 });
+
+/**
+ * A Linux binary runs only on a glibc at least as new as the one it was built
+ * against, so the build image sets the oldest distribution the .deb and
+ * AppImage support. `ubuntu-latest` moved from 24.04 to 26.04 in November 2026
+ * with no change here; v26.10.5 was built on 24.04, and the first sign of the
+ * move was the smoke job failing on a renamed WebDriver package. Moving the
+ * image is a decision about supported distributions, so it is a diff.
+ */
+describe("Linux jobs run on a named Ubuntu image", () => {
+  for (const file of WORKFLOWS) {
+    it(`${file} never asks for ubuntu-latest`, () => {
+      const lines = readText(file)
+        .split("\n")
+        .filter((l) => !l.trimStart().startsWith("#"));
+      expect(lines.filter((l) => l.includes("ubuntu-latest"))).toEqual([]);
+    });
+  }
+
+  it("builds the Linux release on the image the checks run on", () => {
+    const release = readText(".github/workflows/release.yml");
+    const checks = readText(".github/workflows/checks.yml");
+    expect(release).toContain("- os: ubuntu-24.04");
+    expect(release).toContain("if: matrix.os == 'ubuntu-24.04'");
+    expect(checks).toContain("os: [ubuntu-24.04,");
+  });
+});

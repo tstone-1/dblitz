@@ -20,7 +20,7 @@ concurrency:
 jobs:
   frontend:
     name: Frontend (check + test)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Observed max 26 s across the last 8 runs (2026-08-14 .. 2026-09-01).
     # 2x that is under a minute, which would redden on a slow npm registry
     # rather than on a defect, so this is a hang bound and not a budget: the
@@ -67,7 +67,7 @@ jobs:
       matrix:
         # windows-11-arm because the release builds Windows on ARM natively:
         # without this leg the first ARM compile of a change is a release tag.
-        os: [ubuntu-latest, windows-latest, windows-11-arm, macos-latest]
+        os: [ubuntu-24.04, windows-latest, windows-11-arm, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -144,7 +144,7 @@ jobs:
   # in tauri.conf.json as guarded by review only -- not by this job.
   smoke:
     name: Smoke (packaged app)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Observed max 17 min 29 s (2026-09-28, cold Rust cache + `cargo install
     # tauri-driver`, DuckDB's C++ compiled in the app build). The first cold
     # run with DuckDB also ran the fixture's Rust example, which compiled

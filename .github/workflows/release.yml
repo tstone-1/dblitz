@@ -52,7 +52,7 @@ jobs:
   # nothing red anywhere. BUILD.md asks a human for this comparison; this is
   # the same comparison, enforced.
   preflight:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Observed 5 s. It checks out and runs one dependency-free node script.
     timeout-minutes: 10
     # Reads version files, writes nothing. Inherits `contents: read`.
@@ -89,7 +89,7 @@ jobs:
   # case: a cfg-gated unused import passed Windows clippy and failed the Linux
   # release leg after the tag was already pushed.
   quality:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Observed max 39 min 45 s (v26.9.5, 2026-09-28, cold Rust cache), when
     # DuckDB's C++ was compiled for clippy and again for the tests (fixed by
     # `[profile.dev.build-override]` in Cargo.toml). The previous limit was
@@ -145,7 +145,7 @@ jobs:
 
   create-release:
     needs: [preflight, quality]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Observed max 7 s -- one `gh release create` plus a checkout.
     timeout-minutes: 10
     permissions:
@@ -220,7 +220,7 @@ jobs:
           - os: macos-latest
             target: x86_64-apple-darwin
             signs-windows: false
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: ''
             signs-windows: false
 
@@ -294,7 +294,7 @@ jobs:
 
       # Package list shared with checks.yml -- see .github/tauri-linux-deps.txt.
       - name: Install Linux dependencies
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         run: |
           set -euo pipefail
           # Assigned to a variable, not inlined into the apt command. With
@@ -715,7 +715,7 @@ jobs:
 
   publish:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Observed max 6 s -- one `gh release edit`.
     timeout-minutes: 10
     permissions:
@@ -757,7 +757,7 @@ jobs:
 
   update-tap:
     needs: publish
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Observed max 8 s -- two DMG downloads, a sed and a push.
     timeout-minutes: 15
     # No GITHUB_TOKEN permissions at all: every gh and git call in this job

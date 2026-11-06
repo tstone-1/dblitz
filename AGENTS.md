@@ -79,6 +79,7 @@ heading disagree, so rename them in the same commit.
 - *Every job has a `timeout-minutes` with its observed maximum* — release legs are 90 minutes each and run one at a time.
 - *Every workflow defaults to `permissions: contents: read`* — write only for `create-release`, `build` and `publish`; `update-tap` has `permissions: {}`.
 - *`release.yml`'s concurrency group is the workflow, not the ref* — each tag is its own ref, so a ref group would let two releases race `latest.json`.
+- *Linux jobs run on `ubuntu-24.04`, never `ubuntu-latest`* — the build image sets the glibc floor of the `.deb` and AppImage; `ubuntu-latest` moved to 26.04 in November 2026 unannounced, and a test now rejects it.
 - *The Linux build prerequisites live in one file* — `.github/tauri-linux-deps.txt`, read with an emptiness check at every apt site.
 - *The packaged-app smoke test, and exactly what it does not cover* — the Linux `smoke` job is the only check above the webview-IPC seam, and it does not catch removal of `connect-src ipc:`.
 

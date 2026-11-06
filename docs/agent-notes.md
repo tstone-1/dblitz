@@ -468,6 +468,12 @@ gh run rerun <run id> --failed
 
 - **`release.yml`'s concurrency group is `${{ github.workflow }}`, not the ref, with `cancel-in-progress: false`.** Each tag is its own ref, so a ref-scoped group would serialize nothing; two overlapping releases would then race the same `latest.json`.
 
+### Linux jobs run on `ubuntu-24.04`, never `ubuntu-latest`
+
+- A Linux binary runs only on a glibc at least as new as the one it was built against, so the release image sets the oldest distribution the `.deb` and AppImage support. Every release through v26.10.5 was built on Ubuntu 24.04.
+- `ubuntu-latest` moved to 26.04 in the first week of November 2026 with no change in this repo. The backend jobs stayed green because every package in `.github/tauri-linux-deps.txt` exists on 26.04; the first sign was the smoke job failing with `E: Package 'webkit2gtk-driver' has no installation candidate` (26.04 renames it `webkitgtk-webdriver`). Had the smoke job not failed, the next release would have raised the glibc floor unnoticed.
+- All Linux jobs in `checks.yml` and `release.yml` now name `ubuntu-24.04`, and `releaseWorkflow.test.ts` fails on any `ubuntu-latest` outside a comment. Moving to 26.04 is a decision about supported distributions: change every site, rename the WebDriver package in the smoke job, and say so in the CHANGELOG.
+
 ### The Linux build prerequisites live in one file
 
 - **The Linux build prerequisites live in one file, `.github/tauri-linux-deps.txt`**, read into `$deps` at all four apt sites with an emptiness check (a bare `$(grep ...)` substitution lets `apt-get` exit 0 on a missing file). Before it existed, `checks.yml` gated main against `libappindicator3-dev` while `release.yml` shipped installers built against `libayatana-appindicator3-dev`. The smoke job appends `webkit2gtk-driver xvfb` on its own install line. A composite action was rejected: `uses: ./...` cannot be SHA-pinned and would fail the pin test.
