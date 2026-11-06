@@ -23,10 +23,12 @@
 The full text of every entry below is in `docs/agent-notes.md`, under the same
 title. Read the entry before working in its area: a title is a claim, and the
 entry holds the reasoning, the incident and the tests that pin it.
+`src/lib/agentNotesIndex.test.ts` fails `npm test` when an index line and its
+heading disagree, so rename them in the same commit.
 
 ### Development
 
-- *Node is pinned to 24, and `@types/node` with it* — `.nvmrc` is the one source CI reads; bump `.nvmrc` and `@types/node` together or not at all.
+- *Node is pinned to 26, and `@types/node` with it* — `.nvmrc` is the one source CI reads; bump `.nvmrc` and `@types/node` together or not at all.
 - *A green local gate can be measured against the wrong dependency* — `node_modules` drifts from the lockfile and nothing fails; `npm ci` after pulling a lockfile change.
 - *Type-checking runs on TypeScript 7 through `svelte-check --tsgo`* — TS 6 stays installed on purpose; the wrapper fails a svelte-check run that crashed with exit 0.
 - *Vitest's global environment is `node`* — DOM tests opt in per file with a `@vitest-environment jsdom` pragma.
