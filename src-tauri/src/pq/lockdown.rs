@@ -7,7 +7,7 @@
 //!    `lock_configuration`: external access off except for the one file,
 //!    extension autoload/autoinstall off. This stops every file and network
 //!    access - `COPY ... TO`, `EXPORT DATABASE`, `ATTACH`, `INSTALL`,
-//!    `read_csv('/etc/hosts')`, `glob(...)`, another Parquet file, an https URL.
+//!    `read_csv` of another file, `glob(...)`, another Parquet file, an https URL.
 //! 2. **A statement classifier**: exactly one statement, and it must be a
 //!    SELECT. Settings alone let `CREATE OR REPLACE VIEW data AS SELECT 42`
 //!    through, which would silently replace the table the user is querying.
@@ -28,7 +28,7 @@ use std::ffi::{CStr, CString};
 use std::sync::Arc;
 
 use super::raw::RawDb;
-use super::sql_literal;
+use super::{file_arg, sql_literal};
 
 pub(crate) struct LockedDb {
     raw: RawDb,
@@ -57,7 +57,7 @@ impl LockedDb {
     /// prove the lock is what stops a write, not DuckDB's defaults.
     #[cfg(test)]
     fn open_unlocked(path: &str, temp_dir: &str) -> Result<Self, String> {
-        let reader = super::FileFormat::Parquet.reader(&sql_literal(path));
+        let reader = super::FileFormat::Parquet.reader(&file_arg(path));
         Self::open_inner(path, &reader, temp_dir, false)
     }
 
@@ -65,7 +65,17 @@ impl LockedDb {
         let locked = LockedDb {
             raw: RawDb::open_in_memory()?,
         };
-        let file = sql_literal(path);
+        // Both spellings of the file: DuckDB checks a reader's glob pattern
+        // against `allowed_paths` before expanding it, and then the file it
+        // expanded to (`OpenerFileSystem::GlobFilesExtended`, then `OpenFile`).
+        // For a name with `[`, `*` or `?` the pattern is [`file_arg`]'s
+        // escaped one, which matches only this file.
+        let mut allowed = vec![sql_literal(path)];
+        let pattern = file_arg(path);
+        if pattern != allowed[0] {
+            allowed.push(pattern);
+        }
+        let allowed = allowed.join(", ");
         let tmp = sql_literal(temp_dir);
         locked
             .conn()
@@ -74,16 +84,22 @@ impl LockedDb {
                  SET autoload_known_extensions = false;
                  SET allow_community_extensions = false;
                  SET memory_limit = '{mem}';
-                 SET temp_directory = {tmp};
-                 CREATE VIEW data AS SELECT * FROM {reader};",
+                 SET temp_directory = {tmp};",
                 mem = super::MEMORY_LIMIT,
             ))
             .map_err(|e| e.to_string())?;
+        // The reader carries text the file decided (a pinned reader's column
+        // names and types), so it runs as exactly one statement: the C API's
+        // prepare refuses a second, where a batch would have run it unlocked.
+        // Still before the lock, as the order above requires.
+        locked
+            .raw
+            .execute_side(&format!("CREATE VIEW data AS SELECT * FROM {reader}"), &[])?;
         if lock {
             locked
                 .conn()
                 .execute_batch(&format!(
-                    "SET allowed_paths = [{file}];
+                    "SET allowed_paths = [{allowed}];
                      SET allowed_directories = [{tmp}];
                      SET enable_external_access = false;
                      SET lock_configuration = true;"
@@ -174,9 +190,28 @@ mod tests {
         let file = fixture(&dir, 100);
         let tmp = dir.join("spill");
         let file = file.to_str().unwrap();
-        let reader = crate::pq::FileFormat::Parquet.reader(&sql_literal(file));
+        let reader = crate::pq::FileFormat::Parquet.reader(&file_arg(file));
         let db = LockedDb::open(file, &reader, tmp.to_str().unwrap()).unwrap();
         (db, dir)
+    }
+
+    #[test]
+    fn a_reader_carrying_a_second_statement_is_refused_before_the_lock() {
+        // The reader is the one piece of the pre-lock SQL the file has a say
+        // in. Run as a batch, the COPY below ran on the still unlocked
+        // instance and wrote its file.
+        let dir = scratch_dir("lockdown-one-statement");
+        let file = fixture(&dir, 10);
+        let file = file.to_str().unwrap();
+        let written = dir.join("injected.csv");
+        let reader = format!(
+            "{}; COPY (SELECT 1) TO {}",
+            crate::pq::FileFormat::Parquet.reader(&file_arg(file)),
+            sql_literal(written.to_str().unwrap())
+        );
+        let opened = LockedDb::open(file, &reader, dir.join("spill").to_str().unwrap());
+        assert!(opened.is_err(), "a two-statement reader must not open");
+        assert!(!written.exists(), "the second statement ran: {written:?}");
     }
 
     #[test]
@@ -314,27 +349,57 @@ mod tests {
         assert!(!target.exists(), "classifying EXPORT created {target:?}");
     }
 
-    #[test]
-    fn nothing_outside_the_file_can_be_read() {
-        let (db, dir) = locked();
+    /// Every statement here reads a file the test created next to the opened
+    /// one; `an_unlocked_instance_really_reads` proves each returns rows
+    /// without the lock, so a refusal below is the lock's doing and not a
+    /// missing file (the `/etc/hosts` these replaced does not exist on Windows).
+    fn read_attacks(dir: &Path) -> Vec<String> {
         let other = fixture(&dir.join("other"), 10);
-        for sql in [
-            "SELECT * FROM read_csv('/etc/hosts')".to_string(),
-            "SELECT * FROM read_text('/etc/hosts')".to_string(),
-            "SELECT * FROM glob('/*')".to_string(),
-            format!(
-                "SELECT count(*) FROM read_parquet({})",
-                sql_literal(other.to_str().unwrap())
-            ),
-            "SELECT * FROM read_parquet('https://example.com/x.parquet')".to_string(),
-        ] {
-            assert!(run(&db, &sql).is_err(), "{sql} must be refused");
+        let text = dir.join("secret.csv");
+        std::fs::write(&text, "secret\n42\n").unwrap();
+        let lit = |p: &Path| sql_literal(p.to_str().unwrap());
+        vec![
+            format!("SELECT * FROM read_csv({})", lit(&text)),
+            format!("SELECT * FROM read_text({})", lit(&text)),
+            format!("SELECT * FROM glob({})", lit(&dir.join("*"))),
+            format!("SELECT count(*) FROM read_parquet({})", lit(&other)),
+        ]
+    }
+
+    #[test]
+    fn an_unlocked_instance_really_reads() {
+        let dir = scratch_dir("lockdown-read-control");
+        let file = fixture(&dir, 10);
+        let db =
+            LockedDb::open_unlocked(file.to_str().unwrap(), dir.join("spill").to_str().unwrap())
+                .unwrap();
+        for sql in read_attacks(&dir) {
+            let n = run(&db, &sql);
+            assert!(
+                matches!(n, Ok(n) if n > 0),
+                "control: {sql} should read rows, got {n:?}"
+            );
         }
     }
 
     #[test]
-    fn extensions_and_settings_cannot_be_changed() {
+    fn nothing_outside_the_file_can_be_read() {
         let (db, dir) = locked();
+        for sql in read_attacks(&dir) {
+            assert!(run(&db, &sql).is_err(), "{sql} must be refused");
+        }
+        // No control for this one: without httpfs, which autoload may not
+        // fetch, an https read fails locked or not.
+        let https = "SELECT * FROM read_parquet('https://example.com/x.parquet')";
+        assert!(run(&db, https).is_err(), "{https} must be refused");
+    }
+
+    #[test]
+    fn extensions_and_settings_cannot_be_changed() {
+        // The refusals are the assertion. There was also a check that a
+        // `<dir>/ext` directory stayed absent, but nothing points DuckDB's
+        // extension directory there, so it could not fail.
+        let (db, _dir) = locked();
         for sql in [
             "INSTALL httpfs",
             "LOAD httpfs",
@@ -348,7 +413,6 @@ mod tests {
                 "settings let {sql} through"
             );
         }
-        assert!(!dir.join("ext").exists());
     }
 
     #[test]

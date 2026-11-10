@@ -12,10 +12,72 @@ function readText(file: string): string {
 }
 
 const WORKFLOWS = [
+  ".github/workflows/audit.yml",
   ".github/workflows/checks.yml",
   ".github/workflows/release.yml",
   ".github/workflows/sign-rehearsal.yml",
 ];
+
+/**
+ * The text with every comment line removed. The workflows explain themselves
+ * in comments that quote the very settings the tests look for (`max-parallel:
+ * 1` appears in two of them), so a match over the raw text survives deleting
+ * the setting.
+ */
+function code(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("#"))
+    .join("\n");
+}
+
+/** The steps of a job, each from its `- ` line to the next one's. */
+function steps(job: string): string[] {
+  return job.split(/\n {6}- /).slice(1);
+}
+
+/** The step whose `name:` is exactly `name`, or "" when there is none. */
+function step(job: string, name: string): string {
+  return steps(job).find((s) => s.startsWith(`name: ${name}\n`)) ?? "";
+}
+
+/** The jobs of a workflow by key, each from its key line to the next one's. */
+function jobs(workflow: string): Map<string, string> {
+  const text = workflow.split(/^jobs:$/m)[1] ?? "";
+  const out = new Map<string, string>();
+  for (const block of text.split(/^ {2}(?=[a-z][\w-]*:$)/m).slice(1)) {
+    out.set(block.slice(0, block.indexOf(":")), block);
+  }
+  return out;
+}
+
+/**
+ * The shell text of every `run:` in a workflow: a one-line `run: x`, or the
+ * lines of a `run: |` block, which are those indented deeper than the key.
+ */
+function runBlocks(workflow: string): string[] {
+  const lines = workflow.split("\n");
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^(\s*(?:-\s+)?)run:\s*(.*)$/.exec(lines[i]);
+    if (!m) continue;
+    const keyIndent = m[1].length;
+    if (!/^[|>][-+]?$/.test(m[2])) {
+      out.push(m[2]);
+      continue;
+    }
+    const body: string[] = [];
+    while (i + 1 < lines.length) {
+      const next = lines[i + 1];
+      const indent = next.length - next.trimStart().length;
+      if (next.trim() !== "" && indent <= keyIndent) break;
+      body.push(next);
+      i++;
+    }
+    out.push(body.join("\n"));
+  }
+  return out;
+}
 
 /** Every `uses:` line, with leading whitespace and the `uses:` keyword stripped. */
 function actionRefs(workflow: string): string[] {
@@ -98,10 +160,12 @@ describe("macOS release signing fails closed in the canonical repo", () => {
     "APPLE_API_KEY_P8",
   ];
 
-  const prepare = release.slice(
-    release.indexOf("- name: Prepare Apple signing and notarization"),
-    release.indexOf("- name: Build and upload artifacts"),
-  );
+  const build = jobs(release).get("build") ?? "";
+
+  // The one step, comments left out. A slice running on to the next Apple step
+  // took in the Windows steps between them, whose `exit 1` kept "refuses to
+  // continue" green with the Apple step's own `exit 1` deleted.
+  const prepare = code(step(build, "Prepare Apple signing and notarization"));
 
   it("reads the prepare step", () => {
     // Emptiness control for the slice: an empty string satisfies "does not
@@ -109,6 +173,8 @@ describe("macOS release signing fails closed in the canonical repo", () => {
     // assertions below rather than failing.
     expect(prepare).toContain("Prepare Apple signing and notarization");
     expect(prepare.length).toBeGreaterThan(200);
+    // And it is the one step: nothing of the Windows steps after it.
+    expect(prepare).not.toContain("CERTUM");
   });
 
   it("requires every Apple secret, not just the certificate and the key", () => {
@@ -121,8 +187,12 @@ describe("macOS release signing fails closed in the canonical repo", () => {
   });
 
   it("refuses to continue in the canonical repo when one is missing", () => {
-    expect(prepare).toContain('if [ "$GITHUB_REPOSITORY" = "tstone-1/dblitz" ]; then');
-    expect(prepare).toContain("exit 1");
+    // The `exit 1` inside the canonical-repo branch, before its `fi`, and the
+    // fork's `exit 0` after it: an `exit 1` anywhere else in the step proves
+    // nothing about this branch.
+    expect(prepare).toMatch(
+      /^ {12}if \[ "\$GITHUB_REPOSITORY" = "tstone-1\/dblitz" \]; then\n(?: {14}.*\n)* {14}exit 1\n {12}fi\n {12}echo "::warning::Apple signing secrets absent.*\n {12}exit 0$/m,
+    );
   });
 
   it("still builds ad-hoc signed in a fork", () => {
@@ -134,13 +204,20 @@ describe("macOS release signing fails closed in the canonical repo", () => {
   it("runs the artifact verification on every canonical macOS leg", () => {
     // Not merely when an identity happens to be set — that is the condition
     // that made the check skip precisely when it was needed.
-    const verify = release.slice(
-      release.indexOf("- name: Verify the macOS build is signed, notarized and stapled"),
-      release.indexOf("- name: Upload portable exe"),
-    );
-    expect(verify).toContain("Verify the macOS build is signed");
-    expect(verify).toContain("github.repository == 'tstone-1/dblitz'");
+    const verify = step(build, "Verify the macOS build is signed, notarized and stapled");
     expect(verify).toContain("source=Notarized Developer ID");
+    // The whole condition, not a fragment of it: with `&&` in place of `||`
+    // the canonical arm only runs when an identity was exported, which is the
+    // condition that made the check skip precisely when it was needed.
+    expect(verify).toContain(
+      [
+        "        if: >-",
+        "          matrix.os == 'macos-latest'",
+        "          && (env.APPLE_SIGNING_IDENTITY != ''",
+        "          || github.repository == 'tstone-1/dblitz')",
+        "        run: |",
+      ].join("\n"),
+    );
   });
 });
 
@@ -192,10 +269,36 @@ describe("workflow jobs are bounded and least-privileged", () => {
     });
   }
 
+  it("grants contents: write to exactly create-release, build and publish", () => {
+    // The release jobs that write to the GitHub Release, and no other job in
+    // any workflow: a step added to `quality` must not inherit a token that
+    // can push to main.
+    const writers: string[] = [];
+    for (const file of WORKFLOWS) {
+      const text = code(readText(file));
+      // The workflow-level default is checked above; nothing before `jobs:`
+      // may raise it.
+      expect(text.split(/^jobs:$/m)[0]).not.toContain("contents: write");
+      for (const [name, block] of jobs(text)) {
+        if (/^\s+contents: write$/m.test(block)) writers.push(`${file}:${name}`);
+      }
+    }
+    const release = ".github/workflows/release.yml";
+    expect(writers.sort()).toEqual(
+      [`${release}:build`, `${release}:create-release`, `${release}:publish`].sort(),
+    );
+    // update-tap authenticates as its own PAT throughout, so it takes nothing.
+    expect(jobs(readText(release)).get("update-tap")).toMatch(/^ {4}permissions: \{\}$/m);
+  });
+
   it("serializes releases on the workflow, not on the ref", () => {
+    // Anchored to the workflow-level block: the build job has a
+    // `cancel-in-progress: false` of its own, which kept a loose match green
+    // with this one set to true.
     const release = readText(".github/workflows/release.yml");
-    expect(release).toContain("group: ${{ github.workflow }}");
-    expect(release).toContain("cancel-in-progress: false");
+    expect(release).toMatch(
+      /^concurrency:\n {2}group: \$\{\{ github\.workflow \}\}\n {2}cancel-in-progress: false$/m,
+    );
   });
 
   it("installs Linux deps from the one shared list", () => {
@@ -235,5 +338,32 @@ describe("Linux jobs run on a named Ubuntu image", () => {
     expect(release).toContain("- os: ubuntu-24.04");
     expect(release).toContain("if: matrix.os == 'ubuntu-24.04'");
     expect(checks).toContain("os: [ubuntu-24.04,");
+  });
+});
+
+/**
+ * A `${{ ... }}` expression in a `run:` block is pasted into the script text
+ * before the shell sees it, so a value with a quote or a `$(` in it becomes
+ * code. Runner contexts are read from the environment the runner sets
+ * (`$GITHUB_REF_NAME`, `$GITHUB_REPOSITORY`, `$env:GITHUB_REF_NAME` in
+ * PowerShell), and secrets and inputs are passed through a step's `env:`.
+ */
+describe("run blocks take runner values from the environment", () => {
+  for (const file of WORKFLOWS) {
+    it(`${file} interpolates no github, secrets or inputs context into a script`, () => {
+      const blocks = runBlocks(readText(file));
+      // Emptiness control: a parser that finds no blocks passes everything.
+      expect(blocks.length).toBeGreaterThan(0);
+      const interpolated = blocks.filter((b) => /\$\{\{\s*(github|secrets|inputs)\./.test(b));
+      expect(interpolated).toEqual([]);
+    });
+  }
+
+  it("reads the release's tag from the environment in every step that names it", () => {
+    // Control for the parser: the blocks it returns are the ones that use the
+    // variable, multi-line and one-line forms both.
+    const blocks = runBlocks(readText(".github/workflows/release.yml"));
+    expect(blocks.filter((b) => b.includes("GITHUB_REF_NAME")).length).toBeGreaterThanOrEqual(6);
+    expect(blocks).toContain('gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"');
   });
 });

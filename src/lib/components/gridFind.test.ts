@@ -153,6 +153,46 @@ describe("findCell", () => {
     await expect(run()).rejects.toThrow("could not be loaded");
   });
 
+  it("does not answer no match while the row count is still pending", async () => {
+    // A filtered view's first chunk comes back without a total, and the grid
+    // shows at most one chunk until the count lands. "No match" over those
+    // rows was an answer about rows the search never saw.
+    const { run, loads } = harness(
+      { matches: makeCellMatcher("zzz"), isCountPending: () => true },
+      ROWS.slice(0, 2),
+    );
+    expect(await run()).toEqual({ kind: "incomplete" });
+    expect(loads).toEqual([]);
+  });
+
+  it("does not answer no match when the provisional total grows during the search", async () => {
+    // The search started on a total of two rows, and the count landed at six
+    // while the first block was loading: the four rows past the first two
+    // were never searched.
+    let liveTotal = 2;
+    const { run } = harness({
+      rowCount: 2,
+      matches: makeCellMatcher("zzz"),
+      currentRowCount: () => liveTotal,
+      loadRows: async (first, last) => {
+        liveTotal = ROWS.length;
+        return ROWS.slice(first, last + 1);
+      },
+    });
+    expect(await run()).toEqual({ kind: "incomplete" });
+  });
+
+  it("still answers no match once the count is final", async () => {
+    // Control for the two tests above: the new checks must not turn every
+    // miss into "incomplete".
+    const { run } = harness({
+      matches: makeCellMatcher("zzz"),
+      isCountPending: () => false,
+      currentRowCount: () => ROWS.length,
+    });
+    expect(await run()).toEqual({ kind: "none" });
+  });
+
   it("reports progress up to the row count", async () => {
     const seen: number[] = [];
     const { run } = harness({ matches: makeCellMatcher("zzz"), onProgress: (n) => seen.push(n) });

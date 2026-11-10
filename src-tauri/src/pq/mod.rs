@@ -93,7 +93,7 @@ impl FileFormat {
         }
     }
 
-    /// The table function that reads `file`, an already-quoted SQL literal.
+    /// The table function that reads `file`, an argument from [`file_arg`].
     pub(crate) fn reader(self, file: &str) -> String {
         match self {
             FileFormat::Parquet => format!("read_parquet({file})"),
@@ -129,38 +129,51 @@ struct FullScan {
 /// `None` means the sample was enough. When the full scan fails too, the file
 /// is what is wrong, and the first error names the row.
 fn load_text_file(
-    conn: &Connection,
+    db: &raw::RawDb,
     format: FileFormat,
     file: &str,
 ) -> Result<Option<FullScan>, String> {
-    match load_rows(conn, &format.reader(file)) {
+    match load_rows(db, &format.reader(file)) {
         Ok(()) => Ok(None),
-        Err(sampled) => load_full_scan(conn, format, file)
+        Err(sampled) => load_full_scan(db, format, file)
             .map(Some)
             .map_err(|_| sampled),
     }
 }
 
-fn load_rows(conn: &Connection, reader: &str) -> Result<(), String> {
-    conn.execute_batch(&format!(
-        "CREATE TABLE file_rows AS SELECT * FROM {reader};"
-    ))
-    .map_err(|e| e.to_string())
+/// One statement, through the C API's `duckdb_prepare`, which refuses a
+/// second one ("Cannot prepare multiple statements at once!"). For SQL that
+/// carries text the file decided (a pinned reader's column names and types):
+/// `execute_batch` would run whatever statements such text added, and so
+/// would duckdb-rs's `prepare`, which executes every statement but the last.
+fn execute_one(db: &raw::RawDb, sql: &str) -> Result<(), String> {
+    db.execute_side(sql, &[])
 }
 
-fn load_full_scan(conn: &Connection, format: FileFormat, file: &str) -> Result<FullScan, String> {
+fn load_rows(db: &raw::RawDb, reader: &str) -> Result<(), String> {
+    execute_one(
+        db,
+        &format!("CREATE TABLE file_rows AS SELECT * FROM {reader}"),
+    )
+}
+
+fn load_full_scan(db: &raw::RawDb, format: FileFormat, file: &str) -> Result<FullScan, String> {
+    let conn = db.conn();
     if format == FileFormat::Csv {
         let (pinned_reader, dialect) = pinned_csv_reader(conn, file)?;
-        load_rows(conn, &pinned_reader)?;
+        load_rows(db, &pinned_reader)?;
         return Ok(FullScan {
             pinned_reader,
             dialect: Some(dialect),
         });
     }
-    load_rows(conn, &format.full_scan_reader(file))?;
+    load_rows(db, &format.full_scan_reader(file))?;
+    // The type is escaped as well as the name: a nested key is part of the
+    // type text, and `{"m": {"it's": 2}}` makes it `STRUCT("it's" BIGINT)`,
+    // which unescaped ended the literal early ("unterminated quoted identifier").
     let columns: String = conn
         .query_row(
-            "SELECT string_agg('''' || replace(name, '''', '''''') || ''': ''' || type || '''', ', ' ORDER BY cid)
+            "SELECT string_agg('''' || replace(name, '''', '''''') || ''': ''' || replace(type, '''', '''''') || '''', ', ' ORDER BY cid)
              FROM pragma_table_info('file_rows')",
             [],
             |r| r.get(0),
@@ -182,7 +195,7 @@ fn pinned_csv_reader(conn: &Connection, file: &str) -> Result<(String, (String, 
         &format!(
             "SELECT Delimiter, Quote, Escape, NewLineDelimiter, Comment, SkipRows, HasHeader,
                     array_to_string(list_transform(Columns, lambda c:
-                        '''' || replace(c.name, '''', '''''') || ''': ''' || c.type || ''''), ', '),
+                        '''' || replace(c.name, '''', '''''') || ''': ''' || replace(c.type, '''', '''''') || ''''), ', '),
                     DateFormat, TimestampFormat
              FROM sniff_csv({file}, sample_size = -1)"
         ),
@@ -236,6 +249,54 @@ fn is_parquet(path: &str) -> bool {
 /// A single-quoted SQL string literal.
 pub(crate) fn sql_literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
+}
+
+/// `path` as the file argument of DuckDB's readers (`read_parquet`,
+/// `read_csv`, `read_json`, `parquet_metadata`, ...): a literal, with the glob
+/// characters escaped. Every one of those functions takes a glob pattern and
+/// falls back to the literal name only when the pattern matches nothing.
+/// Measured on DuckDB 2.0.0: `t[1].csv` opened with `t1.csv` beside it read
+/// `t1.csv`, and `d[12].parquet` beside `d1.parquet` and `d2.parquet` read
+/// both of those, while title, toolbar and Structure named the file the user
+/// opened. Each glob character becomes a one-character class (`[[]`, `[*]`,
+/// `[?]`), which the bundled glob matches literally
+/// (`a_bracketed_file_name_opens_that_file_and_not_its_glob_match`). A path
+/// with none of them is passed unchanged, so DuckDB takes its no-glob path.
+pub(crate) fn file_arg(path: &str) -> String {
+    sql_literal(&glob_escape(path))
+}
+
+/// Why DuckDB cannot be pointed at exactly this file, if it cannot. Outside
+/// Windows a backslash is a file name character, but once the path holds a
+/// glob character DuckDB matches it as a pattern, and neither `[\]` nor `\\`
+/// matched a name holding one (Linux, DuckDB 2.0.0): the open failed with "No
+/// files found". Refused up front, with a message naming the character.
+fn unreadable_name(path: &str) -> Option<String> {
+    let globbed = path.contains(['[', '*', '?']);
+    (!cfg!(windows) && globbed && path.contains('\\')).then(|| {
+        format!(
+            "{path} cannot be opened: its name has a backslash (\\) as well as one of [ * ?, \
+             and the file reader cannot match that name exactly. Rename the file without the backslash."
+        )
+    })
+}
+
+fn glob_escape(path: &str) -> String {
+    if !path.contains(['[', '*', '?']) {
+        return path.to_string();
+    }
+    let mut out = String::with_capacity(path.len() + 8);
+    for c in path.chars() {
+        match c {
+            '[' | '*' | '?' => {
+                out.push('[');
+                out.push(c);
+                out.push(']');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 pub(crate) fn quote_ident(name: &str) -> String {
@@ -319,9 +380,16 @@ pub struct ParquetSession {
     /// which would collide with DuckDB's virtual one; every view then falls
     /// back to `LIMIT/OFFSET` ([`query`]).
     row_numbers: bool,
+    /// `false` when the file has a column named `rowid`. The sort cache is a
+    /// table built from the file's column names, so that column hides the
+    /// cache's own `rowid`, which the cache's pages are cut by; every sorted
+    /// view then takes the list path ([`query`]).
+    sort_cache_usable: bool,
     /// [`query::ORDER_LIST_MAX_CELLS`]; a field so that a test can force
     /// either sorted path on a small fixture.
     order_list_max_cells: i64,
+    /// [`query::LIST_MAX_ROWS`]; a field for the same reason.
+    list_max_rows: i64,
     /// Set when a sort cache could not be built; sorted views are then paged
     /// from an order list for the rest of the session.
     sort_cache_failed: AtomicBool,
@@ -346,7 +414,10 @@ impl ParquetSession {
     pub fn open(path: &str) -> Result<Self, String> {
         let format = FileFormat::of(path)
             .ok_or_else(|| format!("{path} is not a Parquet, CSV or JSON file"))?;
-        let file = sql_literal(path);
+        if let Some(refusal) = unreadable_name(path) {
+            return Err(refusal);
+        }
+        let file = file_arg(path);
         let reader = format.reader(&file);
         let spill_dir = session_path("spill", "");
         // DuckDB creates its temp directory on the first spill, but not that
@@ -383,22 +454,24 @@ impl ParquetSession {
             // `preserve_insertion_order` is DuckDB's default, so the table is
             // filled in file order and `rowid` counts lines (or array items).
             FileFormat::Csv | FileFormat::Json => {
-                full_scan = load_text_file(browse, format, &file)?;
+                full_scan = load_text_file(&raw, format, &file)?;
                 "file_rows".to_string()
             }
         };
-        browse
-            .execute_batch(&format!("CREATE VIEW data AS SELECT * FROM {source};"))
-            .map_err(|e| e.to_string())?;
+        execute_one(&raw, &format!("CREATE VIEW data AS SELECT * FROM {source}"))?;
 
         let columns = describe(browse)?;
         // A column of the file's own named `file_row_number` would collide
         // with the one `data_rn` adds, and one named `rowid` hides a table's
-        // `rowid`; either sends every view to `LIMIT/OFFSET` ([`query`]).
-        let row_numbers = !columns.iter().any(|c| {
-            c.name.eq_ignore_ascii_case("file_row_number")
-                || (format != FileFormat::Parquet && c.name.eq_ignore_ascii_case("rowid"))
-        });
+        // `rowid`. For CSV and JSON that table is `file_rows`, which `data_rn`
+        // numbers by, so every view goes to `LIMIT/OFFSET` ([`query`]). A
+        // Parquet file is numbered by `read_parquet` and keeps its row
+        // numbers, but its sort cache is a table too, so it never uses one.
+        let rowid_column = columns.iter().any(|c| c.name.eq_ignore_ascii_case("rowid"));
+        let row_numbers = !columns
+            .iter()
+            .any(|c| c.name.eq_ignore_ascii_case("file_row_number"))
+            && (format == FileFormat::Parquet || !rowid_column);
         if row_numbers {
             let rn = match format {
                 FileFormat::Parquet => {
@@ -408,9 +481,7 @@ impl ParquetSession {
                     "SELECT *, rowid AS file_row_number FROM file_rows".to_string()
                 }
             };
-            browse
-                .execute_batch(&format!("CREATE VIEW data_rn AS {rn};"))
-                .map_err(|e| e.to_string())?;
+            execute_one(&raw, &format!("CREATE VIEW data_rn AS {rn}"))?;
         }
         // Parquet answers from the footer, not by scanning: 18 ms cold on 50M
         // rows. CSV and JSON count the table loaded above.
@@ -431,7 +502,9 @@ impl ParquetSession {
             total_rows,
             schema_sql,
             row_numbers,
+            sort_cache_usable: !rowid_column,
             order_list_max_cells: query::ORDER_LIST_MAX_CELLS,
+            list_max_rows: query::LIST_MAX_ROWS,
             sort_cache_failed: AtomicBool::new(false),
             browse: Mutex::new(raw),
             browse_interrupt,
@@ -563,7 +636,8 @@ fn describe_file(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string());
-    let shown_file = sql_literal(&name);
+    // Escaped as the real reader is, so the statement shown reads this file.
+    let shown_file = file_arg(&name);
     let view = format!(
         "CREATE VIEW data AS SELECT * FROM {}",
         if full_scan.is_some() {
@@ -587,10 +661,7 @@ fn describe_file(
                         )
                         .map_err(|e| e.to_string())?,
                 };
-            let delimiter = match delimiter.as_str() {
-                "\t" => "tab".to_string(),
-                d => format!("'{d}'"),
-            };
+            let delimiter = delimiter_text(&delimiter);
             let header = if header { "yes" } else { "no" };
             return Ok(format!(
                 "-- CSV file: {name}\n-- Rows: {rows}\n-- Delimiter: {delimiter}\n-- Header row: {header}\n{view}"
@@ -625,6 +696,15 @@ fn describe_file(
     }
     s.push_str(&view);
     Ok(s)
+}
+
+/// The Structure tab's `-- Delimiter:` value, written as the SQL literal
+/// `read_csv`'s `delim` would take, so a `'` delimiter reads `''''`.
+fn delimiter_text(delimiter: &str) -> String {
+    match delimiter {
+        "\t" => "tab".to_string(),
+        d => sql_literal(d),
+    }
 }
 
 #[cfg(test)]
@@ -866,6 +946,155 @@ pub(crate) mod tests {
             .as_deref()
             .unwrap()
             .ends_with("read_json('late.jsonl', sample_size = -1)"));
+    }
+
+    #[test]
+    fn a_json_file_with_an_apostrophe_in_a_nested_key_below_the_sample_opens() {
+        // The key is part of the column's type, `STRUCT("it's" BIGINT)`, which
+        // the pinned reader writes out for the SQL tab.
+        let dir = scratch_dir("json-late-nested");
+        let path = dir.join("nested.jsonl");
+        with_late_row(
+            &path,
+            "{\"id\":0}",
+            "{\"id\":1}",
+            "{\"id\":\"-\",\"m\":{\"it's\":2}}",
+        );
+        let s = ParquetSession::open(path.to_str().unwrap()).unwrap();
+        let cols = s.get_columns("data").unwrap();
+        assert_eq!(cols[1].name, "m");
+        assert!(cols[1].col_type.contains("it's"), "{}", cols[1].col_type);
+        let r = s.execute_sql(
+            "SELECT m, m.\"it's\" FROM data WHERE m IS NOT NULL",
+            &AtomicU64::new(0),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][1].as_deref(), Some("2"));
+    }
+
+    /// The cells of the whole file, through Browse Data and through the SQL
+    /// tab; both must agree.
+    fn every_cell(s: &ParquetSession) -> Vec<Vec<Option<String>>> {
+        let req = crate::db::QueryRequest {
+            table: TABLE.into(),
+            offset: 0,
+            limit: 100,
+            filters: vec![],
+            global_filter: String::new(),
+            sort_column: None,
+            sort_asc: true,
+        };
+        let browse = query_table(s, &req, &AtomicU64::new(0)).unwrap().rows;
+        let r = s.execute_sql("SELECT * FROM data", &AtomicU64::new(0));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(browse, r.rows, "Browse Data and the SQL tab disagree");
+        browse
+    }
+
+    fn one_cell(v: &str) -> Vec<Vec<Option<String>>> {
+        vec![vec![Some(v.to_string())]]
+    }
+
+    #[test]
+    fn a_bracketed_file_name_opens_that_file_and_not_its_glob_match() {
+        // Unescaped, the pattern `t[1].csv` matched `t1.csv` and that file
+        // was shown; the literal name was read only when nothing matched.
+        let dir = scratch_dir("glob-text");
+        for (opened, sibling) in [("t[1].csv", "t1.csv"), ("j[1].json", "j1.json")] {
+            let json = opened.ends_with(".json");
+            let body = |v: u8| {
+                if json {
+                    format!("{{\"a\": {v}}}\n")
+                } else {
+                    format!("a\n{v}\n")
+                }
+            };
+            std::fs::write(dir.join(opened), body(1)).unwrap();
+            std::fs::write(dir.join(sibling), body(2)).unwrap();
+            let s = ParquetSession::open(dir.join(opened).to_str().unwrap()).unwrap();
+            assert_eq!(every_cell(&s), one_cell("1"), "{opened}");
+            let schema = s.get_schema()[0].sql.clone().unwrap();
+            let shown = opened.replace('[', "[[]");
+            assert!(schema.ends_with(&format!("('{shown}')")), "{schema}");
+        }
+    }
+
+    #[test]
+    fn a_bracketed_parquet_name_opens_that_file_and_not_its_glob_matches() {
+        // Unescaped, `d[12].parquet` read `d1.parquet` and `d2.parquet`
+        // concatenated.
+        let dir = scratch_dir("glob-parquet");
+        let c = Connection::open_in_memory().unwrap();
+        for (name, v) in [("d[12].parquet", 12), ("d1.parquet", 1), ("d2.parquet", 2)] {
+            c.execute_batch(&format!(
+                "COPY (SELECT {v} AS v) TO {} (FORMAT parquet)",
+                sql_literal(dir.join(name).to_str().unwrap())
+            ))
+            .unwrap();
+        }
+        let s = ParquetSession::open(dir.join("d[12].parquet").to_str().unwrap()).unwrap();
+        assert_eq!(s.tables()[0].row_count, 1);
+        assert_eq!(every_cell(&s), one_cell("12"));
+        let schema = s.get_schema()[0].sql.clone().unwrap();
+        assert!(schema.contains("-- Row groups: 1"), "{schema}");
+    }
+
+    #[test]
+    fn a_bracketed_name_with_nothing_beside_it_still_opens() {
+        // The control: the escaped pattern finds the file on its own, and so
+        // does a directory with a bracket in its name.
+        let dir = scratch_dir("glob-alone").join("run[1]");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.with_file_name("run1")).unwrap();
+        std::fs::write(dir.with_file_name("run1").join("x.csv"), "a\n2\n").unwrap();
+        let path = dir.join("solo[1].csv");
+        std::fs::write(&path, "a\n1\n").unwrap();
+        let s = ParquetSession::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(every_cell(&s), one_cell("1"));
+        let other = dir.join("x.csv");
+        std::fs::write(&other, "a\n3\n").unwrap();
+        let s = ParquetSession::open(other.to_str().unwrap()).unwrap();
+        assert_eq!(every_cell(&s), one_cell("3"), "the directory was globbed");
+    }
+
+    /// `*` and `?` cannot be in a Windows file name, and a backslash is a
+    /// separator there.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_name_with_a_star_or_a_question_mark_opens_that_file() {
+        let dir = scratch_dir("glob-unix");
+        for (opened, sibling) in [("s*.csv", "sa.csv"), ("q?.csv", "qa.csv")] {
+            std::fs::write(dir.join(opened), "a\n1\n").unwrap();
+            std::fs::write(dir.join(sibling), "a\n2\n").unwrap();
+            let s = ParquetSession::open(dir.join(opened).to_str().unwrap()).unwrap();
+            assert_eq!(every_cell(&s), one_cell("1"), "{opened}");
+        }
+        // A backslash without a glob character takes DuckDB's literal path.
+        let plain = dir.join("back\\slash.csv");
+        std::fs::write(&plain, "a\n1\n").unwrap();
+        let s = ParquetSession::open(plain.to_str().unwrap()).unwrap();
+        assert_eq!(every_cell(&s), one_cell("1"));
+        // With one, no escape matched, so the open is refused by name.
+        let both = dir.join("back\\slash[1].csv");
+        std::fs::write(&both, "a\n1\n").unwrap();
+        let err = ParquetSession::open(both.to_str().unwrap())
+            .err()
+            .expect("a backslash beside a glob character must be refused");
+        assert!(err.contains("backslash"), "{err}");
+    }
+
+    #[test]
+    fn glob_characters_are_escaped_as_one_character_classes() {
+        assert_eq!(file_arg("plain/it's.csv"), "'plain/it''s.csv'");
+        assert_eq!(file_arg("a[1]*?.csv"), "'a[[]1][*][?].csv'");
+    }
+
+    #[test]
+    fn the_delimiter_comment_is_a_literal() {
+        assert_eq!(delimiter_text("\t"), "tab");
+        assert_eq!(delimiter_text(","), "','");
+        assert_eq!(delimiter_text("'"), "''''");
     }
 
     #[test]

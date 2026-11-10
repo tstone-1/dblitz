@@ -2,13 +2,7 @@ use std::sync::atomic::Ordering;
 
 use super::types::{DbState, SqlCheck, SqlResult};
 use super::util::read_row;
-
-// Execute SQL materializes the whole result set in one IPC round-trip (Rust
-// Vec -> JSON -> JS), unlike Browse Data which pages in chunks. Keep this cap
-// below `query_table`'s 100k `MAX_QUERY_LIMIT` so an ad-hoc query can't become
-// the single heaviest allocation+serialization path in the app. 50k still
-// covers any realistic interactive result; beyond that, page with LIMIT/OFFSET.
-const SQL_RESULT_LIMIT: usize = 50_000;
+use super::{CANCELLED_QUERY_MESSAGE, SQL_RESULT_LIMIT};
 
 impl SqlResult {
     /// Empty-result error: no columns/rows, just the message. The shape every
@@ -167,6 +161,62 @@ pub fn validate_sql(state: &DbState, sql: &str) -> Option<SqlCheck> {
     Some(check)
 }
 
+/// The storage classes seen in each result column that has no declared type.
+///
+/// Such a column is reported as `INTEGER` or `REAL` only when every non-NULL
+/// value in the result was one, and keeps its empty type otherwise, which the
+/// export writes as text. That is what keeps a computed text column holding
+/// `00123` as text: it is the values' storage class that decides, never
+/// whether their text happens to parse as a number. A declared type is never
+/// overridden.
+struct UntypedColumns {
+    /// Indexed like the result's columns; `None` for a declared column.
+    seen: Vec<Option<Seen>>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Seen {
+    integer: bool,
+    real: bool,
+    other: bool,
+}
+
+impl UntypedColumns {
+    fn new(declared: &[String]) -> Self {
+        UntypedColumns {
+            seen: declared
+                .iter()
+                .map(|t| t.is_empty().then(Seen::default))
+                .collect(),
+        }
+    }
+
+    fn observe(&mut self, row: &rusqlite::Row) {
+        use rusqlite::types::ValueRef;
+        for (i, slot) in self.seen.iter_mut().enumerate() {
+            let Some(seen) = slot else { continue };
+            match row.get_ref(i) {
+                Ok(ValueRef::Null) => {}
+                Ok(ValueRef::Integer(_)) => seen.integer = true,
+                Ok(ValueRef::Real(_)) => seen.real = true,
+                _ => seen.other = true,
+            }
+        }
+    }
+
+    fn column_types(&self, declared: &[String]) -> Vec<String> {
+        declared
+            .iter()
+            .zip(&self.seen)
+            .map(|(t, seen)| match seen {
+                Some(s) if !s.other && s.real => "REAL".to_string(),
+                Some(s) if !s.other && s.integer => "INTEGER".to_string(),
+                _ => t.clone(),
+            })
+            .collect()
+    }
+}
+
 pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
     // The SQL tab runs on the SECONDARY connection, not the Browse Data one.
     // Every command used to share one connection, so an ad-hoc `SELECT 1`
@@ -189,17 +239,19 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
     };
 
     let col_count = stmt.column_count();
-    let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let columns: Vec<String> = stmt.column_names().map(|s| s.to_string()).collect();
     // Per-column declared type (e.g. "INTEGER", "TEXT"), used by the XLSX
-    // export to decide numeric vs. text formatting. `None` for a column with
-    // no declared type (a computed expression like `SELECT 1+1`) - the
-    // export side already treats a missing/empty decltype as
-    // numeric-affinity, so an empty string here is the right default.
-    let column_types: Vec<String> = stmt
+    // export to decide numeric vs. text formatting. A computed column
+    // (`COUNT(*)`, `1 + 1`) has none, and the export writes an empty type as
+    // text, so `SELECT name, COUNT(*)` exported its counts as text cells that
+    // Excel's SUM ignores. For those columns the type is derived from the
+    // values instead - see `UntypedColumns`.
+    let declared: Vec<String> = stmt
         .columns()
-        .iter()
         .map(|c| c.decl_type().unwrap_or("").to_string())
         .collect();
+    let mut untyped = UntypedColumns::new(&declared);
+    let column_types = |untyped: &UntypedColumns| untyped.column_types(&declared);
     // Snapshot the generation before running so a mid-iteration cancellation
     // (a newer request bumping it) can be detected without waiting on the
     // interrupt handle alone - see the loop below.
@@ -223,8 +275,8 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
                             return SqlResult::partial_error(
                                 columns,
                                 rows,
-                                column_types,
-                                "Query cancelled by a newer request".to_string(),
+                                column_types(&untyped),
+                                CANCELLED_QUERY_MESSAGE.to_string(),
                             );
                         }
                         // Only flag truncation once we've collected the cap
@@ -235,6 +287,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
                             truncated = true;
                             break;
                         }
+                        untyped.observe(row);
                         rows.push(read_row(row, col_count));
                     }
                     Ok(None) => break,
@@ -242,7 +295,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
                         return SqlResult::partial_error(
                             columns,
                             rows,
-                            column_types,
+                            column_types(&untyped),
                             e.to_string(),
                         );
                     }
@@ -251,7 +304,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
             SqlResult {
                 columns,
                 rows,
-                column_types,
+                column_types: column_types(&untyped),
                 error: None,
                 truncated,
             }
@@ -323,16 +376,25 @@ mod tests {
     fn execute_sql_captures_per_column_decltypes() {
         let (state, path) = setup_temp_db_with_table();
 
-        let result = execute_sql(&state, "SELECT id, name, 1 + 1 AS computed FROM users");
+        let result = execute_sql(
+            &state,
+            "SELECT id, name, 1 + 1 AS computed, 0.5 AS half, '00123' AS code, \
+             NULL AS blank, id AS renamed FROM users",
+        );
 
         assert!(result.error.is_none(), "got: {:?}", result.error);
-        assert_eq!(result.columns, vec!["id", "name", "computed"]);
-        assert_eq!(result.column_types.len(), 3);
-        assert_eq!(result.column_types[0], "INTEGER");
-        assert_eq!(result.column_types[1], "TEXT");
-        // A computed expression has no declared type - empty string, not an
-        // error, and the export side treats that as numeric-affinity.
-        assert_eq!(result.column_types[2], "");
+        assert_eq!(
+            result.columns,
+            vec!["id", "name", "computed", "half", "code", "blank", "renamed"]
+        );
+        // Declared types pass through. A computed column has none, so its type
+        // comes from its values' storage class: numeric only when every
+        // non-NULL value was numeric, empty (written as text) otherwise. A
+        // numeric-looking TEXT value does not count as a number.
+        assert_eq!(
+            result.column_types,
+            vec!["INTEGER", "TEXT", "INTEGER", "REAL", "", "", "INTEGER"]
+        );
 
         close_database(&state);
         let _ = std::fs::remove_file(&path);

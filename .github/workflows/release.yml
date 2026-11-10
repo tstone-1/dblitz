@@ -76,7 +76,7 @@ jobs:
       - name: Verify the tag matches every version file
         run: |
           set -euo pipefail
-          out=$(node scripts/release-preflight.mjs "${{ github.ref_name }}")
+          out=$(node scripts/release-preflight.mjs "$GITHUB_REF_NAME")
           echo "$out"
           echo "$out" | grep -q '^\[OK\] Release preflight' \
             || { echo "::error::release-preflight.mjs exited 0 without running its checks"; exit 1; }
@@ -176,8 +176,8 @@ jobs:
 
           **Windows** - take the `x64-setup.exe`, or the portable `dblitz.exe`; on Windows on ARM, the `arm64-setup.exe` or `dblitz-arm64.exe`. All of them are code-signed; the publisher reads *Open Source Developer Timo Stein*. The certificate is new, so SmartScreen can still warn on first launch: choose *More info*, check the publisher, then *Run anyway*. There is no `.msi` after 26.10.0: if you installed dblitz from one, uninstall it once in Windows *Settings* > *Apps* and install the `-setup.exe`. See the [code signing policy](https://github.com/tstone-1/dblitz#code-signing-policy).
           NOTES
-          gh release create ${{ github.ref_name }} --draft --title "dblitz ${{ github.ref_name }}" --notes-file "$RUNNER_TEMP/notes.md"
-          echo "release_id=$(gh release view ${{ github.ref_name }} --json databaseId -q .databaseId)" >> "$GITHUB_OUTPUT"
+          gh release create "$GITHUB_REF_NAME" --draft --title "dblitz $GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
+          echo "release_id=$(gh release view "$GITHUB_REF_NAME" --json databaseId -q .databaseId)" >> "$GITHUB_OUTPUT"
 
   build:
     needs: create-release
@@ -659,7 +659,7 @@ jobs:
             | grep -q "source=Notarized Developer ID" \
             || { echo "::error::DMG is still not notarized after stapling"; exit 1; }
           echo "Replacing the uploaded DMG with the stapled one"
-          gh release upload "${{ github.ref_name }}" "$DMG" --clobber \
+          gh release upload "$GITHUB_REF_NAME" "$DMG" --clobber \
             --repo "$GITHUB_REPOSITORY"
 
       # A skipped notarization does NOT fail the build: when the credentials
@@ -733,7 +733,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh release download "${{ github.ref_name }}" --repo "${{ github.repository }}" \
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --pattern latest.json -D manifest
           missing=""
           for platform in darwin-aarch64 darwin-x86_64 windows-x86_64 windows-aarch64 linux-x86_64; do
@@ -753,7 +753,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # Every build matrix leg succeeded (needs: build), so the release now
         # has artifacts for every platform - flip it from draft to published.
-        run: gh release edit ${{ github.ref_name }} --draft=false --repo ${{ github.repository }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"
 
   update-tap:
     needs: publish
@@ -775,7 +775,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          SRC_REPO="${{ github.repository }}"
+          SRC_REPO="$GITHUB_REPOSITORY"
           TAP_REPO="tstone-1/homebrew-dblitz"
 
           # Pull the two macOS DMGs the build job just uploaded to this release.

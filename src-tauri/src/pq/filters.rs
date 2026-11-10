@@ -12,7 +12,9 @@
 //! - **A regex runs inside DuckDB (RE2)**, not in Rust. NULL still matches as
 //!   the empty string and a BLOB still never matches.
 
-use crate::db::{contains_pattern, parse_criteria, ColumnFilter, ColumnInfo, Criterion};
+use crate::db::{
+    contains_pattern, parse_criteria, push_column_criteria, ColumnFilter, ColumnInfo, Criterion,
+};
 
 use super::{quote_ident, sql_literal, text_expr};
 
@@ -115,20 +117,7 @@ pub(crate) fn build_where(
                 or_params.extend(param);
             }
         }
-        let mut col_parts: Vec<String> = Vec::new();
-        match ors.len() {
-            0 => {}
-            1 => col_parts.push(ors.remove(0)),
-            _ => col_parts.push(format!("({})", ors.join(" OR "))),
-        }
-        col_parts.extend(ands);
-        params.extend(or_params);
-        params.extend(and_params);
-        match col_parts.len() {
-            0 => {}
-            1 => parts.push(col_parts.remove(0)),
-            _ => parts.push(format!("({})", col_parts.join(" AND "))),
-        }
+        push_column_criteria(ors, or_params, ands, and_params, &mut parts, &mut params);
     }
 
     Ok(Where {

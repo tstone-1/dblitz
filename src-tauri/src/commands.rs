@@ -270,18 +270,20 @@ pub(crate) fn export_to_xlsx(
     headers: Vec<String>,
     rows: Vec<Vec<String>>,
     column_types: Option<Vec<String>>,
-) -> Result<String, String> {
+) -> Result<db::XlsxExport, String> {
     let types = column_types.unwrap_or_default();
     let dest_dir = config::resolve_export_dir();
-    let path =
+    let export =
         db::export_to_xlsx(&headers, &rows, &types, &dest_dir).err_ctx("exporting to Excel")?;
     // Open with default application via opener plugin (safe, cross-platform)
     use tauri_plugin_opener::OpenerExt;
     app.opener()
-        .open_path(&path, None::<&str>)
+        .open_path(&export.path, None::<&str>)
         .str_err()
-        .err_ctx(&format!("opening the exported file {path}"))?;
-    Ok(path)
+        .err_ctx(&format!("opening the exported file {}", export.path))?;
+    // The path and the number of cells cut to Excel's limit: the frontend
+    // puts both in its notice (`exportNotice.ts`), so a cut cell is not silent.
+    Ok(export)
 }
 
 #[cfg(debug_assertions)]

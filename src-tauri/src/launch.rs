@@ -164,8 +164,20 @@ pub(crate) fn handle_open_request(app: &AppHandle, url: &str) {
 /// `dblitz inventory.db` from the file's own directory opened a second window on
 /// a file already open.
 pub(crate) fn launch_argument() -> Option<String> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = launch_args_lossy(std::env::args_os().skip(1));
     resolve_launch_argument(&args, |path| std::path::Path::new(path).is_file())
+}
+
+/// The launch arguments as text, never panicking.
+///
+/// `std::env::args()` panics on an argument that is not valid Unicode - a
+/// Latin-1 file name on Linux, a lone surrogate on Windows - and it ran before
+/// any window existed, so dblitz vanished with no message at all. A lossy
+/// conversion keeps the process alive: the replacement character names a file
+/// that does not exist, so the open fails with the normal error the user can
+/// read, about the path they can see.
+fn launch_args_lossy(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<String> {
+    args.map(|a| a.to_string_lossy().into_owned()).collect()
 }
 
 /// The half of [`launch_argument`] that does not read the process environment,
@@ -233,7 +245,39 @@ fn absolutize_launch_path(path: &str) -> String {
 /// the comments in [`PendingOpen`] and the run-event handler.
 #[cfg(test)]
 mod open_request_tests {
-    use super::{absolutize_launch_path, file_url_to_path, resolve_launch_argument, PendingOpen};
+    use super::{
+        absolutize_launch_path, file_url_to_path, launch_args_lossy, resolve_launch_argument,
+        PendingOpen,
+    };
+
+    #[test]
+    fn a_non_unicode_launch_argument_does_not_panic() {
+        // What `std::env::args()` panicked on, per OS: a byte that is not
+        // UTF-8 on Unix, an unpaired surrogate on Windows.
+        #[cfg(unix)]
+        let bad: std::ffi::OsString = {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(b"caf\xe9.sqlite".to_vec())
+        };
+        #[cfg(windows)]
+        let bad: std::ffi::OsString = {
+            use std::os::windows::ffi::OsStringExt;
+            let mut wide: Vec<u16> = "caf".encode_utf16().collect();
+            wide.push(0xD800);
+            wide.extend(".sqlite".encode_utf16());
+            std::ffi::OsString::from_wide(&wide)
+        };
+        assert!(
+            bad.to_str().is_none(),
+            "the fixture must not be valid Unicode"
+        );
+
+        let args = launch_args_lossy([bad, "second".into()].into_iter());
+        assert_eq!(args, vec!["caf\u{FFFD}.sqlite", "second"]);
+        // And the resolver turns it into a path the open can fail on normally.
+        let resolved = resolve_launch_argument(&args, |_| false).unwrap();
+        assert!(resolved.ends_with("caf\u{FFFD}.sqlite"), "{resolved}");
+    }
 
     #[test]
     fn file_url_percent_escapes_are_decoded() {

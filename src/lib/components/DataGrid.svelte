@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { onDestroy, tick } from "svelte";
-  import { createCellSelection } from "./cellSelection.svelte";
+  import { onDestroy, tick, untrack } from "svelte";
+  import { createCellSelection, createViewChangeDetector } from "./cellSelection.svelte";
   import { createDragReorder } from "./dragReorder.svelte";
   import { buildSelectionData, type SelectionData } from "./selectionData";
   import { serializeClipboardTable, writeClipboardTable } from "./clipboardTable";
@@ -44,6 +44,9 @@
          *  reloaded. A find that sees it change stops instead of selecting a
          *  cell in a view it did not search. */
         viewToken: () => number;
+        /** True while `totalRows` is provisional (a filtered view whose count
+         *  is still running): at most one chunk, not the view's size. */
+        countPending: boolean;
       };
 
   // Props. The grid runs in two modes: mode.kind === "virtual" (BrowseData,
@@ -261,6 +264,25 @@
   // Selection (extracted to cellSelection.ts)
   const selection = createCellSelection();
   const sel = $derived(selection.sel);
+
+  // A selection names cells of one view, so a new view drops it; see
+  // createViewChangeDetector for what a stale one broke. The virtual-mode
+  // token (the virtualRows epoch) is plain state, so the effect depends on
+  // `rowsVersion`, which every reload and reset bumps when it clears the
+  // cache, and reads the token untracked. Chunk arrivals bump it too and are
+  // filtered out by the token comparison. The write happens here, in an
+  // effect, never in a `$derived` or a template read.
+  const viewChanged = createViewChangeDetector();
+  $effect(() => {
+    void (mode.kind === "virtual" ? mode.rowsVersion : mode.rows);
+    const cols = columns;
+    const token = untrack(() => (mode.kind === "virtual" ? mode.viewToken() : mode.rows));
+    if (viewChanged(token, cols)) untrack(() => selection.clear());
+  });
+
+  function countIsPending(): boolean {
+    return mode.kind === "virtual" && mode.countPending;
+  }
 
   // Selection statistics are an explicit, debounced computation over CACHED
   // rows -- never a `$derived` reading `getRowData`.
@@ -516,6 +538,8 @@
         loadRows,
         blockRows: FIND_BLOCK_ROWS,
         isCancelled,
+        isCountPending: countIsPending,
+        currentRowCount: () => rowCount,
         onProgress: (searched) => {
           if (myId !== findSearchId || Date.now() - startedAt < FIND_PROGRESS_DELAY_MS) return;
           findStatus = `Searching... row ${searched.toLocaleString()} of ${total.toLocaleString()}`;
@@ -524,6 +548,8 @@
       if (myId !== findSearchId) return;
       if (result.kind === "cancelled") {
         findStatus = "Search stopped: the view changed.";
+      } else if (result.kind === "incomplete") {
+        findStatus = "Still counting rows. Search again when the count is in.";
       } else if (result.kind === "none") {
         findStatus = "No match";
       } else {
@@ -612,6 +638,12 @@
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
       e.preventDefault();
+      // While the count runs, rowCount is at most one chunk: selecting
+      // 0..rowCount-1 would silently select only the rows loaded so far.
+      if (countIsPending()) {
+        onNotice?.("Still counting rows. Select all again when the count is in.");
+        return;
+      }
       if (rowCount > 0 && columns.length > 0) {
         selection.setSelection(
           { row: 0, col: 0 },

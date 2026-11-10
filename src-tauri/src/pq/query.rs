@@ -6,7 +6,9 @@
 //!   offset, cold or warm. `LIMIT/OFFSET` grew to 82 ms at row 50M.
 //! - **Filtered, unsorted**: the matching row numbers are collected once, in
 //!   file order, and each chunk is fetched with `IN (...)`. DuckDB skips row
-//!   groups using the list's min and max: 17-31 ms per chunk.
+//!   groups using the list's min and max: 17-31 ms per chunk. A view with
+//!   more than [`LIST_MAX_ROWS`] matches keeps only its count, and each page
+//!   asks for its row numbers with `LIMIT/OFFSET`, so memory stays flat.
 //! - **Sorted** (filtered or not), a file too big for the next path: the
 //!   view is materialized once, in its own column types, into a DuckDB file in
 //!   the cache directory, and paged by `rowid`, rendering each page on the way
@@ -40,10 +42,9 @@ type Rows = Vec<Vec<Option<String>>>;
 /// One page of rows and the view's total row count.
 type Page = (Rows, i64);
 
-const MAX_QUERY_LIMIT: i64 = 100_000;
+use crate::db::{CANCELLED_QUERY_MESSAGE as CANCELLED, MAX_QUERY_LIMIT};
 /// How often a list build checks for cancellation.
 const CANCEL_CHECK_EVERY: usize = 65_536;
-const CANCELLED: &str = "Query cancelled by a newer request";
 /// A sorted view of a file with at most this many cells (rows x columns) is
 /// paged from an order list instead of a materialized copy. A page of a
 /// scattered sort scans the whole file, so its cost grows with the cell count:
@@ -52,6 +53,12 @@ pub(crate) const ORDER_LIST_MAX_CELLS: i64 = 200_000_000;
 /// And at most this many rows: the list is 8 bytes a row in memory, and a file
 /// this long with few columns is cheap to materialize.
 const ORDER_LIST_MAX_ROWS: i64 = 20_000_000;
+/// The most row numbers any listed view holds in memory: the same 160 MB as
+/// the sorted bound above. Without it a filtered view, or a sort after
+/// `sort_cache_failed`, listed 8 bytes for every matching row, 4 GB for a
+/// filter matching most of 500M rows. A view with more matches keeps only its
+/// count, and each page asks DuckDB for its row numbers with `LIMIT/OFFSET`.
+pub(crate) const LIST_MAX_ROWS: i64 = ORDER_LIST_MAX_ROWS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ViewKey {
@@ -63,6 +70,9 @@ struct ViewKey {
 enum View {
     /// The view's row numbers in view order: file order unless sorted.
     Listed { key: ViewKey, rows: Vec<i64> },
+    /// A view that would be `Listed` but has more than `list_max_rows` rows:
+    /// only the count is kept ([`LIST_MAX_ROWS`]).
+    Counted { key: ViewKey, count: i64 },
     /// A sorted view materialized into the sort cache.
     Sorted { key: ViewKey, count: i64 },
 }
@@ -146,10 +156,15 @@ pub fn query_table(
         let key = ViewKey { filter, sort };
         let mut views = s.views.lock();
         let listed = key.sort.is_none()
+            || !s.sort_cache_usable
             || pages_from_a_list(s.total_rows, s.columns.len(), s.order_list_max_cells)
             || s.sort_cache_failed.load(Ordering::Relaxed);
+        let bound = ListBound {
+            file_rows: s.total_rows,
+            max_rows: s.list_max_rows,
+        };
         if listed {
-            listed_page(conn, &mut views, key, &proj, req, gen, generation)?
+            listed_page(conn, &mut views, key, bound, &proj, req, gen, generation)?
         } else {
             let cached = sorted_page(
                 s,
@@ -170,7 +185,7 @@ pub fn query_table(
                 // the user stopped stays stopped.
                 Err(e) if generation.load(Ordering::Relaxed) == gen && !e.contains("INTERRUPT") => {
                     s.sort_cache_failed.store(true, Ordering::Relaxed);
-                    listed_page(conn, &mut views, key, &proj, req, gen, generation)?
+                    listed_page(conn, &mut views, key, bound, &proj, req, gen, generation)?
                 }
                 page => page?,
             }
@@ -212,7 +227,11 @@ pub(crate) fn count_rows(
     }
     let key = ViewKey { filter, sort: None };
     let mut views = s.views.lock();
-    ensure_listed(conn, &mut views, key, gen, generation).map(|rows| rows.len() as i64)
+    let bound = ListBound {
+        file_rows: s.total_rows,
+        max_rows: s.list_max_rows,
+    };
+    ensure_listed(conn, &mut views, key, bound, gen, generation).map(|l| l.count())
 }
 
 fn count_where(conn: &Connection, filter: &Where) -> Result<i64, String> {
@@ -256,39 +275,110 @@ fn offset_page(
     Ok((rows, count_where(conn, filter)?))
 }
 
+/// What decides whether a listed view's row numbers are held in memory.
+#[derive(Debug, Clone, Copy)]
+struct ListBound {
+    /// The file's row count, an upper bound for any view of it.
+    file_rows: i64,
+    /// [`LIST_MAX_ROWS`], or a test's lower value.
+    max_rows: i64,
+}
+
+/// Whether a view of at most `rows` rows is held as a row-number list. Asked
+/// first of the file's row count, so a file within the bound pays no count
+/// query, and only then of the view's own count.
+fn lists(rows: i64, max_rows: i64) -> bool {
+    rows <= max_rows
+}
+
+/// A listed view, as [`ensure_listed`] holds it.
+enum Listing<'v> {
+    Rows(&'v [i64]),
+    Counted(i64),
+}
+
+impl Listing<'_> {
+    fn count(&self) -> i64 {
+        match self {
+            Listing::Rows(rows) => rows.len() as i64,
+            Listing::Counted(count) => *count,
+        }
+    }
+}
+
+/// `ORDER BY` for a listed view: its sort, or file order.
+fn list_order(sort: Option<&(String, bool)>) -> String {
+    match sort {
+        Some(sort) => order_by(sort, ", file_row_number"),
+        None => " ORDER BY file_row_number".to_string(),
+    }
+}
+
+/// The row numbers `sql` returns, checking for cancellation as it goes.
+fn row_numbers(
+    conn: &Connection,
+    sql: &str,
+    params: &[String],
+    gen: u64,
+    generation: &AtomicU64,
+) -> Result<Vec<i64>, String> {
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let mut it = stmt
+        .query(params_from_iter(params))
+        .map_err(|e| e.to_string())?;
+    let mut rows = Vec::new();
+    while let Some(r) = it.next().map_err(|e| e.to_string())? {
+        rows.push(r.get::<_, i64>(0).map_err(|e| e.to_string())?);
+        if rows.len() % CANCEL_CHECK_EVERY == 0 && generation.load(Ordering::Relaxed) != gen {
+            return Err(CANCELLED.to_string());
+        }
+    }
+    Ok(rows)
+}
+
 fn ensure_listed<'v>(
     conn: &Connection,
     views: &'v mut Views,
     key: ViewKey,
+    bound: ListBound,
     gen: u64,
     generation: &AtomicU64,
-) -> Result<&'v [i64], String> {
-    let fresh = matches!(&views.active, Some(View::Listed { key: k, .. }) if *k == key);
+) -> Result<Listing<'v>, String> {
+    let fresh = matches!(
+        &views.active,
+        Some(View::Listed { key: k, .. } | View::Counted { key: k, .. }) if *k == key
+    );
     if !fresh {
         views.active = None;
-        let order = match &key.sort {
-            Some(sort) => order_by(sort, ", file_row_number"),
-            None => " ORDER BY file_row_number".to_string(),
+        let count = if lists(bound.file_rows, bound.max_rows) {
+            None
+        } else {
+            // A cancel interrupts the count; report it as one.
+            let count = count_where(conn, &key.filter).map_err(|e| {
+                if generation.load(Ordering::Relaxed) != gen {
+                    CANCELLED.to_string()
+                } else {
+                    e
+                }
+            })?;
+            (!lists(count, bound.max_rows)).then_some(count)
         };
-        let sql = format!(
-            "SELECT file_row_number FROM data_rn{}{order}",
-            key.filter.clause
-        );
-        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-        let mut it = stmt
-            .query(params_from_iter(&key.filter.params))
-            .map_err(|e| e.to_string())?;
-        let mut rows = Vec::new();
-        while let Some(r) = it.next().map_err(|e| e.to_string())? {
-            rows.push(r.get::<_, i64>(0).map_err(|e| e.to_string())?);
-            if rows.len() % CANCEL_CHECK_EVERY == 0 && generation.load(Ordering::Relaxed) != gen {
-                return Err(CANCELLED.to_string());
+        views.active = Some(match count {
+            Some(count) => View::Counted { key, count },
+            None => {
+                let sql = format!(
+                    "SELECT file_row_number FROM data_rn{}{}",
+                    key.filter.clause,
+                    list_order(key.sort.as_ref())
+                );
+                let rows = row_numbers(conn, &sql, &key.filter.params, gen, generation)?;
+                View::Listed { key, rows }
             }
-        }
-        views.active = Some(View::Listed { key, rows });
+        });
     }
     match &views.active {
-        Some(View::Listed { rows, .. }) => Ok(rows),
+        Some(View::Listed { rows, .. }) => Ok(Listing::Rows(rows)),
+        Some(View::Counted { count, .. }) => Ok(Listing::Counted(*count)),
         _ => unreachable!("set above"),
     }
 }
@@ -298,16 +388,36 @@ fn listed_page(
     conn: &Connection,
     views: &mut Views,
     key: ViewKey,
+    bound: ListBound,
     proj: &str,
     req: &QueryRequest,
     gen: u64,
     generation: &AtomicU64,
 ) -> Result<Page, String> {
-    let all = ensure_listed(conn, views, key, gen, generation)?;
-    let total = all.len() as i64;
-    let start = (req.offset as usize).min(all.len());
-    let end = start.saturating_add(req.limit as usize).min(all.len());
-    let chunk = &all[start..end];
+    // Built before `key` moves into the view, for a view too big to list.
+    let page_sql = format!(
+        "SELECT file_row_number FROM data_rn{}{} LIMIT {} OFFSET {}",
+        key.filter.clause,
+        list_order(key.sort.as_ref()),
+        req.limit,
+        req.offset
+    );
+    let params = key.filter.params.clone();
+    let (chunk, total) = match ensure_listed(conn, views, key, bound, gen, generation)? {
+        Listing::Rows(all) => {
+            let start = (req.offset as usize).min(all.len());
+            let end = start.saturating_add(req.limit as usize).min(all.len());
+            (all[start..end].to_vec(), all.len() as i64)
+        }
+        // Only the page's row numbers are asked for, not its cells: DuckDB's
+        // top-N then holds two columns per row up to the offset, not whole
+        // rows, and the cells come from the same `IN (...)` fetch as a list.
+        Listing::Counted(count) => (
+            row_numbers(conn, &page_sql, &params, gen, generation)?,
+            count,
+        ),
+    };
+    let chunk = &chunk[..];
     if chunk.is_empty() {
         return Ok((Vec::new(), total));
     }
@@ -690,6 +800,107 @@ mod tests {
         // The widest file measured, 2M x 100, is on the list path.
         assert!(pages_from_a_list(2_000_000, 100, max));
         assert!(!pages_from_a_list(2_000_001, 100, max));
+    }
+
+    #[test]
+    fn a_view_is_listed_only_within_the_row_bound() {
+        assert!(lists(LIST_MAX_ROWS, LIST_MAX_ROWS));
+        assert!(!lists(LIST_MAX_ROWS + 1, LIST_MAX_ROWS));
+        assert!(lists(0, 0), "an empty view is always a list");
+        // The listed bound is the sorted one, 160 MB of row numbers.
+        assert_eq!(LIST_MAX_ROWS, ORDER_LIST_MAX_ROWS);
+        assert_eq!(session(10).list_max_rows, LIST_MAX_ROWS);
+    }
+
+    fn listed_kind(s: &ParquetSession) -> &'static str {
+        match s.views.lock().active {
+            Some(View::Listed { .. }) => "listed",
+            Some(View::Counted { .. }) => "counted",
+            Some(View::Sorted { .. }) => "sorted",
+            None => "none",
+        }
+    }
+
+    /// Every page of `q`, `step` rows at a time, as ids; checks the total.
+    fn all_pages(s: &ParquetSession, q: &mut QueryRequest, step: i64, total: usize) -> Vec<i64> {
+        let g = AtomicU64::new(0);
+        let mut got = Vec::new();
+        q.limit = step;
+        q.offset = 0;
+        loop {
+            let r = query_table(s, q, &g).unwrap();
+            assert_eq!(r.total_rows, Some(total as i64), "offset {}", q.offset);
+            if r.rows.is_empty() {
+                break;
+            }
+            got.extend(ids(&r));
+            q.offset += step;
+        }
+        got
+    }
+
+    #[test]
+    fn a_view_with_more_matches_than_a_list_may_hold_pages_by_offset() {
+        let mut s = session(2500);
+        s.list_max_rows = 100;
+        let mut q = req(0, 1);
+        q.filters = vec![filter("cat", "=b", false)];
+        let expected: Vec<i64> = (0..2500).filter(|i| i % 3 == 1).collect();
+        assert_eq!(all_pages(&s, &mut q, 300, expected.len()), expected);
+        assert_eq!(listed_kind(&s), "counted", "833 matches must not be listed");
+        let g = AtomicU64::new(0);
+        assert_eq!(
+            count_rows(&s, "data", &q.filters, "", &g).unwrap(),
+            expected.len() as i64
+        );
+        // A sort after a failed cache build takes the same bounded path.
+        s.sort_cache_failed.store(true, Ordering::Relaxed);
+        s.order_list_max_cells = 0;
+        q.sort_column = Some("id".into());
+        q.sort_asc = false;
+        let reversed: Vec<i64> = expected.iter().rev().copied().collect();
+        assert_eq!(all_pages(&s, &mut q, 300, expected.len()), reversed);
+        assert_eq!(listed_kind(&s), "counted");
+        // A view within the bound is still listed, even in a file above it.
+        let mut q = req(0, 1);
+        q.filters = vec![filter("id", "<50", false)];
+        assert_eq!(all_pages(&s, &mut q, 30, 50), (0..50).collect::<Vec<_>>());
+        assert_eq!(listed_kind(&s), "listed");
+    }
+
+    #[test]
+    fn a_parquet_file_with_a_rowid_column_sorts_correctly_through_the_cache() {
+        // In the sort cache the file's `rowid` hides the table's own, which
+        // the cache's pages are cut by: positions 0 to 2 came back as every
+        // row whose column value was below 3.
+        let dir = scratch_dir("rowid-parquet");
+        let path = dir.join("rowid.parquet");
+        Connection::open_in_memory()
+            .unwrap()
+            .execute_batch(&format!(
+                "COPY (SELECT (i * 7) % 5 AS rowid, i AS id FROM range(300) t(i)) TO {} (FORMAT parquet)",
+                sql_literal(path.to_str().unwrap())
+            ))
+            .unwrap();
+        let mut s = ParquetSession::open(path.to_str().unwrap()).unwrap();
+        s.order_list_max_cells = 0;
+        assert!(s.row_numbers, "a Parquet file keeps its row numbers");
+        let g = AtomicU64::new(0);
+        let mut got = Vec::new();
+        for offset in (0..300).step_by(40) {
+            let mut q = req(offset, 40);
+            q.sort_column = Some("id".into());
+            q.sort_asc = false;
+            let r = query_table(&s, &q, &g).unwrap();
+            assert_eq!(r.total_rows, Some(300));
+            got.extend(
+                r.rows
+                    .iter()
+                    .map(|row| row[1].as_ref().unwrap().parse::<i64>().unwrap()),
+            );
+        }
+        assert_eq!(got, (0..300).rev().collect::<Vec<_>>());
+        assert!(!sorted_into_the_cache(&s));
     }
 
     #[test]

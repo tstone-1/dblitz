@@ -126,31 +126,33 @@ format). Clients verify it against `plugins.updater.pubkey` in
 `tauri.conf.json` before installing anything. This is independent of Apple/
 Windows code signing and is *not* fixed by adding a Developer ID.
 
-- **Private key + password: KeePass**, and mirrored into the repo secrets
-  `TAURI_SIGNING_PRIVATE_KEY` (the key file's **contents**) and
-  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+- **Private key + password: the maintainer's password manager**, and mirrored
+  into the repo secrets `TAURI_SIGNING_PRIVATE_KEY` (the key file's
+  **contents**) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 - **Public key: committed** in `tauri.conf.json`. Public by design.
 - **This is a dblitz-only key.** Do not reuse screenpick's, or any other app's —
   one compromised or lost key would then orphan two installed bases.
 - **Losing the private key permanently orphans the installed base.** A new key
   cannot sign for clients that already hold the old public key, so every existing
   user would have to find and reinstall dblitz by hand. There is no recovery
-  path. Keep the KeePass database backed up.
+  path. Keep the password manager's store backed up.
 
 Generating it (only ever for a *new* app, never to "fix" a lost key). Create the
-KeePass entry and generate the password there **first**, then copy it to the
-clipboard — the commands below read it from there so it never lands in shell
-history, a transcript, or an agent's tool log:
+entry in your password manager and generate the password there **first**, then
+copy it to the clipboard — the commands below read it from there so it never
+lands in shell history, a transcript, or an agent's tool log. `<key file>` is
+a path outside the repository; the key file goes into the password manager
+with the password:
 
 ```sh
-npx tauri signer generate -w ~/.tauri/dblitz.key -p "$(pbpaste)" --ci
-gh auth switch --user tstone-1
-gh secret set TAURI_SIGNING_PRIVATE_KEY --repo tstone-1/dblitz < ~/.tauri/dblitz.key
+npx tauri signer generate -w <key file> -p "$(pbpaste)" --ci
+# Signed in to gh with an account that can set this repository's secrets.
+gh secret set TAURI_SIGNING_PRIVATE_KEY --repo tstone-1/dblitz < <key file>
 printf '%s' "$(pbpaste)" | gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --repo tstone-1/dblitz
 ```
 
 > **The interactive form needs a real TTY.** Plain
-> `npx tauri signer generate -w ~/.tauri/dblitz.key` prompts for the password,
+> `npx tauri signer generate -w <key file>` prompts for the password,
 > and in any non-interactive shell — an agent tool call, a CI step, a piped
 > command — that prompt **panics** rather than falling back:
 > `called Result::unwrap() on an Err value: PError { kind: Io, ... message: "Device not configured" }`.
@@ -161,7 +163,7 @@ printf '%s' "$(pbpaste)" | gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --re
 > the same "expanded before exec" property, so the password still stays out of
 > the command text you typed.
 
-Then paste the contents of `~/.tauri/dblitz.key.pub` into `plugins.updater.pubkey`
+Then paste the contents of `<key file>.pub` into `plugins.updater.pubkey`
 in `tauri.conf.json`. `src/lib/updaterConfig.test.ts` fails until you do — a build
 with the committed placeholder produces artifacts no client can verify.
 
@@ -201,7 +203,8 @@ Do this after any change to the updater wiring, and before trusting a release to
 reach real users. It exercises signature verification, download, in-place bundle
 replacement and relaunch without publishing anything or burning a tag.
 
-Use a **throwaway keypair** so the real private key never leaves KeePass/CI:
+Use a **throwaway keypair** so the real private key never leaves the password
+manager and CI:
 
 ```sh
 SCRATCH=$(mktemp -d)
@@ -290,8 +293,8 @@ App Store Connect notarization key as `screenpick`:
 |---|---|
 | Signing identity | `Developer ID Application: Timo Stein (NVX72G8SJ8)` |
 | Team ID | `NVX72G8SJ8`, G2 sub-CA, valid to 2031-07-26 |
-| Notarization Key ID | `T87S5KZQ4J` |
-| Certificate backup | `apple-developer-id-NVX72G8SJ8.p12` — team-scoped on purpose, since it signs both apps |
+| Notarization key | One App Store Connect API key (`.p8`), the same in both repos; its Key ID is the `APPLE_API_KEY` secret |
+| Certificate backup | One `.p12`, kept with the maintainer's credentials: team-scoped on purpose, since it signs both apps |
 
 That is the normal model, not a shortcut: a Developer ID Application certificate
 certifies a *team*, never an app — nothing in it names a bundle — and Apple caps
@@ -326,9 +329,9 @@ is on by default and is required for notarization — do not turn it off.
 
 ```sh
 export APPLE_SIGNING_IDENTITY="Developer ID Application: Timo Stein (NVX72G8SJ8)"
-export APPLE_API_KEY=T87S5KZQ4J
+export APPLE_API_KEY=<KEY_ID>
 export APPLE_API_ISSUER=<ISSUER-UUID>
-export APPLE_API_KEY_PATH="$HOME/.appstoreconnect/private_keys/AuthKey_T87S5KZQ4J.p8"
+export APPLE_API_KEY_PATH="<path to the .p8>"   # outside the repository
 npx tauri build --target aarch64-apple-darwin   # and/or x86_64-apple-darwin
 ```
 
@@ -398,7 +401,7 @@ Six repo secrets, consumed by the two macOS legs only:
 | `APPLE_CERTIFICATE` | base64 of the `.p12` (`openssl base64 -A -in …`) |
 | `APPLE_CERTIFICATE_PASSWORD` | the `.p12` export password |
 | `APPLE_SIGNING_IDENTITY` | `Developer ID Application: Timo Stein (NVX72G8SJ8)` |
-| `APPLE_API_KEY` | the Key ID, `T87S5KZQ4J` |
+| `APPLE_API_KEY` | the Key ID of the App Store Connect API key |
 | `APPLE_API_ISSUER` | the Issuer UUID |
 | `APPLE_API_KEY_P8` | the `.p8` contents; the workflow writes it to `$RUNNER_TEMP` and points `APPLE_API_KEY_PATH` at it |
 
@@ -508,7 +511,7 @@ secrets. The environment accepts the `main` branch and `v*` tags.
 Setting it up, once (not yet done for this repository on 2026-10-08):
 
 ```sh
-gh auth switch --user tstone-1
+# Signed in to gh with an account that administers this repository.
 gh api -X PUT repos/tstone-1/dblitz/environments/signing --input - <<'JSON'
 {"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}
 JSON
@@ -674,7 +677,11 @@ leg reads every signature back.
     line of the output as a possible major.
 - [ ] Update npm dependencies: `npm update && npm outdated`
   - `npm outdated` shows remaining major-version updates. Review individually.
-- [ ] No Rust vulnerabilities: `cd src-tauri && cargo audit` (install: `cargo install cargo-audit`)
+- [ ] No Rust vulnerabilities: `cd src-tauri && cargo audit` (install: `cargo install cargo-audit`).
+  The weekly `Audit` workflow checks `main` against the allowed list in
+  `.github/workflows/audit.yml`; this line checks the lockfile about to be
+  tagged. Anything outside that list (`docs/agent-notes.md`, "Expected `cargo
+  audit` noise") is fixed before the tag.
 - [ ] No npm vulnerabilities: `npm audit`
 
 **Code quality:**
@@ -720,7 +727,7 @@ npx tauri build
 > **This exits 1 even when it succeeds.** With `createUpdaterArtifacts` enabled
 > the bundler ends by signing the updater artifacts, and locally
 > `TAURI_SIGNING_PRIVATE_KEY` is deliberately unset (the key lives only in
-> KeePass and the repo secrets) — so the build writes the exe and the
+> the password manager and the repo secrets) — so the build writes the exe and the
 > installer, *then* fails with "A public key has been found, but no private
 > key". Judge this step by the artifact check below, not the exit code; signed
 > updater artifacts only ever come from CI.

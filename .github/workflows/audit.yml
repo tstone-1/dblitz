@@ -1,0 +1,115 @@
+name: Audit
+
+# Runs `cargo audit` on the shipped lockfile once a week and on demand.
+#
+# A schedule and not a step in checks.yml: an advisory is published against a
+# lockfile that has not changed, so a check that runs only on push reports it
+# at the next push, weeks later perhaps. RUSTSEC-2026-0459 (C SQLite, in
+# `libsqlite3-sys`) was published on 2026-10-30, the day 26.10.5 shipped it,
+# and nothing reported it for eleven days. A failed scheduled run notifies the
+# repository owner by mail.
+#
+# The job reads the lockfile and the public advisory database and nothing else:
+# no secrets, no write token, no build.
+
+on:
+  schedule:
+    # Mondays, 06:17 UTC. Off the full hour, where scheduled runs queue longest.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-audit:
+    name: cargo audit (src-tauri/Cargo.lock)
+    runs-on: ubuntu-24.04
+    # Not observed yet: added 2026-11-10. A cold `cargo install cargo-audit`
+    # takes a few minutes, the audit itself seconds. Replace with the observed
+    # maximum once the first runs are in.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # See checks.yml for why this is the v1 tag with an explicit `toolchain:`.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+
+      # A fixed version, so a cargo-audit release changes the result only
+      # through a diff here.
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      # Fails on every vulnerability, and on every warning (unmaintained,
+      # unsound, yanked) that is not in the list below. The list and
+      # docs/agent-notes.md, "Expected `cargo audit` noise", must name the same
+      # entries: checksWorkflow.test.ts holds them equal. An advisory is
+      # allowed by its ID; a yanked version has no ID, so it is allowed as
+      # "<crate> <version>".
+      #
+      # The report is read as JSON and not by exit code alone: cargo-audit
+      # exits 1 for a vulnerability and for a crash alike, and treats warnings
+      # as a pass unless told otherwise, and `--ignore` cannot name a yanked
+      # version.
+      - name: Audit the lockfile
+        run: |
+          set -euo pipefail
+          allowed='[
+            "RUSTSEC-2024-0370",
+            "RUSTSEC-2024-0429",
+            "RUSTSEC-2026-0370",
+            "RUSTSEC-2026-0371",
+            "RUSTSEC-2026-0372"
+          ]'
+          # Why each one is allowed:
+          # RUSTSEC-2024-0370  proc-macro-error, unmaintained. A build-time
+          #                    macro under glib-macros and gtk3-macros, the GTK 3
+          #                    stack of Tauri's Linux webview. Nothing of it runs.
+          # RUSTSEC-2024-0429  glib 0.18, unsound `VariantStrIter`. The same GTK 3
+          #                    stack, Linux only; dblitz never iterates a GVariant.
+          # RUSTSEC-2026-0370  zvariant, unmaintained.
+          # RUSTSEC-2026-0371  zbus_names, unmaintained.
+          # RUSTSEC-2026-0372  zvariant_derive, unmaintained. The three come with
+          #                    zbus, which tauri-plugin-opener uses on Linux to ask
+          #                    the file manager over D-Bus to show a file.
+          report="$RUNNER_TEMP/audit.json"
+          status=0
+          cargo audit --file src-tauri/Cargo.lock --json > "$report" || status=$?
+          if ! jq -e '.vulnerabilities.list and .warnings and (.lockfile["dependency-count"] > 0)' "$report" > /dev/null; then
+            echo "::error::cargo audit wrote no usable report (exit code $status)"
+            exit 1
+          fi
+          echo "[OK] $(jq '.lockfile["dependency-count"]' "$report") crates scanned, cargo audit exit code $status"
+          findings=$(jq -r '
+            [ (.vulnerabilities.list[] | {kind: "vulnerability", id: .advisory.id, crate: "\(.package.name) \(.package.version)"}),
+              (.warnings | to_entries[] | .value[] | {kind: .kind, id: (.advisory.id // null), crate: "\(.package.name) \(.package.version)"}) ]
+            | .[] | [.kind, (.id // .crate), .crate] | @tsv' "$report")
+          unexpected=0
+          while IFS=$'\t' read -r kind key crate; do
+            [ -n "$kind" ] || continue
+            if jq -e --arg k "$key" 'index($k) != null' <<< "$allowed" > /dev/null; then
+              echo "[allowed] $kind $key ($crate)"
+            else
+              echo "::error::$kind $key ($crate) is not on the allowed list"
+              unexpected=$((unexpected + 1))
+            fi
+          done <<< "$findings"
+          # An entry nothing matches any more is reported, so the list shrinks.
+          while IFS= read -r key; do
+            grep -qF -- "$key" <<< "$findings" \
+              || echo "::warning::allowed entry no longer reported, remove it here and in docs/agent-notes.md: $key"
+          done < <(jq -r '.[]' <<< "$allowed")
+          if [ "$unexpected" -ne 0 ]; then
+            echo "[FAIL] $unexpected finding(s) not on the allowed list"
+            exit 1
+          fi
+          echo "[OK] cargo audit: nothing outside the allowed list"

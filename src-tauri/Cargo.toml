@@ -1,6 +1,6 @@
 [package]
 name = "dblitz"
-version = "26.10.5"
+version = "26.11.0"
 description = "Read-only browser for SQLite, Parquet, CSV and JSON files"
 # Matches the repository's LICENSE file; declared here so `cargo` and any
 # generated metadata carry it too.
@@ -20,7 +20,9 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.40.2", features = ["bundled", "hooks", "column_decltype"] }
+# 0.41 is the first release on libsqlite3-sys 0.39, which carries the fix for
+# RUSTSEC-2026-0459 (a SQLite CVE; dblitz opens untrusted database files).
+rusqlite = { version = "0.41.1", features = ["bundled", "hooks", "column_decltype"] }
 # Parquet files are read through an embedded DuckDB (src/pq/). `bundled` alone
 # has no Parquet reader - the `parquet` feature is what links it in. Measured
 # 2026-09-28 on a 10-core M-series Mac: +35.7 MB to a stripped binary and a

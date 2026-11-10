@@ -26,8 +26,29 @@ pub mod bench_api {
     pub use crate::pq::{query_table as parquet_query_table, ParquetSession};
 }
 
-pub use export::export_to_xlsx;
-pub(crate) use filters::{contains_pattern, parse_criteria, Criterion};
+pub use export::{export_to_xlsx, XlsxExport};
+pub(crate) use filters::{contains_pattern, parse_criteria, push_column_criteria, Criterion};
+
+/// The error text of a query stopped by `cancel_queries` or by a newer request,
+/// on both engines. The frontend recognises a cancel by this exact text
+/// (`CANCELLED_QUERY_MESSAGE` in `src/lib/components/virtualRows.svelte.ts`)
+/// and drops it instead of showing an error, so rewording one copy turned a
+/// cancel into a red error bar while every test stayed green. One constant,
+/// and `cancel_message_matches_frontend` below pins the TS copy to it.
+pub(crate) const CANCELLED_QUERY_MESSAGE: &str = "Query cancelled by a newer request";
+
+/// Defensive ceiling on one Browse Data page request, on both engines. The UI
+/// only ever asks for a fixed chunk size, so this is insurance against a
+/// caller passing a value that would materialize an unreasonable number of
+/// rows into memory at once.
+pub(crate) const MAX_QUERY_LIMIT: i64 = 100_000;
+
+/// Row cap of one SQL-tab result, on both engines. Execute SQL materializes
+/// the whole result in one IPC round trip (Rust Vec -> JSON -> JS), unlike
+/// Browse Data, which pages in chunks; keeping this below [`MAX_QUERY_LIMIT`]
+/// stops an ad-hoc query from becoming the heaviest allocation and
+/// serialization path in the app. Beyond it, page with LIMIT/OFFSET.
+pub(crate) const SQL_RESULT_LIMIT: usize = 50_000;
 pub use query::{count_rows, query_table};
 pub use schema::{get_columns, get_schema, open_database};
 pub use sql::{execute_sql, validate_sql};
@@ -114,6 +135,136 @@ pub fn open_parquet(state: &DbState, path: &str) -> Result<Vec<TableInfo>, Strin
 mod tests {
     use super::types::{OrderKey, OrderedRows, RowidIndex};
     use super::*;
+
+    #[test]
+    fn cancel_message_matches_frontend() {
+        // Same lockstep mechanism as `operand_required_ops_match_frontend`:
+        // read the TS as data, never edit it from here. A cancel the frontend
+        // does not recognise is shown as an error, and nothing else fails.
+        let frontend = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../src/lib/components/virtualRows.svelte.ts"),
+        )
+        .unwrap();
+        let declarations: Vec<&str> = frontend
+            .lines()
+            .filter(|l| {
+                l.trim_start()
+                    .starts_with("const CANCELLED_QUERY_MESSAGE =")
+            })
+            .collect();
+        assert_eq!(
+            declarations.len(),
+            1,
+            "virtualRows.svelte.ts must declare CANCELLED_QUERY_MESSAGE exactly once"
+        );
+        let value = declarations[0]
+            .split_once('"')
+            .and_then(|(_, rest)| rest.rsplit_once('"'))
+            .map(|(inner, _)| inner)
+            .expect("CANCELLED_QUERY_MESSAGE must be a double-quoted string literal");
+        assert_eq!(value, CANCELLED_QUERY_MESSAGE);
+    }
+
+    /// Rows a column filter matches on SQLite, through the shipped builder.
+    fn sqlite_matches(
+        conn: &rusqlite::Connection,
+        source: &str,
+        n_type: &str,
+        f: &ColumnFilter,
+    ) -> i64 {
+        let columns: Vec<ColumnInfo> = [("n", n_type), ("s", "TEXT")]
+            .iter()
+            .enumerate()
+            .map(|(cid, (name, col_type))| ColumnInfo {
+                cid: cid as i64,
+                name: name.to_string(),
+                col_type: col_type.to_string(),
+                notnull: false,
+                default_value: None,
+                pk: false,
+            })
+            .collect();
+        let r = filters::build_where_clause(&columns, std::slice::from_ref(f), "").unwrap();
+        let params: Vec<&dyn rusqlite::types::ToSql> = r
+            .params
+            .iter()
+            .map(|p| p as &dyn rusqlite::types::ToSql)
+            .collect();
+        conn.query_row(
+            &format!("SELECT count(*) FROM {source}{}", r.clause),
+            params.as_slice(),
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_filter_matches_the_same_rows_on_both_engines() {
+        // The filter grammar is shared (`parse_criteria`), the SQL each engine
+        // gets is not: SQLite leans on column affinity, DuckDB casts the
+        // operand. That gap let `<5` return every row on a SQLite column with
+        // no declared type while the same filter on a CSV was right, and no
+        // test compared the two. One table of filters, run through both
+        // builders on real engines, over the same ten rows: n = 1..10,
+        // s = "item <n>". The SQLite side has n three ways, because the
+        // declared type is what the builder branches on.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE typed (n INTEGER, s TEXT);
+             WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 10)
+               INSERT INTO typed SELECT x, 'item ' || x FROM c;
+             CREATE TABLE untyped (n, s TEXT);
+             INSERT INTO untyped SELECT n, s FROM typed;
+             CREATE VIEW computed AS SELECT n + 0 AS n, s FROM typed;",
+        )
+        .unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let csv = dir.path().join("rows.csv");
+        let mut text = String::from("n,s\n");
+        for i in 1..=10 {
+            text.push_str(&format!("{i},item {i}\n"));
+        }
+        std::fs::write(&csv, text).unwrap();
+        let duck = crate::pq::ParquetSession::open(csv.to_str().unwrap()).unwrap();
+        let generation = std::sync::atomic::AtomicU64::new(0);
+
+        let cases: [(&str, &str, i64); 12] = [
+            ("n", "<5", 4),
+            ("n", "<=5", 5),
+            ("n", ">5", 5),
+            ("n", ">=5", 6),
+            ("n", ">=3;<=6", 4),
+            ("n", "=5", 1),
+            ("n", "=5;=7", 2),
+            ("n", "1", 2),
+            ("n", "<>1", 8),
+            ("s", "item 1", 2),
+            ("s", "=item 3", 1),
+            ("s", "<>item 1", 8),
+        ];
+        for (column, value, expected) in cases {
+            let f = ColumnFilter {
+                column: column.to_string(),
+                value: value.to_string(),
+                is_regex: false,
+            };
+            for (source, n_type) in [("typed", "INTEGER"), ("untyped", ""), ("computed", "")] {
+                assert_eq!(
+                    sqlite_matches(&conn, source, n_type, &f),
+                    expected,
+                    "SQLite {source}: {column} {value}"
+                );
+            }
+            assert_eq!(
+                duck.count_rows("data", std::slice::from_ref(&f), "", &generation)
+                    .unwrap(),
+                expected,
+                "DuckDB: {column} {value}"
+            );
+        }
+    }
 
     #[test]
     fn close_database_clears_all_caches() {

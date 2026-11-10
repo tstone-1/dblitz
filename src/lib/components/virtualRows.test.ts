@@ -748,6 +748,42 @@ describe("createVirtualRows", () => {
     await loadsSettled();
     expect(rows.cacheVersion).toBeGreaterThan(before);
   });
+
+  it("an old epoch's load settling late does not stop the new epoch's load of that chunk from publishing", async () => {
+    // The old load's cleanup cleared the chunk's publish flag outside the
+    // identity guard, so it wiped the flag the NEW load had just set: the new
+    // rows arrived and were never written into the cache.
+    const loads: Array<ReturnType<typeof deferred<QueryResult>>> = [];
+    const rows = createVirtualRows({
+      defer: runNow,
+      chunkSize: 2,
+      getSelectedTable: () => "items",
+      loadChunk: () => {
+        const load = deferred<QueryResult>();
+        loads.push(load);
+        return load.promise;
+      },
+      cancelQueries: async () => {},
+      getVisibleColumns: () => ["id"],
+      getColumnIndex: () => 0,
+      hasColumns: () => true,
+      setColumns: () => {},
+      setTotalRows: () => {},
+      setError: () => {},
+    });
+
+    expect(rows.getVisibleRow(2)).toBeNull(); // chunk 1, old epoch
+    await rows.beginReload();
+    expect(rows.getVisibleRow(2)).toBeNull(); // chunk 1 again, new epoch
+    expect(loads).toHaveLength(2);
+
+    loads[0].resolve({ columns: ["id"], rows: [["old"], ["old"]], total_rows: 4, offset: 2 });
+    await loadsSettled();
+    loads[1].resolve({ columns: ["id"], rows: [["new"], ["new"]], total_rows: 4, offset: 2 });
+    await loadsSettled();
+
+    expect(rows.peekVisibleRow(2)).toEqual(["new"]);
+  });
 });
 
 /** Drain the microtask queue. A macrotask boundary flushes all of it, which a

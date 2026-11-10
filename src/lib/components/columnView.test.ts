@@ -7,6 +7,7 @@ import {
   orderColumns,
   PRESET_NAME_MAX_LEN,
   removeColumnPreset,
+  reorderColumn,
   sameColumnList,
   stableColumnList,
   upsertColumnPreset,
@@ -38,6 +39,22 @@ describe("column view helpers", () => {
         stale: { value: "bar", is_regex: false },
       }),
     ).toEqual([{ column: "name", value: "foo", is_regex: true }]);
+  });
+
+  it("drags a column the table gained after the order was saved, and drops onto it", () => {
+    // `added` is shown last (orderColumns appends it) but is not in the saved
+    // order; starting from the saved order gave it index -1 and the drag did
+    // nothing.
+    const columns = ["id", "name", "added"];
+    const saved = ["name", "id"];
+    expect(reorderColumn(columns, saved, "added", "name")).toEqual(["added", "name", "id"]);
+    expect(reorderColumn(columns, saved, "name", "added")).toEqual(["id", "added", "name"]);
+  });
+
+  it("reorders within the saved order and refuses a column that is not live", () => {
+    expect(reorderColumn(["a", "b", "c"], [], "c", "a")).toEqual(["c", "a", "b"]);
+    expect(reorderColumn(["a", "b"], ["b", "gone", "a"], "a", "b")).toEqual(["a", "b"]);
+    expect(reorderColumn(["a", "b"], ["b", "a"], "gone", "a")).toBeNull();
   });
 
   it("returns theme-specific column color presets", () => {

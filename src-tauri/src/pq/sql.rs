@@ -17,8 +17,8 @@ use super::lockdown::{LockedDb, Refusal};
 use super::sql_literal;
 use crate::db::{SqlCheck, SqlResult};
 
-/// Same cap and truncation rule as the SQLite tab (`db::sql`).
-const SQL_RESULT_LIMIT: usize = 50_000;
+// Same cap, truncation rule and cancel text as the SQLite tab (`db::sql`).
+use crate::db::{CANCELLED_QUERY_MESSAGE, SQL_RESULT_LIMIT};
 
 /// The message Execute shows for a classifier refusal. `validate_sql` shows
 /// the same text, so the editor's live check reads exactly like the error
@@ -161,7 +161,7 @@ pub(crate) fn execute_sql(db: &LockedDb, sql: &str, generation: &AtomicU64) -> S
                         columns,
                         rows,
                         column_types,
-                        "Query cancelled by a newer request".to_string(),
+                        CANCELLED_QUERY_MESSAGE.to_string(),
                     );
                 }
                 if rows.len() >= SQL_RESULT_LIMIT {
@@ -199,7 +199,7 @@ mod tests {
         let dir = scratch_dir("sql");
         let file = fixture(&dir, rows);
         let file = file.to_str().unwrap();
-        let reader = crate::pq::FileFormat::Parquet.reader(&crate::pq::sql_literal(file));
+        let reader = crate::pq::FileFormat::Parquet.reader(&crate::pq::file_arg(file));
         LockedDb::open(file, &reader, dir.join("spill").to_str().unwrap()).unwrap()
     }
 
@@ -222,6 +222,21 @@ mod tests {
                 Some("[0, 3]".into())
             ]]
         );
+    }
+
+    #[test]
+    fn describe_and_summarize_run_as_the_refusal_message_promises() {
+        // The read-only message names both; they pass the classifier and
+        // must also survive the `query('...')` wrapper Execute runs them in.
+        let db = db(10);
+        let g = AtomicU64::new(0);
+        let r = execute_sql(&db, "DESCRIBE data", &g);
+        assert_eq!(r.error, None);
+        assert_eq!(r.rows.len(), 6, "one row per fixture column");
+        assert_eq!(r.rows[0][0].as_deref(), Some("id"));
+        let r = execute_sql(&db, "SUMMARIZE data", &g);
+        assert_eq!(r.error, None);
+        assert_eq!(r.rows.len(), 6, "one row per fixture column");
     }
 
     #[test]

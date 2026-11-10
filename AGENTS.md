@@ -31,6 +31,7 @@ heading disagree, so rename them in the same commit.
 - *Node is pinned to 26, and `@types/node` with it* — `.nvmrc` is the one source CI reads; bump `.nvmrc` and `@types/node` together or not at all.
 - *A green local gate can be measured against the wrong dependency* — `node_modules` drifts from the lockfile and nothing fails; `npm ci` after pulling a lockfile change.
 - *Type-checking runs on TypeScript 7 through `svelte-check --tsgo`* — TS 6 stays installed on purpose; the wrapper fails a svelte-check run that crashed with exit 0.
+- *A second copy of the repo inside the repo folder stalls `npm run check`* — four git worktrees in a gitignored folder inside the repo made the type-check hang; remove each once merged.
 - *Vitest's global environment is `node`* — DOM tests opt in per file with a `@vitest-environment jsdom` pragma.
 - *A green gate on one OS says nothing about a `cfg`-gated symbol on another* — 26.8.1 failed on Linux over an import only Windows/macOS used; annotate types on every `cfg` arm, check the other OS before tagging.
 - *A substring check over text holding a scratch path depends on the process id* — `contains("-1")` matched the pid in a temp path and failed the 26.10.5 tag run only; assert the option by its name.
@@ -72,7 +73,7 @@ heading disagree, so rename them in the same commit.
 
 ### CI
 
-- *The three workflows, and the tests that pin them* — `checks.yml`, `release.yml`, `sign-rehearsal.yml`; three test files fail on any drift.
+- *The four workflows, and the tests that pin them* — `checks.yml`, `release.yml`, `sign-rehearsal.yml`, `audit.yml`; four test files fail on any drift, each assertion shown red on its mutation; `run:` blocks read `$GITHUB_*`, never `${{ github. }}`.
 - *`DirectoryNotEmpty` from `libduckdb-sys` on Windows is the restored rust-cache* — rust-cache's cleanup strips files from `target/duckdb-sources`, `.complete` included; a script now removes that folder after the restore.
 - *Every `uses:` is pinned to a full commit SHA* — the release job holds every signing secret; Dependabot advances pins monthly, `tauri-action` in a group of its own.
 - *`dtolnay/rust-toolchain` is pinned to tag `v1`* — where `toolchain` is a required input, so the `with:` block is load-bearing.
@@ -85,6 +86,7 @@ heading disagree, so rename them in the same commit.
 
 ### Security
 
+- *The pre-push hook holds none of the names it blocks* — the no-`pwsh` fallback reads them from the private audit script at run time, strictly, and blocks on any doubt; test it with a synthetic pattern, never a real one.
 - *Security reporting, and what is in scope* — GitHub private vulnerability reporting, no public e-mail; in scope: read-only bypasses, crafted files, updater signatures, webview escape.
 
 ### Release
@@ -95,7 +97,7 @@ heading disagree, so rename them in the same commit.
 - *The `Unreleased` heading form is safe here* — release notes are fixed text, never sliced from CHANGELOG; preflight requires a date on the tagged version.
 - *A long release run is not necessarily stuck* — a full run takes about two hours (legs run one at a time); confirm the active job step before treating it as hung.
 - *The draft release needs the numeric `releaseId`* — GitHub's tag lookup returns 404 for a draft, so `tauri-action` takes the id from `create-release`.
-- *Expected `cargo audit` noise* — the allowed Tauri/Linux GTK set; any new advisory is actionable. Also npm's unfixable build-time `deepmerge` finding: never `npm audit fix --force`.
+- *Expected `cargo audit` noise* — `audit.yml` runs it weekly and fails outside five Linux-only warnings, listed in the entry and held equal to the workflow by a test. Also npm's unfixable `deepmerge` finding: never `npm audit fix --force`.
 - *In-app updater* — the minisign key is the most critical secret; a release without `latest.json` looks green; `max-parallel: 1`; new `AppConfig` fields need `#[serde(default)]`.
 - *Distribution and the Homebrew tap* — a `v*` tag releases and `update-tap` bumps `tstone-1/homebrew-dblitz`; the cask keeps `auto_updates true`.
 - *macOS signing and notarization* — Developer ID shared with `screenpick` (a two-repo rotation); signing gates fail closed; the DMG is notarized separately.

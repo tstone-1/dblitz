@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createBrowseQuery, type BrowseQueryDeps } from "./browseQuery.svelte";
-import type { ColumnFilterValue, QueryResult, ViewConfig } from "#lib/ipc.ts";
+import type { ColumnFilter, ColumnFilterValue, QueryResult, ViewConfig } from "#lib/ipc.ts";
 
 /** Drain the microtask queue. `reloadData` is several awaits deep -- and each
  *  reload bumps the epoch at its FIRST await, so two started back to back means
@@ -47,8 +47,11 @@ function harness(options: HarnessOptions = {}) {
   const errors: string[] = [];
   const configs: Record<string, ViewConfig> = options.configs ?? {};
   const cachedColumns = options.cachedColumns ?? { items: ["id", "name"] };
-  const queries: Array<{ table: string; offset: number; sortColumn: string | null; sortAsc: boolean; globalFilter: string }> = [];
+  const queries: Array<{ table: string; offset: number; sortColumn: string | null; sortAsc: boolean; globalFilter: string; filters: ColumnFilter[] }> = [];
   let autoFitCalls = 0;
+  // Rows cached when each auto-fit ran: an auto-fit over zero rows measures
+  // only the headers.
+  const autoFitRowCounts: number[] = [];
 
   const query = createBrowseQuery({
     chunkSize: 2,
@@ -88,6 +91,7 @@ function harness(options: HarnessOptions = {}) {
           sortColumn: args.sortColumn,
           sortAsc: args.sortAsc,
           globalFilter: args.globalFilter,
+          filters: args.filters,
         });
         return Promise.resolve<QueryResult>({
           columns: ["id", "name"],
@@ -99,7 +103,10 @@ function harness(options: HarnessOptions = {}) {
     countRows: options.countRows ?? (() => Promise.resolve(0)),
     cancelQueries: () => Promise.resolve(),
     tick: () => Promise.resolve(),
-    applyAutoWidths: () => { autoFitCalls++; },
+    applyAutoWidths: () => {
+      autoFitCalls++;
+      autoFitRowCounts.push(query.virtualRows.firstChunkRows().length);
+    },
     defer: (run) => run(),
   });
 
@@ -110,6 +117,7 @@ function harness(options: HarnessOptions = {}) {
     configs,
     queries,
     autoFitCalls: () => autoFitCalls,
+    autoFitRowCounts,
   };
 }
 
@@ -178,6 +186,33 @@ describe("createBrowseQuery.selectTable", () => {
     // Exactly one auto-fit, and it belongs to the table that is still selected.
     expect(h.state.selectedTable).toBe("b");
     expect(h.autoFitCalls()).toBe(1);
+  });
+
+  it("auto-fits once, over real rows, when the same table is selected twice during its first load", async () => {
+    // The tail used to compare table names only, and "items" === "items": the
+    // superseded first call auto-fitted on an empty row cache while the second
+    // call's chunk was still in flight, saving header-only widths.
+    let resolveFirst!: (value: QueryResult) => void;
+    let resolveSecond!: (value: QueryResult) => void;
+    const first = new Promise<QueryResult>((resolve) => { resolveFirst = resolve; });
+    const second = new Promise<QueryResult>((resolve) => { resolveSecond = resolve; });
+    let call = 0;
+    const h = harness({
+      queryTable: () => (++call === 1 ? first : second),
+    });
+    const rows = { columns: ["id", "name"], rows: [["1", "a"], ["2", "b"]], total_rows: 2, offset: 0 };
+
+    const firstSelect = h.query.selectTable("items");
+    await flush(); // the first call is awaiting its first chunk
+    const secondSelect = h.query.selectTable("items");
+    await flush(); // so is the second
+    resolveFirst(rows);
+    await firstSelect;
+    expect(h.autoFitCalls()).toBe(0);
+
+    resolveSecond(rows);
+    await secondSelect;
+    expect(h.autoFitRowCounts).toEqual([2]);
   });
 });
 
@@ -283,6 +318,108 @@ describe("createBrowseQuery.reloadData", () => {
     expect(h.state.totalRows).toBe(7);
   });
 
+  it("re-issues a first chunk the SQL tab's Cancel stopped, instead of failing the view", async () => {
+    // cancel_queries is shared by both tabs: Cancel in the SQL tab rejects a
+    // Browse first chunk in flight with this epoch still current. Treated as
+    // a failure, it zeroed the row count under a red error bar.
+    let calls = 0;
+    const h = harness({
+      queryTable: (args) => {
+        calls++;
+        if (calls === 1) {
+          return Promise.reject(new Error('querying table "items": Query cancelled by a newer request'));
+        }
+        return Promise.resolve<QueryResult>({
+          columns: ["id", "name"], rows: [["1", "a"], ["2", "b"]], total_rows: 2, offset: args.offset,
+        });
+      },
+    });
+    h.state.selectedTable = "items";
+    h.state.columns = ["id", "name"];
+    h.state.totalRows = 5000;
+
+    await h.query.reloadData();
+
+    expect(calls).toBe(2);
+    expect(h.errors).toEqual([]);
+    expect(h.state.totalRows).toBe(2);
+    expect(h.state.loading).toBe(false);
+  });
+
+  it("re-issues a row count the SQL tab's Cancel stopped", async () => {
+    let countCalls = 0;
+    const h = harness({
+      queryTable: (args) =>
+        Promise.resolve<QueryResult>({
+          columns: ["id", "name"], rows: [["1", "a"], ["2", "b"]], total_rows: null, offset: args.offset,
+        }),
+      countRows: () => {
+        countCalls++;
+        return countCalls === 1
+          ? Promise.reject(new Error("Query cancelled by a newer request"))
+          : Promise.resolve(42);
+      },
+    });
+    h.state.selectedTable = "items";
+    h.state.columns = ["id", "name"];
+
+    await h.query.reloadData();
+    await flush();
+
+    expect(countCalls).toBe(2);
+    expect(h.errors).toEqual([]);
+    expect(h.state.countPending).toBe(false);
+    expect(h.state.totalRows).toBe(42);
+  });
+
+  it("does not re-issue a first chunk that its own newer reload cancelled", async () => {
+    // Browse's own cancel comes from a newer reload, which owns the view now:
+    // re-running the old query would be a round trip for nobody.
+    let rejectFirst!: (reason: unknown) => void;
+    const first = new Promise<QueryResult>((_, reject) => { rejectFirst = reject; });
+    let calls = 0;
+    const h = harness({
+      queryTable: (args) => {
+        calls++;
+        if (calls === 1) return first;
+        return Promise.resolve<QueryResult>({
+          columns: ["id", "name"], rows: [["9", "z"]], total_rows: 1, offset: args.offset,
+        });
+      },
+    });
+    h.state.selectedTable = "items";
+    h.state.columns = ["id", "name"];
+
+    const stale = h.query.reloadData();
+    await flush();
+    await h.query.reloadData();
+    rejectFirst(new Error("Query cancelled by a newer request"));
+    await stale;
+
+    expect(calls).toBe(2);
+    expect(h.errors).toEqual([]);
+    expect(h.state.totalRows).toBe(1);
+  });
+
+  it("retries a cancelled first chunk once, then reports it", async () => {
+    // The retry must not become a loop if the cancel keeps coming.
+    let calls = 0;
+    const h = harness({
+      queryTable: () => {
+        calls++;
+        return Promise.reject(new Error("Query cancelled by a newer request"));
+      },
+    });
+    h.state.selectedTable = "items";
+    h.state.columns = ["id", "name"];
+
+    await h.query.reloadData();
+
+    expect(calls).toBe(2);
+    expect(h.errors).toHaveLength(1);
+    expect(h.state.totalRows).toBe(0);
+  });
+
   it("does nothing at all with no table selected", async () => {
     const h = harness();
     await h.query.reloadData();
@@ -315,6 +452,63 @@ describe("createBrowseQuery.debouncedReload", () => {
       h.query.debouncedReload();
       await vi.advanceTimersByTimeAsync(500);
       expect(h.queries).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a_filter_retyped_after_an_undo_inside_the_debounce_window_queries_again", async () => {
+    // `10` loaded; type `0` (timer armed with `100`), delete it within the
+    // window, wait. The timer used to record `100` as loaded while querying
+    // the live `10`, so retyping `0` matched the memo and never queried.
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      h.state.selectedTable = "items";
+      h.state.columns = ["id", "name"];
+
+      h.state.globalFilter = "10";
+      h.query.debouncedReload();
+      await vi.advanceTimersByTimeAsync(500);
+      h.state.globalFilter = "100";
+      h.query.debouncedReload();
+      await vi.advanceTimersByTimeAsync(100);
+      h.state.globalFilter = "10";
+      h.query.debouncedReload();
+      await vi.advanceTimersByTimeAsync(500);
+      h.state.globalFilter = "100";
+      h.query.debouncedReload();
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(h.queries.at(-1)?.globalFilter).toBe("100");
+      // And the undone edit itself queried nothing: `10` was already loaded.
+      expect(h.queries.map((q) => q.globalFilter)).toEqual(["10", "100"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a column filter retyped after an undo inside the debounce window queries again", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      h.state.selectedTable = "items";
+      h.state.columns = ["id", "name"];
+      const setId = (value: string) => {
+        h.state.columnFilters = { id: { value, is_regex: false } };
+        h.query.debouncedReload();
+      };
+
+      setId("10");
+      await vi.advanceTimersByTimeAsync(500);
+      setId("100");
+      await vi.advanceTimersByTimeAsync(100);
+      setId("10");
+      await vi.advanceTimersByTimeAsync(500);
+      setId("100");
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(h.queries.at(-1)?.filters).toEqual([{ column: "id", value: "100", is_regex: false }]);
     } finally {
       vi.useRealTimers();
     }

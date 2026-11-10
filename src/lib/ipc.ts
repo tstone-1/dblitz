@@ -59,10 +59,11 @@ export interface QueryResult {
 export interface SqlResult {
   columns: string[];
   rows: (string | null)[][];
-  // Per-column declared type (e.g. "INTEGER", "TEXT"), aligned 1:1 with
-  // `columns`. Empty string for a column with no declared type (a computed
-  // expression). Used to pass the correct numeric/text formatting through to
-  // an XLSX export of the SQL result.
+  // Per-column type (e.g. "INTEGER", "TEXT"), aligned 1:1 with `columns`, and
+  // passed through to an XLSX export of the SQL result to choose number or text
+  // cells. For a computed column with no declared type the backend reports
+  // "INTEGER" or "REAL" when every non-NULL value was numeric, and "" otherwise,
+  // which the export writes as text.
   column_types: string[];
   error: string | null;
   // Non-fatal: set when the result exceeded the 50,000-row cap and only the
@@ -283,15 +284,23 @@ export function sqlEngine(): Promise<SqlEngine> {
   return invoke<SqlEngine>("sql_engine");
 }
 
+/** What `export_to_xlsx` wrote. Mirrors `XlsxExport` in `db/export.rs`. */
+export interface XlsxExport {
+  path: string;
+  /** Cells whose text was cut to Excel's 32,767-character limit. */
+  truncated_cells: number;
+}
+
 /**
- * Export a selection to XLSX, open it, and return the path that was written.
+ * Export a selection to XLSX, open it, and return what was written.
  *
- * The Rust command is `Result<String, String>` and always has been; typing this
- * `Promise<void>` threw the filename away, so the app opened a workbook in Excel
- * and could not tell the user where it had put it.
+ * Typing this `Promise<void>` once threw the filename away, so the app opened
+ * a workbook in Excel and could not tell the user where it had put it. The
+ * cut-cell count is returned for the same reason: a cell over Excel's limit is
+ * cut instead of failing the export, and the user has to be told.
  */
-export function exportToXlsx(args: ExportXlsxArgs): Promise<string> {
-  return invoke<string>("export_to_xlsx", { ...args });
+export function exportToXlsx(args: ExportXlsxArgs): Promise<XlsxExport> {
+  return invoke<XlsxExport>("export_to_xlsx", { ...args });
 }
 
 /** Current Excel export directory (null-coalesced to "" by callers). */

@@ -252,6 +252,11 @@ export function createCellSelection() {
     activeIndex = 0;
   }
 
+  function clear() {
+    rects = [];
+    activeIndex = -1;
+  }
+
   function cleanup() {
     document.removeEventListener('mouseup', onSelectionEnd);
   }
@@ -269,6 +274,33 @@ export function createCellSelection() {
     onCellMouseEnter,
     handleContextMenu,
     setSelection,
+    clear,
     cleanup,
+  };
+}
+
+/**
+ * Answers "is this a different view from the last one seen?" for DataGrid's
+ * selection reset. A selection is a set of row and column indices into ONE
+ * view; after a reload (filter, sort, table switch, new session) or a change
+ * of the column set the same indices name other cells, or none. Left in place,
+ * Ctrl+A over 10,000 rows followed by a filter leaving 50 made Ctrl+C fail
+ * with "Selection contains rows that could not be loaded.", and a table switch
+ * drew the old rectangle over the new table.
+ *
+ * `token` is the view identity (the virtualRows epoch, or the rows array in
+ * static mode). The first observation is not a change. Pure, so the effect
+ * that calls it stays a plain comparison.
+ */
+export function createViewChangeDetector() {
+  let seen = false;
+  let lastToken: unknown;
+  let lastColumns: unknown;
+  return (token: unknown, columns: unknown): boolean => {
+    const changed = seen && (token !== lastToken || columns !== lastColumns);
+    seen = true;
+    lastToken = token;
+    lastColumns = columns;
+    return changed;
   };
 }

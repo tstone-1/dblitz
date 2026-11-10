@@ -10,6 +10,30 @@ export function orderColumns(columns: string[], configuredOrder: string[]): stri
   return [...existingOrderedColumns, ...newColumns];
 }
 
+/**
+ * The column order after dragging `fromCol` onto `toCol`, or null when either
+ * is not a live column.
+ *
+ * It starts from the order the grid shows (`orderColumns`), not from the saved
+ * `column_order` filtered to live columns: a column the table gained after the
+ * order was saved is shown at the end but is absent from the saved list, and
+ * its index of -1 made the drag silently do nothing, both from it and onto it.
+ */
+export function reorderColumn(
+  columns: string[],
+  configuredOrder: string[],
+  fromCol: string,
+  toCol: string,
+): string[] | null {
+  const order = [...orderColumns(columns, configuredOrder)];
+  const fromIdx = order.indexOf(fromCol);
+  const toIdx = order.indexOf(toCol);
+  if (fromIdx < 0 || toIdx < 0) return null;
+  order.splice(fromIdx, 1);
+  order.splice(toIdx, 0, fromCol);
+  return order;
+}
+
 export function visibleColumns(columns: string[], hiddenColumns: string[]): string[] {
   const hiddenSet = new Set(hiddenColumns);
   return columns.filter((column) => !hiddenSet.has(column));

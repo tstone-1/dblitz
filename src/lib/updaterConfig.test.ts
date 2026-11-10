@@ -96,7 +96,16 @@ describe("release workflow updater wiring", () => {
     // so parallel runs can both read the pre-merge state and the later upload
     // silently drops the earlier platform's entry. Nothing fails; the release
     // just quietly updates one platform.
-    expect(workflow).toMatch(/max-parallel:\s*1/);
+    //
+    // Comment lines are left out, and the setting is read from the build
+    // job's `strategy:`: two comments in the workflow quote `max-parallel: 1`,
+    // and a match over the raw text stayed green with the setting deleted.
+    const build = workflow.slice(workflow.indexOf("\n  build:"), workflow.indexOf("\n  publish:"));
+    const code = build
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("#"))
+      .join("\n");
+    expect(code).toMatch(/^ {4}strategy:\n {6}fail-fast: false\n {6}max-parallel: 1\n {6}matrix:$/m);
   });
 
   it("passes the signing key to the build", () => {

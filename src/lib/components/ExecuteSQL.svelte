@@ -11,6 +11,7 @@
     persistSqlHistory,
   } from "#lib/store.svelte.ts";
   import DataGrid from "./DataGrid.svelte";
+  import { exportNotice } from "./exportNotice";
   import { selectionColumnTypes, type SelectionData } from "./selectionData";
   import { createDbGenerationReset } from "./dbGenerationReset.svelte";
   import { createSqlExecution } from "./sqlExecution";
@@ -147,12 +148,12 @@
       data.columnIndices,
       result?.column_types ?? [],
     );
-    const path = await exportToXlsx({
+    const written = await exportToXlsx({
       headers: data.headers,
       rows: data.rows,
       columnTypes,
     });
-    appState.notice = `Excel export written to ${path}`;
+    appState.notice = exportNotice(written);
   }
 </script>
 

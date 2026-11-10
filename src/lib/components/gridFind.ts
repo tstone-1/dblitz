@@ -21,7 +21,10 @@ export type FindDirection = 1 | -1;
 export type FindResult =
   | { kind: "found"; row: number; col: number; wrapped: boolean }
   | { kind: "none" }
-  | { kind: "cancelled" };
+  | { kind: "cancelled" }
+  /** The row total was not final, so the walk could not cover every row: the
+   *  count was still pending, or it moved while the search ran. */
+  | { kind: "incomplete" };
 
 /**
  * Case-insensitive substring match. NULL never matches: the "NULL" the grid
@@ -52,6 +55,12 @@ export interface FindCellOptions {
   isCancelled: () => boolean;
   /** Rows searched so far, called once per block. */
   onProgress?: (rowsSearched: number) => void;
+  /** True while `rowCount` is a provisional total (a filtered view whose
+   *  count is still running). Checked before the walk and after every load. */
+  isCountPending?: () => boolean;
+  /** The grid's row total now. Checked after every load: once it differs
+   *  from `rowCount`, the walk's range no longer describes the view. */
+  currentRowCount?: () => number;
 }
 
 /**
@@ -62,6 +71,13 @@ export interface FindCellOptions {
  */
 export async function findCell(opts: FindCellOptions): Promise<FindResult> {
   const { rowCount, colCount, direction, matches, blockRows } = opts;
+  // While the count is pending, `rowCount` is at most one chunk: a walk over
+  // it answered "No match" for every row past it, which it never saw. A hit
+  // inside it could also be the wrong one (the next match may lie past the
+  // provisional end), so the search does not run at all.
+  const totalIsFinal = () =>
+    !opts.isCountPending?.() && (opts.currentRowCount?.() ?? rowCount) === rowCount;
+  if (!totalIsFinal()) return { kind: "incomplete" };
   const total = rowCount * colCount;
   if (total === 0) return { kind: "none" };
 
@@ -84,6 +100,7 @@ export async function findCell(opts: FindCellOptions): Promise<FindResult> {
       blockLast = Math.min(rowCount - 1, blockFirst + blockRows - 1);
       block = await opts.loadRows(blockFirst, blockLast);
       if (opts.isCancelled()) return { kind: "cancelled" };
+      if (!totalIsFinal()) return { kind: "incomplete" };
       if (block.length !== blockLast - blockFirst + 1) {
         throw new Error("Search stopped: some rows could not be loaded.");
       }

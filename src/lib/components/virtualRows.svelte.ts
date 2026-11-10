@@ -67,6 +67,11 @@ type Row = (string | null)[];
 // callers must substring-match it rather than compare.
 const CANCELLED_QUERY_MESSAGE = "Query cancelled by a newer request";
 
+/** True for the rejection `cancel_queries` gives a query it stopped. */
+export function isCancelledQueryError(e: unknown): boolean {
+  return String(e).includes(CANCELLED_QUERY_MESSAGE);
+}
+
 // `S` is an opaque per-reload query snapshot (table + filters + sort) captured
 // by the caller. virtualRows never inspects it; it only pins the value taken at
 // beginReload/reset time and hands it back to loadChunk so background fetches
@@ -228,8 +233,14 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
       return result;
     });
     tracked = task.finally(() => {
-      if (pendingChunks.get(chunkIdx) === tracked) pendingChunks.delete(chunkIdx);
-      publishOnArrival.delete(chunkIdx);
+      // Both deletes belong to this load only. A load from an older epoch that
+      // settles after a reload has started a new load for the same chunk must
+      // not clear the new load's publish flag, or the new rows land and are
+      // never written into the cache.
+      if (pendingChunks.get(chunkIdx) === tracked) {
+        pendingChunks.delete(chunkIdx);
+        publishOnArrival.delete(chunkIdx);
+      }
     });
     pendingChunks.set(chunkIdx, tracked);
     return tracked;
@@ -249,7 +260,7 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
         // getRow() again and refetches it. Reporting it would put a red error
         // bar up for pressing Cancel -- and latching it would make a cancel
         // permanently blank the rows it interrupted.
-        if (!isCurrent(myEpoch) || message.includes(CANCELLED_QUERY_MESSAGE)) return;
+        if (!isCurrent(myEpoch) || isCancelledQueryError(message)) return;
         failedChunks.add(chunkIdx);
         deps.setError(message);
       },

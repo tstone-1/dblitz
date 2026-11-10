@@ -5,6 +5,78 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.11.0] - 2026-11-10
+
+### Security
+- **SQLite is updated for RUSTSEC-2026-0459** (rusqlite 0.41.1, libsqlite3-sys
+  0.39.1, SQLite 3.54.1). The advisory was published on the day 26.10.5 shipped.
+  A weekly `Audit` workflow now runs `cargo audit` on the shipped lockfile and
+  fails on any advisory that is not on an explained allowed list.
+
+### Fixed
+- **Range filters on a SQLite column with no declared type compare numbers as
+  numbers.** On such a column, which includes every computed column of a view
+  (`a + 1 AS v`), `<5` returned every row and `>5` returned none, because SQLite
+  compared the numbers in the column against the filter as text. `>=`, `<=`,
+  `>` and `<` now give the rows a typed column gives. Text cells in the same
+  column are still compared as text.
+- **A Parquet, CSV or JSON file whose name contains `[` opens that file.**
+  DuckDB reads `[`, `*` and `?` in a path as a pattern, so `export[1].csv` next
+  to `export1.csv` showed the rows of `export1.csv`, and `data[12].parquet`
+  showed `data1.parquet` and `data2.parquet` together, under the name of the
+  file that was opened. The same holds for `*` and `?` in a name on macOS and
+  Linux. There, a name with a backslash as well as one of these characters is
+  refused with a message, because the reader cannot match it exactly.
+- **A Parquet file with a column named `rowid` pages correctly when a very
+  large file is sorted.**
+- **A JSON file with an apostrophe in a nested key below the first 20,480 rows
+  opens.**
+- **A filter on a Parquet, CSV or JSON file that matches more than 20 million
+  rows no longer keeps a list of every match in memory.**
+- **A filter edit that is undone within half a second and then typed again is
+  applied.** Typing `0` after `10`, deleting it at once and typing it again
+  later left the grid on the rows for `10` under a filter box reading `100`,
+  until some other edit.
+- **A cell selection no longer survives a filter, sort, table or column
+  change.** Ctrl+A followed by a filter made Ctrl+C fail with "Selection
+  contains rows that could not be loaded", and a table switch drew the old
+  selection over the new table.
+- **Find and Ctrl+A wait for the row count.** While a filtered view was still
+  being counted, Find answered "No match" for rows it had not searched and
+  Ctrl+A selected only the first rows. Both now say "Still counting rows".
+- **Cancel in the SQL tab no longer empties a Browse view that is loading.**
+- **Selecting the same table twice while it first loads no longer saves column
+  widths fitted to the headers only.**
+- **A column the file gained after its column order was saved can be dragged.**
+- **Computed columns in a SQL result export to Excel as numbers.** `COUNT(*)`,
+  `SUM()` and other computed columns of a SQLite query were written as text
+  cells, which Excel's `SUM` ignores. A computed column is now a number column
+  when every value in the result is an integer or a real; text such as `00123`
+  stays text.
+- **An Excel export no longer fails on a cell longer than Excel allows.** A cell
+  over 32,767 characters is cut to that length, and the notice after the export
+  says how many cells were cut.
+- **A file name that is not valid Unicode on the command line no longer stops
+  dblitz at start.** The open now fails with the normal error message.
+- **Linux and macOS: a backslash in a SQLite file name is part of the name**, not
+  a folder separator.
+
+### Changed
+- The release workflow reads the tag and the repository from the runner's
+  environment in every script step.
+- Release and check workflow tests now fail when the build matrix stops being
+  serial, when the Apple secret check stops failing closed, when the macOS
+  verify condition weakens, when release concurrency changes, when a job other
+  than the three publishing ones holds a write token, or when CI's clippy stops
+  denying warnings. Each was shown to fail on its own mutation.
+- The pre-push hook holds none of the names it blocks, and blocks the push when
+  it cannot read its patterns or cannot list the tracked files.
+- BUILD.md describes key custody without naming a password manager, local key
+  paths or key IDs.
+- Rust and npm dependencies updated, among them `wry` 0.57.2 and `zip` 9.5.0;
+  the test-only `jsdom` moves to 31. The yanked `async-executor` 1.14.0 is
+  gone, so the weekly audit allows five warnings instead of six.
+
 ## [26.10.5] - 2026-10-30
 
 ### Fixed

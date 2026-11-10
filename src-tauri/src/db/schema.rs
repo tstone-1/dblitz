@@ -55,7 +55,8 @@ const ALLOWED_INTROSPECTION_PRAGMAS: &[&str] = &[
 ///      the file as a frozen snapshot.
 pub(super) fn open_read_only_connection(uri: &str) -> Result<Connection, String> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
-    let conn = Connection::open_with_flags(uri, flags).map_err(|e| {
+    // `mut` because rusqlite 0.41 takes `&mut self` to install the authorizer.
+    let mut conn = Connection::open_with_flags(uri, flags).map_err(|e| {
         error!(error = %e, "Failed to open database");
         e.to_string()
     })?;
@@ -455,8 +456,8 @@ mod tests {
         // PRAGMA it guards against reads as pure tuning at a glance.
         let (state, path) = open_temp_db("CREATE TABLE t (a INTEGER);");
 
-        let guard = state.conn.lock();
-        let conn = guard.as_ref().unwrap();
+        let mut guard = state.conn.lock();
+        let conn = guard.as_mut().unwrap();
         // `mmap_size` is not on the introspection allowlist - deliberately, so
         // no ad-hoc query can turn mapping back on - so the authorizer has to
         // come off to ask the connection about itself. Dropping it changes what
@@ -632,9 +633,9 @@ mod tests {
         // makes the premise falsifiable.
         let (state, path) = open_temp_db("CREATE TABLE t (a INTEGER); INSERT INTO t VALUES (1);");
 
-        let guard = state.aux_conn.lock();
+        let mut guard = state.aux_conn.lock();
         let conn = guard
-            .as_ref()
+            .as_mut()
             .expect("the secondary connection must be open");
 
         // 1. SQLITE_OPEN_READ_ONLY + ?immutable=1: a write is refused by the

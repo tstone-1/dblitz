@@ -33,7 +33,7 @@ import type {
 import { buildActiveFilters } from "./columnView";
 import { hasIncompleteOperator, stripIncompleteSegments } from "./filterOperators";
 import { shouldAutoFitWidths } from "./autoFitWidths";
-import { createVirtualRows } from "./virtualRows.svelte";
+import { createVirtualRows, isCancelledQueryError } from "./virtualRows.svelte";
 
 /**
  * An immutable snapshot of the query state (table + filters + sort) taken at
@@ -183,11 +183,40 @@ export function createBrowseQuery(deps: BrowseQueryDeps) {
     defer: deps.defer,
   });
 
-  async function reloadData(): Promise<void> {
-    if (!deps.getSelectedTable()) return;
+  /**
+   * Runs `run`, and once more if it was stopped by `cancel_queries` while this
+   * epoch is still current.
+   *
+   * `cancel_queries` is shared by Browse and the SQL tab, so pressing Cancel on
+   * a SQL query also stops a Browse first chunk or row count that happens to
+   * be in flight. With the epoch still current nobody asked to stop THIS
+   * query, and failing it zeroed the view under a red error bar. A cancel that
+   * Browse issued itself comes from a newer reload, which has already moved
+   * the epoch, so it is not retried. One retry only: a second cancel is
+   * reported as the error it then is, rather than looping.
+   */
+  async function retryAfterSharedCancel<T>(
+    myEpoch: number,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await run();
+    } catch (e) {
+      if (!virtualRows.isCurrent(myEpoch) || !isCancelledQueryError(e)) throw e;
+      return run();
+    }
+  }
+
+  /**
+   * Resolves true only when this reload published its first chunk and is
+   * still the current one when it returns. selectTable's auto-fit tail keys on
+   * that: a superseded reload has no rows of its own to measure.
+   */
+  async function reloadData(): Promise<boolean> {
+    if (!deps.getSelectedTable()) return false;
     deps.setLoading(true);
     const reload = await virtualRows.beginReload();
-    if (reload === null) return;
+    if (reload === null) return false;
     const { epoch: myEpoch, snapshot } = reload;
     // beginReload() captures the snapshot synchronously, before its first
     // await, so it pins the non-null selectedTable guarded above. This branch
@@ -196,13 +225,17 @@ export function createBrowseQuery(deps: BrowseQueryDeps) {
     const table = snapshot.table;
     if (table === null) {
       deps.setLoading(false);
-      return;
+      return false;
     }
+    let published = false;
     try {
       // Use the epoch's pinned snapshot for the first chunk AND the row count
       // so both agree with the background chunk fetches virtualRows will run.
-      const result = await loadChunk(0, deps.chunkSize, snapshot);
-      if (!virtualRows.applyFirstChunk(myEpoch, result)) return;
+      const result = await retryAfterSharedCancel(myEpoch, () =>
+        loadChunk(0, deps.chunkSize, snapshot),
+      );
+      if (!virtualRows.applyFirstChunk(myEpoch, result)) return false;
+      published = true;
 
       if (result.total_rows !== null) {
         deps.setTotalRows(result.total_rows);
@@ -212,12 +245,13 @@ export function createBrowseQuery(deps: BrowseQueryDeps) {
           result.rows.length < deps.chunkSize ? result.rows.length : deps.chunkSize,
         );
         deps.setCountPending(true);
-        deps
-          .countRows({
+        retryAfterSharedCancel(myEpoch, () =>
+          deps.countRows({
             table,
             filters: snapshot.filters,
             globalFilter: snapshot.globalFilter,
-          })
+          }),
+        )
           .then((count) => {
             if (virtualRows.isCurrent(myEpoch)) {
               deps.setTotalRows(count);
@@ -243,6 +277,7 @@ export function createBrowseQuery(deps: BrowseQueryDeps) {
     } finally {
       if (virtualRows.isCurrent(myEpoch)) deps.setLoading(false);
     }
+    return published && virtualRows.isCurrent(myEpoch);
   }
 
   function hasIncompleteFilter(): boolean {
@@ -252,15 +287,27 @@ export function createBrowseQuery(deps: BrowseQueryDeps) {
     );
   }
 
+  function filterMemoKey(): string {
+    return deps.getGlobalFilter().trim() + JSON.stringify(deps.getColumnFilters());
+  }
+
   function debouncedReload(): void {
     if (hasIncompleteFilter()) return;
-    const filterSnapshot =
-      deps.getGlobalFilter().trim() + JSON.stringify(deps.getColumnFilters());
-    if (filterSnapshot === lastFilterState) return;
-    if (filterDebounce) clearTimeout(filterDebounce);
+    if (filterMemoKey() === lastFilterState) {
+      // The edit was undone inside the debounce window (`10` -> `100` -> `10`):
+      // the loaded view already matches, so the armed timer must go too. Left
+      // armed, it used to record the `100` it was armed with as loaded while
+      // reloadData() queried the live `10`, and retyping `100` then matched the
+      // memo and never queried: the grid showed `10`'s rows under `100`.
+      cancelDebounce();
+      return;
+    }
+    cancelDebounce();
     filterDebounce = setTimeout(() => {
       filterDebounce = null;
-      lastFilterState = filterSnapshot;
+      // The memo records what reloadData() is about to query, which is the
+      // live state at fire time, not the state the timer was armed with.
+      lastFilterState = filterMemoKey();
       void reloadData();
     }, deps.filterDebounceMs);
   }
@@ -316,10 +363,16 @@ export function createBrowseQuery(deps: BrowseQueryDeps) {
       ),
     );
     deps.setGlobalFilter(cfg.pinned_global_filter ?? "");
-    lastFilterState =
-      deps.getGlobalFilter().trim() + JSON.stringify(deps.getColumnFilters());
+    lastFilterState = filterMemoKey();
 
-    await reloadData();
+    const published = await reloadData();
+
+    // A superseded reload has no rows to measure. Comparing table names below
+    // cannot see that when the same table is selected twice during its first
+    // load (a double-click on a slow table): the first call's tail passed the
+    // name check, found no saved widths yet and auto-fitted on an empty row
+    // cache, saving header-only widths that the second call then respected.
+    if (!published) return;
 
     // Auto-fit column widths on first open (no saved widths for this table),
     // but only while this call is still the current selection. selectTable()

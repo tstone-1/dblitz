@@ -9,6 +9,7 @@ use super::types::{
     ColumnFilter, DbState, OrderKey, OrderedRows, QueryRequest, QueryResult, RowidIndex,
 };
 use super::util::{collect_rows, quote_ident, read_row, read_row_from, render_real, StrErr};
+use super::{CANCELLED_QUERY_MESSAGE, MAX_QUERY_LIMIT};
 
 /// Upper bound on how many chunk boundaries or rowids a single `Vec` is
 /// pre-sized for.
@@ -343,7 +344,7 @@ fn query_with_regex_filter(
 
     while let Some(row) = rows_iter.next().str_err()? {
         if state.query_generation.load(Ordering::Relaxed) != generation {
-            return Err("Query cancelled by a newer request".to_string());
+            return Err(CANCELLED_QUERY_MESSAGE.to_string());
         }
         // This scan is a bare `SELECT *`, so a filter's column index addresses
         // the statement's columns directly - no projection to remap.
@@ -427,7 +428,7 @@ fn query_with_rowid_index(
         {
             indexes.insert(table.to_string(), idx);
         } else if state.query_generation.load(Ordering::Relaxed) != generation {
-            return Some(Err("Query cancelled by a newer request".to_string()));
+            return Some(Err(CANCELLED_QUERY_MESSAGE.to_string()));
         }
     }
 
@@ -699,7 +700,7 @@ fn query_with_ordered_rows(
                 &projected_filters,
             )?
         };
-        let rowids = built.ok_or_else(|| "Query cancelled by a newer request".to_string())?;
+        let rowids = built.ok_or_else(|| CANCELLED_QUERY_MESSAGE.to_string())?;
         tracing::debug!(
             table = context.table,
             rows = rowids.len(),
@@ -770,11 +771,6 @@ pub fn query_with_offset(
     })
 }
 
-/// Defensive ceiling on a single page request. The UI only ever asks for a
-/// fixed chunk size, so this is insurance against a caller passing a value that
-/// would materialize an unreasonable number of rows into memory at once.
-const MAX_QUERY_LIMIT: i64 = 100_000;
-
 pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, String> {
     if req.limit <= 0 {
         return Err("Query limit must be greater than zero".to_string());
@@ -827,6 +823,20 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
     // with no usable alias (WITHOUT ROWID, or every alias shadowed by a user
     // column) must fall through to a scan-based path either way.
     let alias = rowid_alias_for(conn, &quoted_table, &table_columns.declared);
+    // The three ordered-rows paths below differ only in which alias they found
+    // and the columns they hand over; everything else about the request is the
+    // same, so it is written once.
+    let ordered_context = |alias: &'static str, columns: Vec<String>| OrderedQueryContext {
+        conn,
+        state,
+        generation,
+        table,
+        quoted_table: &quoted_table,
+        alias,
+        offset,
+        limit,
+        columns,
+    };
 
     if !regex_filters.is_empty() {
         // Regex is evaluated in Rust and can't be pushed into SQL, but the
@@ -838,17 +848,7 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
         // cache on and keeps the full-scan fallback.
         if let Some(a) = alias {
             return query_with_ordered_rows(
-                OrderedQueryContext {
-                    conn,
-                    state,
-                    generation,
-                    table,
-                    quoted_table: &quoted_table,
-                    alias: a,
-                    offset,
-                    limit,
-                    columns,
-                },
+                ordered_context(a, columns),
                 &where_clause,
                 &order_clause,
                 &params,
@@ -880,17 +880,7 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
         if valid_sort_column.is_some() {
             if let Some(a) = alias {
                 return query_with_ordered_rows(
-                    OrderedQueryContext {
-                        conn,
-                        state,
-                        generation,
-                        table,
-                        quoted_table: &quoted_table,
-                        alias: a,
-                        offset,
-                        limit,
-                        columns,
-                    },
+                    ordered_context(a, columns),
                     &where_clause,
                     &order_clause,
                     &params,
@@ -943,17 +933,7 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
     // with no usable rowid alias falls through to the OFFSET path.
     if let Some(a) = alias {
         return query_with_ordered_rows(
-            OrderedQueryContext {
-                conn,
-                state,
-                generation,
-                table,
-                quoted_table: &quoted_table,
-                alias: a,
-                offset,
-                limit,
-                columns,
-            },
+            ordered_context(a, columns),
             &where_clause,
             &order_clause,
             &params,
@@ -2192,8 +2172,8 @@ mod tests {
 
         let pragmas = Arc::new(AtomicUsize::new(0));
         {
-            let guard = state.conn.lock();
-            let conn = guard.as_ref().unwrap();
+            let mut guard = state.conn.lock();
+            let conn = guard.as_mut().unwrap();
             let counter = Arc::clone(&pragmas);
             conn.authorizer(Some(
                 move |ctx: rusqlite::hooks::AuthContext<'_>| -> rusqlite::hooks::Authorization {

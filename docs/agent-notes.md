@@ -17,6 +17,10 @@ Read the section before working in its area.
 
 - **Type-checking runs on TypeScript 7 through `svelte-check --tsgo`, and TypeScript 6 stays installed on purpose.** svelte-check still loads TypeScript's JavaScript compiler API, which TS 7 does not have, so `typescript` stays `^6` and TS 7 is the alias `@typescript/native`. Remove neither. `npm run check` goes through `scripts/svelte-check.mjs`, because svelte-check exits 0 when it crashes (a missing TS 7 included), and the wrapper fails any run without the `COMPLETED` summary line (`svelteCheck.test.ts`).
 
+### A second copy of the repo inside the repo folder stalls `npm run check`
+
+- **A second copy of the repo inside the repo folder stalls `npm run check`.** `tsconfig.json` includes `"*"`, and svelte-check walks the workspace. On 2026-11-10, with four git worktrees in a gitignored folder inside the repo (each a full tree with its own `node_modules`), the check printed nothing for five minutes and was stopped; with the worktrees removed it finished in 40 s. The cause was not isolated further than that before-and-after. Remove a worktree as soon as its diff is merged, or keep worktrees outside the repo folder.
+
 ### Vitest's global environment is `node`
 
 - **Vitest's global environment is `node`.** The two test files that need a DOM opt in per file with `// @vitest-environment jsdom` on line 1: `sqlEditorExtensions.test.ts` and `dragReorder.test.ts`. Keep it per file: a global jsdom would hide that most of this suite is pure logic. jsdom 30 has no `document.elementFromPoint`, which `dragReorder.test.ts` supplies and asserts is still absent.
@@ -311,6 +315,36 @@ the `json` feature of the `duckdb` crate, because extension autoinstall is off.
   generates its own file and calls `ParquetSession`/`query_table` via `db::bench_api`.
 - Cost: `duckdb` with `bundled` + `parquet` (`bundled` alone has no Parquet reader), +35.7 MB
   stripped and a 147 s cold build on 10 cores; it pulls in the Arrow crates.
+- **Every path given to a DuckDB reader goes through `pq::file_arg`.** `read_parquet`,
+  `read_csv`, `read_json`, `sniff_csv` and the `parquet_*metadata` functions take a glob and
+  fall back to the literal name only when the glob matches nothing, so `t[1].csv` next to
+  `t1.csv` read `t1.csv`, and `d[12].parquet` read `d1` and `d2` concatenated, under the
+  opened file's name (measured on DuckDB 2.0.0). `[`, `*` and `?` are escaped as
+  one-character classes (`[[]`, `[*]`, `[?]`); a path with none of them is passed unchanged.
+  The SQL tab's `allowed_paths` holds the literal path AND the escaped pattern, because
+  DuckDB checks both the pattern and the file it expands to. Outside Windows a name holding
+  a backslash as well as a glob character cannot be matched by any escaping tried (`[\]`,
+  `\\`), so `ParquetSession::open` refuses it with a message. Two known edges, not fixed: on
+  Windows the bracketed path component is compared case-sensitively, so a launch argument
+  whose case differs from the real name there fails to open; and the escaped pattern is
+  itself an allowed literal path. Pinned by
+  `a_bracketed_file_name_opens_that_file_and_not_its_glob_match`,
+  `a_bracketed_parquet_name_opens_that_file_and_not_its_glob_matches` and
+  `a_bracketed_name_with_nothing_beside_it_still_opens` (the control).
+- **Reader SQL built from the file is run as exactly one statement**, through the C API's
+  `duckdb_prepare` (`execute_one`), which refuses a second statement. duckdb-rs
+  `Connection::prepare` and `execute` run every statement except the last, so they are not
+  a single-statement guarantee. The text holds file-derived parts (column names, type text
+  such as `STRUCT("it's" BIGINT)`), and it runs before the SQL tab's lock. Both the name
+  and the type are quote-escaped in the pinned readers
+  (`a_json_file_with_an_apostrophe_in_a_nested_key_below_the_sample_opens`,
+  `a_reader_carrying_a_second_statement_is_refused_before_the_lock`).
+- **A listed view above `LIST_MAX_ROWS` (20M rows) keeps only its count** and pages with
+  `LIMIT/OFFSET` over the sort or `file_row_number` (`View::Counted`); a list of row numbers
+  costs 8 bytes per matching row and had no bound for a filtered unsorted view.
+- **A Parquet file with a column named `rowid` never uses the sort cache**: the cache table
+  is built from the file's column names, so that column hides the table's own `rowid` the
+  page query relies on (`a_parquet_file_with_a_rowid_column_sorts_correctly_through_the_cache`).
 
 ### The SQLite backend's modules
 
@@ -322,6 +356,7 @@ the `json` feature of the `duckdb` crate, because extension autoinstall is off.
   - `export.rs` — XLSX export
   - `types.rs`, `util.rs` — shared DTOs and helpers (`safe_ident`, `read_row`, `render_real`, `StrErr`)
   - `bench_api` (in `db.rs`) — the one seam `src-tauri/examples/*.rs` may use. The two benchmarks call the shipped functions through a real `open_database` connection; they used to be re-implementations that could drift from what ships. Keep it that way when adding an example.
+- **The Excel export types a column by its declared type, and `execute_sql` supplies one for a computed column.** A computed column (`COUNT(*)`, `a + 1`) has no declared type; `sql.rs` reports `INTEGER` or `REAL` for it only when every non-NULL value in the result has that storage class, and `""` otherwise, which the export writes as text. So `COUNT(*)` exports as a number and a computed `'00123'` stays text. A cell over Excel's 32,767 characters is cut, not refused; the command returns the count of cut cells and `exportNotice.ts` tells the user.
 
 ### All column discovery goes through `PRAGMA table_xinfo`
 
@@ -342,6 +377,10 @@ the `json` feature of the `duckdb` crate, because extension autoinstall is off.
 ### REAL cells render as SQLite renders them
 
 - **REAL cells render as SQLite renders them** (`util::render_real`: `3.0`, `1.0e+20`, `-0.0` as `0.0`), so a filter typed against what the grid shows matches. `render_real_matches_sqlite_cast_as_text` checks it against SQLite itself in two classes — byte-identical up to 13 significant digits, same-double beyond, because SQLite's `%!.15g` last digits are approximate. On a column with **no** declared affinity `=<number>` also compares numerically (`filters::tests::exact_match_on_a_column_with_no_affinity_also_compares_numerically`); typed columns are untouched.
+- **The range operators do the same on a column with no declared type** (`filters::range_comparison`). SQLite does not convert a bound text operand there, and a number sorts below any text, so `<5` over the integers 1 to 10 in `CREATE TABLE t(v)` or in a view column `a + 1 AS v` returned all ten rows and `>5` none (measured on SQLite 3.53.1). Numeric cells are compared against the number, text cells against the text, each half guarded by `typeof`; a typed column keeps the single comparison, which keeps its index usable. A BLOB cell in such a column matches no numeric range filter.
+- **The same filter must match the same rows on both engines, and `db::tests::a_filter_matches_the_same_rows_on_both_engines` is what holds that.** The grammar is shared (`parse_criteria`), the SQL is not: SQLite leans on affinity, DuckDB casts the operand. One table of filters runs through both builders on real engines over the same ten rows. Add a row to it with every new operator or special case.
+- **A filter naming a column the table does not have is an error on both paths**, plain and regex. SQLite does not refuse an unknown double-quoted name by itself: with its default setting `"ghost"` becomes the string `'ghost'`.
+- **rusqlite 0.41 takes `&mut Connection` to install the authorizer**, and `column_names()` returns an iterator.
 
 ### `dblitz` is a strict read-only SQLite viewer
 
@@ -388,10 +427,15 @@ the `json` feature of the `duckdb` crate, because extension autoinstall is off.
 ### An `await` in a component publishes only if it still owns publication
 
 - **An `await` in a component publishes only if it still owns publication.** Two facts, both captured BEFORE the await: a monotonic per-caller token and `appState.dbOpenGeneration`. The token alone lets a closed database's answer repopulate a reset panel; the generation alone lets two requests inside one session finish out of order and label table B with table A's columns. `createSessionOwnedRequest` in `sessionOwnedRequest.ts` is the seam — a publication guard, not a request bus: it cancels nothing, the in-flight call still completes and its answer is dropped, and its errors are gated too. Users: `DatabaseStructure.svelte` and `createSqlExecution` in `sqlExecution.ts` (a SQL result from a closed or replaced session is dropped, writes no history entry, and clears `running`). `store.svelte.ts` and `virtualRows.svelte.ts` enforce the same rule inline. Pinned by `sessionOwnedRequest.test.ts` and `sqlExecution.test.ts`.
+- **`reloadData` resolves true only when it published its first chunk and is still current.** The `selectTable` auto-fit tail keys on that, because comparing table names cannot tell two selections of the same table apart: a double-click during a slow first load auto-fitted on an empty row cache and saved header-only widths.
+- **A first chunk or row count stopped by `cancel_queries` while its epoch is still current is issued once more** (`retryAfterSharedCancel`). `cancel_queries` is shared with the SQL tab, so Cancel there used to empty a loading Browse view. Browse's own cancels come from a newer reload, whose epoch has already moved, and are not retried.
+- **The filter debounce memo records what was queried, at the time the timer fires**, and an edit undone inside the window cancels the armed timer. Armed and left alone, the timer recorded the filter it was armed with while the reload queried the live one, and retyping that filter then matched the memo and never queried.
 
 ### Find in the grid searches the rows the grid shows
 
 - **Find in the grid (`gridFind.ts`, DataGrid's find bar) searches the rows the grid shows, through the grid's own row source.** It loads rows with `getVisibleRows`, so it uses the grid's chunk size: asking the backend for bigger pages to scan faster would rebuild the rowid index, which is keyed by chunk size (`rowid_index_rebuilds_when_chunk_size_changes`). It matches the cell strings the grid renders, NULL never matches, and a block that fails or comes back short stops the search with an error, never "No match" for rows it did not see. It stops when `viewToken` (the `virtualRows` epoch; the `rows` array identity in static mode) or the `columns` identity changes, so a filter edit mid-search cannot select a cell in the new view. Ctrl+F belongs to the grid and Ctrl+Shift+F to the column finder; the window-level key handler ignores events that are already `defaultPrevented` (CodeMirror's own search in the SQL editor) and grids that are not on screen (both tabs stay mounted). Vertical reveal goes through `scrollTopToRevealRow`, which centres the row because the compressed spacer's ratio exceeds one pixel per pixel; pinned for 1.8M and 100M rows in `gridGeometry.test.ts`.
+- **While the row count is pending, Find does not search and Ctrl+A does not select.** A filtered view's provisional total is at most one chunk, so a walk over it answered "No match" for rows it never saw, and even a hit could be the wrong one. `findCell` answers `{kind: "incomplete"}` when the count is pending at the start or the total moves during the walk, and the grid shows "Still counting rows".
+- **A cell selection is cleared when the view token or the column set changes** (`createViewChangeDetector` in `cellSelection.svelte.ts`, called from a DataGrid `$effect`). The column list is compared by identity, which is safe only because `BrowseData` passes a list that `stableColumnList` keeps identical while the names are unchanged. The effect wiring itself has no test: no DataGrid mount exists under jsdom.
 
 ### A column preset stores the visible columns, in order
 
@@ -404,18 +448,36 @@ the `json` feature of the `duckdb` crate, because extension autoinstall is off.
 ### There are two column-reorder implementations
 
 - **There are two column-reorder implementations and only one of them has ever been proven in WebView2.** `DataGrid`'s header reordering uses mouse events with a movement dead zone and document-level cleanup (`dragReorder.svelte.ts`, tests in `dragReorder.test.ts`); `ColumnSettings.svelte` uses HTML5 drag-and-drop with `dataTransfer`, driving the same `onReorder`. Do not replace the mouse-event path with HTML5 DnD without proving it in the Windows WebView2 runtime — and note the `ColumnSettings` path carries exactly that unproven risk today.
+- Both start from `reorderColumn` in `columnView.ts`, which takes the order the grid shows (`orderColumns`), so a column the file gained after the order was saved can be dragged.
 
 ## CI
 
-### The three workflows, and the tests that pin them
+### The four workflows, and the tests that pin them
 
 `.github/workflows/checks.yml` runs frontend checks, a Rust backend matrix
-(ubuntu/windows/macos, clippy `-D warnings` on all three), and a `smoke` job.
-`.github/workflows/release.yml` runs on a `v*` tag, and
+(ubuntu/windows/windows-arm/macos, clippy `-D warnings` on every leg), and a
+`smoke` job. `.github/workflows/release.yml` runs on a `v*` tag,
 `.github/workflows/sign-rehearsal.yml` is started by hand (see *Windows code
-signing* below). All three are pinned and bounded;
-`src/lib/releaseWorkflow.test.ts`, `checksWorkflow.test.ts` and
-`windowsSigning.test.ts` fail on any drift.
+signing* below), and `.github/workflows/audit.yml` runs `cargo audit` every
+Monday (see *Expected `cargo audit` noise*). All four are pinned and bounded;
+`src/lib/releaseWorkflow.test.ts`, `checksWorkflow.test.ts`,
+`updaterConfig.test.ts` and `windowsSigning.test.ts` fail on any drift.
+
+Those tests read the workflow text, so a loose match passes with the setting
+gone: `max-parallel: 1` survived its deletion because two comments quote it,
+the Apple step's `exit 1` because the slice ran on into the Windows steps, the
+verify step's `||` turned `&&` because only a fragment of the condition was
+matched, and the release's `cancel-in-progress: false` set to `true` because
+the build job has a line of its own. Each assertion now strips comment lines,
+slices to the one step or job, matches the whole expression or anchors the
+block, and was shown red on its mutation. A new assertion gets the same
+treatment: mutate the workflow, see it fail, restore.
+
+`run:` blocks take runner values from the environment (`$GITHUB_REF_NAME`,
+`$GITHUB_REPOSITORY`, `$env:GITHUB_REF_NAME` in PowerShell) and never a
+`${{ github. }}`, `${{ secrets. }}` or `${{ inputs. }}` expression: an
+expression is pasted into the script before the shell parses it.
+`releaseWorkflow.test.ts` fails on one.
 
 ### `DirectoryNotEmpty` from `libduckdb-sys` on Windows is the restored rust-cache
 
@@ -458,11 +520,11 @@ gh run rerun <run id> --failed
 
 ### Every job has a `timeout-minutes` with its observed maximum
 
-- **Every job has a `timeout-minutes` with its observed maximum in a comment next to it**, so an infinite hang costs minutes rather than six hours. The release `build` legs are 90 minutes each and `max-parallel: 1`, so the job as a whole can legitimately take four times one leg.
+- **Every job has a `timeout-minutes` with its observed maximum in a comment next to it**, so an infinite hang costs minutes rather than six hours. The release `build` legs are 90 minutes each and `max-parallel: 1`, so the job as a whole can legitimately take five times one leg, one per platform.
 
 ### Every workflow defaults to `permissions: contents: read`
 
-- **Every workflow defaults to `permissions: contents: read`**, with `contents: write` granted only to `create-release`, `build` and `publish`. `update-tap` goes the other way to `permissions: {}` because it authenticates as `TAP_GITHUB_TOKEN` throughout.
+- **Every workflow defaults to `permissions: contents: read`**, with `contents: write` granted only to `create-release`, `build` and `publish`. `update-tap` goes the other way to `permissions: {}` because it authenticates as `TAP_GITHUB_TOKEN` throughout. `releaseWorkflow.test.ts` fails when any other job in any workflow asks for `contents: write`.
 
 ### `release.yml`'s concurrency group is the workflow, not the ref
 
@@ -535,6 +597,13 @@ caught it either", which is the more useful result.
   A SmartScreen warning on a signed build, and the unsigned Windows builds up
   to 26.10.0, are documented states, not findings.
 
+### The pre-push hook holds none of the names it blocks
+
+- `.githooks/pre-push` runs the maintainer's private public-safe audit before a push and blocks the push when that audit script is not found. Until 2026-11-10 its fallback for a machine without `pwsh` carried its own copy of the blocked names, split across `printf` calls: that stops a grep and nothing else, and this file is public. The values are still in the history before that date.
+- The fallback now reads the patterns at run time from the `$ForbiddenPatterns` array of the audit script it found, and reads it strictly: a line of any other shape, a regex construct it cannot rewrite for POSIX `grep -E`, or an empty list blocks the push with a message to install PowerShell 7 or set `SKIP_AGENT_MEMORY_AUDIT=1`. A layout change in the private script therefore blocks pushes rather than dropping patterns.
+- It also blocks when `git ls-files` fails or lists nothing. Piped straight into the scan loop, a missing `git` gave the loop no input and the check printed OK having read no file.
+- Never put a blocked value into this repository to test the hook: run it with `pwsh` off `PATH` and `HOME`/`USERPROFILE` pointing at a scratch folder whose `agent-memory/bin/audit-agent-memory.ps1` holds a synthetic pattern.
+
 ## Release
 
 ### Five version files must agree
@@ -565,12 +634,17 @@ caught it either", which is the more useful result.
 
 ### Expected `cargo audit` noise
 
-- Expected `cargo audit` noise is the established allowed Tauri/Linux WebView transitive set (legacy GTK/glib/unic advisories). Treat any new advisory or materially different output as actionable; the npm `cookie` override (`^0.7.2`) that answered an old finding on the unreachable SvelteKit SSR path was removed with SvelteKit 3, which needs `cookie` 2; re-evaluate a `cookie` finding if one reappears.
+- **`.github/workflows/audit.yml` runs `cargo audit` on `src-tauri/Cargo.lock` every Monday and on demand, and fails on every finding not allowed below.** A vulnerability is never allowed: it is fixed. The allowed warnings, measured 2026-11-10 with cargo-audit 0.22.2, are all transitive crates of Tauri's Linux side:
+  - `RUSTSEC-2024-0370`: `proc-macro-error`, unmaintained. A build-time macro under `glib-macros` and `gtk3-macros`, the GTK 3 stack of the Linux webview; none of it runs.
+  - `RUSTSEC-2024-0429`: `glib` 0.18, unsound `VariantStrIter`. The same GTK 3 stack; dblitz never iterates a GVariant.
+  - `RUSTSEC-2026-0370`, `RUSTSEC-2026-0371`, `RUSTSEC-2026-0372`: `zvariant`, `zbus_names` and `zvariant_derive`, unmaintained. They come with `zbus`, which `tauri-plugin-opener` uses on Linux to ask the file manager over D-Bus to show a file.
+- The workflow's list and the one above must name the same entries, each with its reason in the workflow; `checksWorkflow.test.ts` holds them equal (it reads every RUSTSEC ID and every "yanked" crate in the sub-bullets above, so history goes here, not there). A yanked `async-executor` 1.14.0 under `zbus` was on both lists until the 26.11.0 `cargo update` moved it to 1.14.1. A finding is added to both only with a reason, and the workflow warns about an allowed entry that nothing matches any more, so the list shrinks. The report is read as JSON: cargo-audit exits 1 for a vulnerability and for a crash alike, passes warnings unless told otherwise, and its `--ignore` cannot name a yanked version. The BUILD.md pre-release `cargo audit` stays: the workflow says nothing about a lockfile that is not yet on `main`.
+- The npm `cookie` override (`^0.7.2`) that answered an old finding on the unreachable SvelteKit SSR path was removed with SvelteKit 3, which needs `cookie` 2; re-evaluate a `cookie` finding if one reappears.
 - **`npm audit` reports 4 low `deepmerge` findings, and they have no fix** (measured 2026-10-29). GHSA-gcqx-w48m-w2h4 covers every `deepmerge` from 4.2.0 up; `@sveltejs/vite-plugin-svelte` uses it to merge config at build time, and nothing of it ships in the app. The "fix" `npm audit fix --force` offers is a downgrade to `@sveltejs/kit` 0.0.30: never run it. Re-check when `vite-plugin-svelte` drops or patches the dependency.
 
 ### In-app updater
 
-- **The updater's minisign private key is the most safety-critical secret in this repo.** It lives in KeePass and in the `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repo secrets; the public key is committed in `tauri.conf.json`. It is a **dblitz-only** key — deliberately not shared with `screenpick`. Losing it permanently orphans every installed copy: a new key cannot sign for clients holding the old public key, so each user would have to reinstall by hand. It is unrelated to OS code signing and is not fixed by adding an Apple Developer ID. Never print, echo, or paste the private key into a tool call; custody and regeneration live in [BUILD.md](../BUILD.md#updater-signing-key).
+- **The updater's minisign private key is the most safety-critical secret in this repo.** It lives in the maintainer's password manager and in the `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repo secrets; the public key is committed in `tauri.conf.json`. It is a **dblitz-only** key — deliberately not shared with `screenpick`. Losing it permanently orphans every installed copy: a new key cannot sign for clients holding the old public key, so each user would have to reinstall by hand. It is unrelated to OS code signing and is not fixed by adding an Apple Developer ID. Never print, echo, or paste the private key into a tool call; custody and regeneration live in [BUILD.md](../BUILD.md#updater-signing-key).
 - **A release with no `latest.json` updates nobody, and looks green.** When the signing secret is missing or empty, `tauri-action` logs "Signature not found for the updater JSON. Skipping upload..." and still succeeds. The release ships with installers and no manifest, and the failure only surfaces as users silently never updating. BUILD.md's post-release checks exist for this.
 - **The release matrix must stay `max-parallel: 1`.** `tauri-action` builds `latest.json` by read-modify-write against the release asset, so parallel legs clobber each other's platform entries and produce a manifest that updates only some platforms. dblitz has five legs (two of them macOS, two Windows), so this bites harder here than in a two-leg repo. The `publish` job reads `latest.json` back on the draft and refuses to publish unless all five platforms are in it. Nothing fails; the manifest is just incomplete.
 - **Not every install can self-update, and the UI must not pretend otherwise.** The updater hands its payload to an installer, and neither a package-managed Linux install nor a standalone Windows exe has one that owns this copy. `InstallProvenance` in `updates.rs` enumerates all five artifacts and `self_update_supported` matches exhaustively, so a new artifact cannot inherit a default answer. Do not "fix" the gate by always offering the install. Pinned by `updates::tests::{macos_can_always_self_update, installed_windows_build_can_self_update, portable_windows_build_does_not_offer_install, linux_appimage_can_self_update, linux_deb_or_rpm_cannot_self_update}`.
@@ -624,4 +698,4 @@ caught it either", which is the more useful result.
 
 ### Windows on ARM is built natively on `windows-11-arm`
 
-**Windows on ARM is built natively on `windows-11-arm`, not cross-compiled.** Without `--target` the output stays in `target/release`, which every Windows step reads, and the verify step can run the installer it checks; it also asserts the PE machine field (`0xAA64`), because a runner of the wrong architecture would otherwise publish an x64 build under the arm64 name. tauri-action names the updater entry from the runner's architecture (`windows-aarch64`). The ARM portable exe is `dblitz-arm64.exe`; x64 keeps `dblitz.exe` because existing links point at it. `checks.yml`'s backend matrix has the same runner, so an ARM compile failure shows on push rather than on a tag. Read [BUILD.md](BUILD.md#windows-code-signing) before touching the leg, and [docs/agent-notes.md](docs/agent-notes.md) for what must not be simplified away.
+**Windows on ARM is built natively on `windows-11-arm`, not cross-compiled.** Without `--target` the output stays in `target/release`, which every Windows step reads, and the verify step can run the installer it checks; it also asserts the PE machine field (`0xAA64`), because a runner of the wrong architecture would otherwise publish an x64 build under the arm64 name. tauri-action names the updater entry from the runner's architecture (`windows-aarch64`). The ARM portable exe is `dblitz-arm64.exe`; x64 keeps `dblitz.exe` because existing links point at it. `checks.yml`'s backend matrix has the same runner, so an ARM compile failure shows on push rather than on a tag. Read [BUILD.md](../BUILD.md#windows-code-signing) before touching the leg, and [*Windows code signing*](#windows-code-signing) above for what must not be simplified away.

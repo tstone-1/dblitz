@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { createCellSelection } from "./cellSelection.svelte";
+import { createCellSelection, createViewChangeDetector } from "./cellSelection.svelte";
 
 // Runs under the "node" test environment (no real DOM). `onCellMouseDown`
 // unconditionally registers a `document` mouseup listener, so stub a minimal
@@ -196,5 +196,32 @@ describe("rowSelected / colSelected (crosshair)", () => {
     const selection = createCellSelection();
     expect(selection.rowSelected(0)).toBe(false);
     expect(selection.colSelected(0)).toBe(false);
+  });
+});
+
+describe("clear and createViewChangeDetector (selection reset on a new view)", () => {
+  it("clear drops every rectangle, and a Shift+click afterwards does not extend the old one", () => {
+    const selection = createCellSelection();
+    selection.setSelection({ row: 0, col: 0 }, { row: 9999, col: 2 });
+    expect(selection.sel).not.toBeNull();
+
+    selection.clear();
+    expect(selection.sel).toBeNull();
+    expect(selection.isSelected(5000, 1)).toBe(false);
+
+    selection.onCellMouseDown(makeCellEvent(1, { shiftKey: true }), 3);
+    expect(selection.sel).toEqual({ r0: 3, r1: 3, c0: 1, c1: 1 });
+  });
+
+  it("reports a change of view token or column set, and nothing else", () => {
+    const changed = createViewChangeDetector();
+    const cols = ["id", "name"];
+    expect(changed(1, cols)).toBe(false); // first observation
+    expect(changed(1, cols)).toBe(false); // a chunk landed in the same view
+    expect(changed(2, cols)).toBe(true); // a reload: filter, sort, table, session
+    expect(changed(2, cols)).toBe(false);
+    const hidden = ["id"];
+    expect(changed(2, hidden)).toBe(true); // the column set changed
+    expect(changed(2, hidden)).toBe(false);
   });
 });

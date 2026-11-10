@@ -42,8 +42,8 @@ impl<T> ErrCtx<T> for Result<T, String> {
 }
 
 /// Convert an OS file path into a SQLite URI with `?immutable=1`. Percent-
-/// encodes the few characters that have special meaning in URIs and
-/// normalizes Windows backslashes to forward slashes.
+/// encodes the few characters that have special meaning in URIs and, on
+/// Windows only, turns backslash separators into forward slashes.
 pub(crate) fn path_to_sqlite_uri(path: &str) -> String {
     // Percent-encode in this order: % first (so we don't double-encode our
     // own escapes), then the others.
@@ -51,8 +51,16 @@ pub(crate) fn path_to_sqlite_uri(path: &str) -> String {
         .replace('%', "%25")
         .replace(' ', "%20")
         .replace('?', "%3F")
-        .replace('#', "%23")
-        .replace('\\', "/");
+        .replace('#', "%23");
+    // A backslash is a separator only on Windows. On Linux and macOS it is an
+    // ordinary file name character, which SQLite's URI parser passes through
+    // unchanged, and rewriting it named a different file: `/data/a\b.db` was
+    // opened as `/data/a/b.db`.
+    let encoded = if cfg!(windows) {
+        encoded.replace('\\', "/")
+    } else {
+        encoded
+    };
     // UNC path "//server/share/db.sqlite" -> "file:////server/share/db.sqlite?immutable=1".
     // The four-slash form keeps the URI authority empty; "file://server/..."
     // would be parsed as a non-local authority and rejected by SQLite.
@@ -300,6 +308,40 @@ mod tests {
             path_to_sqlite_uri("/home/user/db.sqlite"),
             "file:/home/user/db.sqlite?immutable=1"
         );
+        assert_eq!(
+            path_to_sqlite_uri("/home/user/a b?c#d%e.sqlite"),
+            "file:/home/user/a%20b%3Fc%23d%25e.sqlite?immutable=1"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_backslash_off_windows_is_part_of_the_file_name() {
+        // On Linux and macOS `a\b.sqlite` is one file in `dir`, and it used to
+        // be opened as `dir/a/b.sqlite`. Proven by opening a real one, so the
+        // test pins what SQLite does with the URI and not only its spelling.
+        let uri: String = path_to_sqlite_uri(r"/data/a\b.sqlite");
+        assert_eq!(uri, r"file:/data/a\b.sqlite?immutable=1");
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path: std::path::PathBuf = dir.path().join(r"a\b.sqlite");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('one file');")
+                .unwrap();
+        }
+        let conn = rusqlite::Connection::open_with_flags(
+            path_to_sqlite_uri(path.to_str().unwrap()),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )
+        .unwrap();
+        let v: String = conn.query_row("SELECT v FROM t", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, "one file");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn path_to_sqlite_uri_turns_windows_separators_into_slashes() {
         assert_eq!(
             path_to_sqlite_uri(r"C:\Users\alice\db.sqlite"),
             "file:/C:/Users/alice/db.sqlite?immutable=1"

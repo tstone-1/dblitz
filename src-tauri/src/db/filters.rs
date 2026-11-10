@@ -38,7 +38,7 @@ fn declares_blob(declared_type: &str) -> bool {
 
 /// Whether a column has no numeric affinity, so SQLite will not convert a bound
 /// text operand to a number when comparing against it. See the numeric-equality
-/// arm in [`build_where_clause`].
+/// arm in [`build_where_clause`] and [`range_comparison`].
 fn has_no_affinity(declared_type: &str) -> bool {
     declared_type.trim().is_empty() || declares_blob(declared_type)
 }
@@ -107,6 +107,63 @@ pub(crate) fn parse_criteria(value: &str) -> Vec<Criterion<'_>> {
         .collect()
 }
 
+/// Join one column's parsed criteria into a single `WHERE` part: the ORed
+/// inclusions as one group, ANDed with every exclusion and comparison. Pushes
+/// nothing when the column contributed nothing.
+///
+/// Shared by both builders because the parameter order is part of it: the
+/// inclusions' parameters go first because their SQL does, and a copy of this
+/// that reordered one list but not the other would bind every value to the
+/// wrong `?` without any error.
+pub(crate) fn push_column_criteria(
+    mut ors: Vec<String>,
+    or_params: Vec<String>,
+    ands: Vec<String>,
+    and_params: Vec<String>,
+    parts: &mut Vec<String>,
+    params: &mut Vec<String>,
+) {
+    let mut col_parts: Vec<String> = Vec::new();
+    match ors.len() {
+        0 => {}
+        1 => col_parts.push(ors.remove(0)),
+        _ => col_parts.push(format!("({})", ors.join(" OR "))),
+    }
+    col_parts.extend(ands);
+    params.extend(or_params);
+    params.extend(and_params);
+    match col_parts.len() {
+        0 => {}
+        1 => parts.push(col_parts.remove(0)),
+        _ => parts.push(format!("({})", col_parts.join(" AND "))),
+    }
+}
+
+/// One range comparison (`>=`, `<=`, `>`, `<`) against a bound text operand.
+///
+/// On a column with no affinity SQLite does not convert the bound text to a
+/// number, and across storage classes a number always sorts below any text.
+/// So `<5` against the INTEGERs 1 to 10 in `CREATE TABLE t(v)`, or in a view
+/// column `a + 1 AS v`, returned all ten rows and `>5` returned none (measured
+/// on SQLite 3.53.1). When the operand reads as a finite number, numeric cells
+/// are compared against it as a number - written by `render_real`, which emits
+/// only digits, a point, `e` and a sign, as in the `=` arm - and text cells
+/// keep the text comparison they always had. Each half is guarded by
+/// `typeof`, because without the guard every text cell satisfies `> 5.0` and
+/// every numeric cell satisfies `< '5'`. A typed column keeps the single
+/// comparison: SQLite converts the operand there itself, and the extra arms
+/// would cost the index.
+fn range_comparison(col: &str, op: &str, operand: &str, no_affinity: bool) -> String {
+    match operand.parse::<f64>() {
+        Ok(number) if no_affinity && number.is_finite() => format!(
+            "((typeof({col}) IN ('integer', 'real') AND {col} {op} {literal}) \
+             OR (typeof({col}) = 'text' AND {col} {op} ?))",
+            literal = render_real(number)
+        ),
+        _ => format!("{col} {op} ?"),
+    }
+}
+
 /// Build the `WHERE` clause for one view.
 ///
 /// `columns` is the table's visible column list with its declared types, in
@@ -160,25 +217,24 @@ pub(super) fn build_where_clause(
         if f.value.is_empty() {
             continue;
         }
-        let column = columns.iter().position(|c| c.name == f.column);
+        // A filter naming a column this table does not have is refused here,
+        // for both kinds. A regex never reaches SQL, so it used to be dropped
+        // in silence, showing an unfiltered grid under a filter chip that said
+        // otherwise. The plain path was assumed to be refused by SQLite, and
+        // is not: with SQLite's default double-quoted-string setting an
+        // unknown `"ghost"` becomes the string 'ghost', so `"ghost" LIKE
+        // '%x%'` quietly compares a constant. Same wording SQLite uses for a
+        // real unknown name, because to the user it is the same mistake.
+        let Some(idx) = columns.iter().position(|c| c.name == f.column) else {
+            return Err(format!("no such column: {}", f.column));
+        };
         if f.is_regex {
-            // A regex naming a column this table does not have used to be
-            // dropped in silence, which showed the user an unfiltered grid
-            // under a filter chip that said otherwise. The LIKE path below
-            // interpolates the name and lets SQLite refuse it; a regex never
-            // reaches SQL, so the refusal has to happen here. Same wording
-            // SQLite uses, because to the user it is the same mistake.
-            let Some(idx) = column else {
-                return Err(format!("no such column: {}", f.column));
-            };
             match Regex::new(&f.value) {
                 Ok(re) => regex_filters.push((idx, re)),
                 Err(e) => return Err(format!("Invalid regex '{}': {}", f.column, e)),
             }
         } else {
-            let no_affinity = column
-                .map(|idx| has_no_affinity(&columns[idx].col_type))
-                .unwrap_or(false);
+            let no_affinity = has_no_affinity(&columns[idx].col_type);
             let col_escaped = quote_ident(&f.column);
 
             // Split on semicolon for multi-criteria: exclusions=AND, inclusions=OR
@@ -206,19 +262,19 @@ pub(super) fn build_where_clause(
                         and_params.push(contains_pattern(rest));
                     }
                     Criterion::Ge(rest) => {
-                        and_parts.push(format!("{} >= ?", col_escaped));
+                        and_parts.push(range_comparison(&col_escaped, ">=", rest, no_affinity));
                         and_params.push(rest.to_string());
                     }
                     Criterion::Le(rest) => {
-                        and_parts.push(format!("{} <= ?", col_escaped));
+                        and_parts.push(range_comparison(&col_escaped, "<=", rest, no_affinity));
                         and_params.push(rest.to_string());
                     }
                     Criterion::Gt(rest) => {
-                        and_parts.push(format!("{} > ?", col_escaped));
+                        and_parts.push(range_comparison(&col_escaped, ">", rest, no_affinity));
                         and_params.push(rest.to_string());
                     }
                     Criterion::Lt(rest) => {
-                        and_parts.push(format!("{} < ?", col_escaped));
+                        and_parts.push(range_comparison(&col_escaped, "<", rest, no_affinity));
                         and_params.push(rest.to_string());
                     }
                     Criterion::Eq(rest) => {
@@ -253,21 +309,14 @@ pub(super) fn build_where_clause(
                 }
             }
 
-            let mut col_parts: Vec<String> = Vec::new();
-            if or_parts.len() == 1 {
-                col_parts.push(or_parts.remove(0));
-            } else if or_parts.len() > 1 {
-                col_parts.push(format!("({})", or_parts.join(" OR ")));
-            }
-            col_parts.extend(and_parts);
-            params.extend(or_params);
-            params.extend(and_params);
-
-            if col_parts.len() == 1 {
-                where_parts.push(col_parts.remove(0));
-            } else if col_parts.len() > 1 {
-                where_parts.push(format!("({})", col_parts.join(" AND ")));
-            }
+            push_column_criteria(
+                or_parts,
+                or_params,
+                and_parts,
+                and_params,
+                &mut where_parts,
+                &mut params,
+            );
         }
     }
 
@@ -596,11 +645,121 @@ mod tests {
     #[test]
     fn regex_on_an_unknown_column_is_an_error() {
         // It used to be dropped in silence, leaving an unfiltered grid under a
-        // filter chip claiming a filter. The LIKE path errors on the same
-        // mistake because SQLite refuses the name.
+        // filter chip claiming a filter.
         let columns = cols(&["name"]);
         let err = build_where_clause(&columns, &[regex_filter("ghost", "^x")], "").unwrap_err();
         assert_eq!(err, "no such column: ghost");
+    }
+
+    #[test]
+    fn a_plain_filter_on_an_unknown_column_is_an_error() {
+        // SQLite does NOT refuse this one, although two comments here said it
+        // did: with the default double-quoted-string setting the unknown
+        // `"ghost"` is read as the string 'ghost'. The control below proves
+        // that on a real connection, so this test pins the builder rather than
+        // an assumption about the engine.
+        let columns = cols(&["name"]);
+        for value in ["x", "=x", ">5", "<>"] {
+            let err = build_where_clause(&columns, &[filter("ghost", value)], "").unwrap_err();
+            assert_eq!(err, "no such column: ghost", "filter {value:?}");
+        }
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (name TEXT); INSERT INTO t VALUES ('a');")
+            .unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM t WHERE \"ghost\" LIKE '%gh%'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("control: SQLite accepts an unknown double-quoted name as a string");
+        assert_eq!(n, 1);
+    }
+
+    /// Rows of `source` that `filter` keeps, run through the real builder on a
+    /// real SQLite connection.
+    fn matching_rows(
+        conn: &rusqlite::Connection,
+        source: &str,
+        columns: &[ColumnInfo],
+        value: &str,
+    ) -> i64 {
+        let r = build_where_clause(columns, &[filter("v", value)], "").unwrap();
+        let sql = format!("SELECT count(*) FROM {source}{}", r.clause);
+        let params: Vec<&dyn rusqlite::types::ToSql> = r
+            .params
+            .iter()
+            .map(|p| p as &dyn rusqlite::types::ToSql)
+            .collect();
+        conn.query_row(&sql, params.as_slice(), |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn range_filter_on_an_untyped_column_compares_numbers() {
+        // Measured on SQLite 3.53.1 before this fix: on both sources below `<5`
+        // returned all 10 rows and `>5` none, because the bound text operand
+        // sorts above every number. The typed table is the control: SQLite
+        // converts the operand there, so the answers must already agree.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t (v);
+             CREATE TABLE typed (v INTEGER);
+             CREATE TABLE base (a INTEGER);
+             CREATE VIEW computed AS SELECT a + 1 AS v FROM base;
+             WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 10)
+               INSERT INTO t SELECT x FROM n;
+             INSERT INTO typed SELECT v FROM t;
+             INSERT INTO base SELECT v - 1 FROM t;",
+        )
+        .unwrap();
+        let untyped = typed_cols(&[("v", "")]);
+        let integer = typed_cols(&[("v", "INTEGER")]);
+
+        for (source, columns) in [("t", &untyped), ("computed", &untyped), ("typed", &integer)] {
+            for (value, expected) in [("<5", 4), ("<=5", 5), (">5", 5), (">=5", 6)] {
+                assert_eq!(
+                    matching_rows(&conn, source, columns, value),
+                    expected,
+                    "{value} on {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn range_filter_on_an_untyped_column_still_compares_text_cells_as_text() {
+        // The text half of the clause: a text cell in the same untyped column
+        // is compared as text, as before, and no number satisfies a text-only
+        // operand.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t (v); INSERT INTO t VALUES (3), (7), ('b'), ('d'), (NULL);",
+        )
+        .unwrap();
+        let untyped = typed_cols(&[("v", "")]);
+        // Numbers: 3 and 7 against 5 numerically; 'b' and 'd' against '5' as
+        // text, where both letters sort above the digit.
+        assert_eq!(matching_rows(&conn, "t", &untyped, ">5"), 3);
+        assert_eq!(matching_rows(&conn, "t", &untyped, "<5"), 1);
+        // A text operand: only the text cells can match, as before.
+        assert_eq!(matching_rows(&conn, "t", &untyped, ">c"), 1);
+    }
+
+    #[test]
+    fn range_filter_on_a_typed_column_stays_a_single_comparison() {
+        // The index on a typed column must stay usable, so it gets no extra
+        // arms; and a non-numeric operand on an untyped column has nothing
+        // numeric to compare against either.
+        let typed = typed_cols(&[("v", "INTEGER")]);
+        let r = build_where_clause(&typed, &[filter("v", ">=5")], "").unwrap();
+        assert_eq!(r.clause, " WHERE \"v\" >= ?");
+
+        let untyped = typed_cols(&[("v", "")]);
+        let r = build_where_clause(&untyped, &[filter("v", ">=abc")], "").unwrap();
+        assert_eq!(r.clause, " WHERE \"v\" >= ?");
+        assert_eq!(r.params, vec!["abc"]);
     }
 
     #[test]

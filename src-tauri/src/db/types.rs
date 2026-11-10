@@ -217,12 +217,13 @@ pub struct QueryResult {
 pub struct SqlResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Option<String>>>,
-    /// Per-column declared type (e.g. `"INTEGER"`, `"TEXT"`), aligned 1:1
-    /// with `columns`. Empty string for a column with no declared type (a
-    /// computed expression like `SELECT 1+1`) - the XLSX export already
-    /// treats a missing/empty decltype as numeric-affinity, so that's the
-    /// correct "unknown, guess numeric" default. Used by the XLSX export so
-    /// numbers don't get downgraded to text.
+    /// Per-column type (e.g. `"INTEGER"`, `"TEXT"`), aligned 1:1 with
+    /// `columns`, used by the XLSX export so numbers are not written as text.
+    /// The declared type where there is one. A SQLite column with none (a
+    /// computed expression like `COUNT(*)`) gets `"INTEGER"` or `"REAL"` when
+    /// every non-NULL value in the result was of that storage class, and an
+    /// empty string otherwise, which the export writes as text. The DuckDB
+    /// engine always sends the column's DuckDB type.
     pub column_types: Vec<String>,
     pub error: Option<String>,
     /// True when the result set exceeded `SQL_RESULT_LIMIT` and only the

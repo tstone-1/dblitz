@@ -49,6 +49,12 @@ fn sweep_stale_exports(dir: &Path) {
 
 /// Classify a SQLite declared column type as numeric-affinity or not, using
 /// the SQLite type-affinity rules (https://www.sqlite.org/datatype3.html section 3.1).
+///
+/// An empty type is text here, deliberately: it means nothing is known about
+/// the column, and writing text such as `00123` as the number 123 loses data,
+/// while writing a number as text only loses formatting. The SQL tab does not
+/// send an empty type for a computed column whose values were all numbers; it
+/// derives `INTEGER` or `REAL` from the values (`db::sql::UntypedColumns`).
 fn is_numeric_affinity(declared: &str) -> bool {
     let t = declared.to_ascii_uppercase();
     if t.contains("INT") {
@@ -132,12 +138,36 @@ fn dedupe_headers(headers: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Excel's limit on the text of one cell, in characters. `rust_xlsxwriter`
+/// refuses a longer string, and that one refusal used to fail the whole
+/// export: no workbook was written because of a single long cell.
+const EXCEL_MAX_CELL_CHARS: usize = 32_767;
+
+/// `value` cut to [`EXCEL_MAX_CELL_CHARS`] characters, or `None` when it fits.
+/// Counted in characters, as `rust_xlsxwriter` counts them, and cut on a
+/// character boundary.
+fn truncate_for_excel(value: &str) -> Option<&str> {
+    value
+        .char_indices()
+        .nth(EXCEL_MAX_CELL_CHARS)
+        .map(|(end, _)| &value[..end])
+}
+
+/// A written workbook. Serialized as the `export_to_xlsx` command's answer;
+/// `XlsxExport` in `src/lib/ipc.ts` mirrors the field names.
+#[derive(Debug, serde::Serialize)]
+pub struct XlsxExport {
+    pub path: String,
+    /// Cells whose text was cut to Excel's per-cell limit.
+    pub truncated_cells: usize,
+}
+
 pub fn export_to_xlsx(
     headers: &[String],
     rows: &[Vec<String>],
     column_types: &[String],
     dest_dir: &Path,
-) -> Result<String, String> {
+) -> Result<XlsxExport, String> {
     use rust_xlsxwriter::*;
 
     if headers.is_empty() {
@@ -156,6 +186,7 @@ pub fn export_to_xlsx(
 
     let table_headers = dedupe_headers(headers);
 
+    let mut truncated_cells = 0usize;
     for (ri, row) in rows.iter().enumerate() {
         for (ci, val) in row.iter().enumerate() {
             match classify_cell(numeric[ci], val) {
@@ -163,7 +194,15 @@ pub fn export_to_xlsx(
                     ws.write_number((ri + 1) as u32, ci as u16, n).str_err()?;
                 }
                 CellValue::Text => {
-                    ws.write_string((ri + 1) as u32, ci as u16, val).str_err()?;
+                    let text = match truncate_for_excel(val) {
+                        Some(cut) => {
+                            truncated_cells += 1;
+                            cut
+                        }
+                        None => val,
+                    };
+                    ws.write_string((ri + 1) as u32, ci as u16, text)
+                        .str_err()?;
                 }
             }
         }
@@ -193,7 +232,10 @@ pub fn export_to_xlsx(
     let path_str = path.to_string_lossy().to_string();
     wb.save(&path).str_err()?;
 
-    Ok(path_str)
+    Ok(XlsxExport {
+        path: path_str,
+        truncated_cells,
+    })
 }
 
 #[cfg(test)]
@@ -280,11 +322,114 @@ mod tests {
             &["INTEGER".to_string(), "INTEGER".to_string()],
             dir.path(),
         )
-        .unwrap();
+        .unwrap()
+        .path;
 
         assert!(std::path::Path::new(&path).exists());
         // The file lands in the requested destination directory, not temp.
         assert_eq!(std::path::Path::new(&path).parent(), Some(dir.path()));
+    }
+
+    /// Run `sql` in the SQL tab against a small synthetic database and return
+    /// how the export would write each cell of its rows, column type and value
+    /// exactly as the frontend passes them through.
+    fn exported_cells(sql: &str) -> Vec<Vec<CellValue>> {
+        let path = crate::db::util::unique_temp_path("dblitz_export_types", ".sqlite");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);
+                 INSERT INTO users (name) VALUES ('alice'), ('bob'), ('alice');",
+            )
+            .unwrap();
+        }
+        let state = crate::db::DbState::new();
+        crate::db::open_database(&state, path.to_str().unwrap()).unwrap();
+        let result = crate::db::execute_sql(&state, sql);
+        crate::db::close_database(&state);
+        let _ = std::fs::remove_file(&path);
+        assert!(result.error.is_none(), "{sql}: {:?}", result.error);
+        result
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .zip(&result.column_types)
+                    .map(|(value, t)| {
+                        classify_cell(is_numeric_affinity(t), value.as_deref().unwrap_or(""))
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn computed_integer_column_exports_as_number() {
+        // `COUNT(*)` has no declared type. It used to reach the export as "",
+        // which is text, so the counts landed in Excel as text cells that SUM
+        // ignores - while CHANGELOG and three comments said the opposite.
+        let cells = exported_cells(
+            "SELECT name, COUNT(*) AS n, AVG(id) AS mean FROM users GROUP BY name ORDER BY name",
+        );
+        assert_eq!(
+            cells,
+            vec![
+                vec![
+                    CellValue::Text,
+                    CellValue::Number(2.0),
+                    CellValue::Number(2.0)
+                ],
+                vec![
+                    CellValue::Text,
+                    CellValue::Number(1.0),
+                    CellValue::Number(2.0)
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn computed_text_column_that_looks_numeric_stays_text() {
+        // The reason an empty type is not simply treated as numeric: `00123`
+        // written as the number 123 loses the leading zeros. A column mixing
+        // numbers and text stays text as a whole, as does a column with only
+        // NULLs, where nothing is known.
+        let cells = exported_cells(
+            "SELECT '00123' AS code, CASE WHEN id = 1 THEN 'x' ELSE id END AS mixed, \
+             NULL AS blank FROM users ORDER BY id",
+        );
+        for row in &cells {
+            assert_eq!(
+                row,
+                &vec![CellValue::Text, CellValue::Text, CellValue::Text]
+            );
+        }
+        assert_eq!(cells.len(), 3);
+    }
+
+    #[test]
+    fn a_cell_over_excels_limit_is_cut_and_counted_instead_of_failing_the_export() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let headers = vec!["long".to_string(), "short".to_string()];
+        // Multi-byte characters, so a cut by bytes instead of characters would
+        // either panic off a char boundary or keep the wrong length.
+        let long = "\u{e4}".repeat(EXCEL_MAX_CELL_CHARS + 10);
+        let exact = "x".repeat(EXCEL_MAX_CELL_CHARS);
+        let rows = vec![
+            vec![long.clone(), "a".to_string()],
+            vec![exact.clone(), "b".to_string()],
+        ];
+        let export = export_to_xlsx(&headers, &rows, &[], dir.path()).unwrap();
+        assert!(std::path::Path::new(&export.path).exists());
+        assert_eq!(
+            export.truncated_cells, 1,
+            "a cell at exactly the limit fits"
+        );
+        assert_eq!(
+            truncate_for_excel(&long).map(|s| s.chars().count()),
+            Some(EXCEL_MAX_CELL_CHARS)
+        );
+        assert_eq!(truncate_for_excel(&exact), None);
     }
 
     #[test]

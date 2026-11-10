@@ -15,6 +15,7 @@
     updateTableConfig,
   } from "#lib/store.svelte.ts";
   import DataGrid from "./DataGrid.svelte";
+  import { exportNotice } from "./exportNotice";
   import { progressLabel, startProgressPoller } from "./progressPoller";
   import ColumnSettings from "./ColumnSettings.svelte";
   import ColumnFinder from "./ColumnFinder.svelte";
@@ -26,6 +27,7 @@
     applyColumnPreset,
     colorPresetsForTheme,
     orderColumns,
+    reorderColumn,
     removeColumnPreset,
     stableColumnList,
     upsertColumnPreset,
@@ -331,12 +333,12 @@
     const types = data.headers.map((h) =>
       selectedTable ? (appState.tableColumnTypes[selectedTable]?.[h] ?? "") : "",
     );
-    const path = await exportToXlsx({
+    const written = await exportToXlsx({
       headers: data.headers,
       rows: data.rows,
       columnTypes: types,
     });
-    appState.notice = `Excel export written to ${path}`;
+    appState.notice = exportNotice(written);
   }
 
   function getColumnColor(col: string): string {
@@ -385,15 +387,9 @@
 
   function reorderColumns(fromCol: string, toCol: string) {
     if (!selectedTable) return;
-    const cfg = getTableConfig(selectedTable);
-    const order = cfg.column_order.length > 0
-      ? cfg.column_order.filter((c) => columns.includes(c))
-      : [...columns];
-    const fromIdx = order.indexOf(fromCol);
-    const toIdx = order.indexOf(toCol);
-    if (fromIdx < 0 || toIdx < 0) return;
-    order.splice(fromIdx, 1);
-    order.splice(toIdx, 0, fromCol);
+    // See reorderColumn: a column missing from the saved order must drag too.
+    const order = reorderColumn(columns, getTableConfig(selectedTable).column_order, fromCol, toCol);
+    if (!order) return;
     updateTableConfig(selectedTable, (next) => {
       next.column_order = order;
     });
@@ -588,6 +584,7 @@
             setVisibleWindow: virtualRows.setVisibleWindow,
             rowsVersion: virtualRows.cacheVersion,
             viewToken: virtualRows.currentEpoch,
+            countPending,
           }}
           columnColors={visColColors}
           sortColumn={sortColumn}
