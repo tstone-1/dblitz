@@ -402,8 +402,28 @@ describe("run blocks take runner values from the environment", () => {
     // variable, multi-line and one-line forms both.
     const blocks = runBlocks(readText(".github/workflows/release.yml"));
     expect(blocks.filter((b) => b.includes("GITHUB_REF_NAME")).length).toBeGreaterThanOrEqual(6);
-    expect(blocks).toContain('gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"');
+    const publish = blocks.find(block => block.includes('gh release edit "$GITHUB_REF_NAME"'));
+    expect(publish).toContain("set -euo pipefail");
+    expect(publish).toContain("latestRelease{tagName}");
+    expect(publish).toContain('python3 scripts/release-latest.py "$GITHUB_REF_NAME"');
+    expect(publish).toContain('--latest="$latest"');
   });
+});
+
+it("chooses Latest by numeric CalVer and fails closed on an unreadable release", () => {
+  const python = process.platform === "win32" ? "python" : "python3";
+  const run = (response: unknown) => spawnSync(python, ["scripts/release-latest.py", "v26.11.9"], {
+    cwd: root, input: JSON.stringify(response), encoding: "utf8",
+  });
+  for (const [tag, expected] of [[null, "true"], ["v26.11.8", "true"], ["v26.11.9", "true"], ["v26.11.10", "false"]]) {
+    const result = run({ data: { repository: { latestRelease: tag && { tagName: tag } } } });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe(expected);
+  }
+  for (const bad of [{ errors: [{}] }, { data: { repository: {} } },
+    { data: { repository: { latestRelease: { tagName: "invalid" } } } }]) {
+    expect(run(bad).status).not.toBe(0);
+  }
 });
 
 it("keeps an older release retry from replacing a newer Homebrew cask", () => {

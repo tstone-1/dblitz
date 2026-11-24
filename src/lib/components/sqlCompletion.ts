@@ -105,9 +105,12 @@ export function maskLiteralsAndComments(text: string, literalFill = " ", maskIde
       i = end;
     } else if (c === "'" || (maskIdentifiers && (c === '"' || (engine === "sqlite" && (c === '`' || c === "["))))) {
       const endQuote = c === "[" ? "]" : c;
+      const escapes = engine === "duckdb" && c === "'" && /[eE]/.test(text[i - 1] ?? "")
+        && !/[\w$]/.test(text[i - 2] ?? "");
       let j = i + 1;
       while (j < text.length) {
-        if (c !== "[" && text[j] === endQuote && text[j + 1] === endQuote) j += 2;
+        if (escapes && text[j] === "\\") j += 2;
+        else if (c !== "[" && text[j] === endQuote && text[j + 1] === endQuote) j += 2;
         else if (text[j] === endQuote) break;
         else j++;
       }
@@ -120,8 +123,19 @@ export function maskLiteralsAndComments(text: string, literalFill = " ", maskIde
       out += " ".repeat(end - i);
       i = end;
     } else if (c === "/" && text[i + 1] === "*") {
-      const close = text.indexOf("*/", i + 2);
-      const end = close === -1 ? text.length : close + 2;
+      let end = i + 2;
+      let depth = 1;
+      while (end < text.length && depth) {
+        if (text.startsWith("*/", end)) {
+          depth--;
+          end += 2;
+        } else if (engine === "duckdb" && text.startsWith("/*", end)) {
+          depth++;
+          end += 2;
+        } else {
+          end++;
+        }
+      }
       out += text.slice(i, end).replace(/[^\n]/g, " ");
       i = end;
     } else {
@@ -193,12 +207,7 @@ export function tablesInStatement(statement: string, tables: string[]): string[]
   return tables.filter((t) => named.has(t.toLowerCase()));
 }
 
-const NOT_AN_ALIAS = new Set(
-  (
-    "where join left right inner outer full cross natural on using group order having limit " +
-    "offset union except intersect window qualify as set"
-  ).split(" "),
-);
+const CLAUSE_WORDS = "where|join|left|right|inner|outer|full|cross|natural|on|using|group|order|having|limit|offset|union|except|intersect|window|qualify|as|set";
 
 /**
  * Lower-cased qualifier -> table, for every table named after FROM, JOIN or a
@@ -209,15 +218,13 @@ export function qualifiersInStatement(statement: string, tables: string[]): Map<
   const byLower = new Map(tables.map((t) => [t.toLowerCase(), t]));
   const out = new Map<string, string>();
   const masked = maskLiteralsAndComments(statement);
-  const re = new RegExp(String.raw`(?:\bfrom\b|\bjoin\b|,)\s*(${IDENT})(?:\s+(?:as\s+)?(${IDENT}))?`, "gi");
+  const alias = String.raw`(?!(?:${CLAUSE_WORDS})(?![\w$]))(${IDENT})`;
+  const re = new RegExp(String.raw`(?:\bfrom\b|\bjoin\b|,)\s*(${IDENT})(?:\s+(?:as\s+)?${alias})?`, "gi");
   for (const m of masked.matchAll(re)) {
     const table = byLower.get(unquoteIdent(m[1]).toLowerCase());
     if (!table) continue;
     out.set(table.toLowerCase(), table);
-    if (m[2]) {
-      const alias = unquoteIdent(m[2]).toLowerCase();
-      if (!NOT_AN_ALIAS.has(alias)) out.set(alias, table);
-    }
+    if (m[2]) out.set(unquoteIdent(m[2]).toLowerCase(), table);
   }
   // A table named anywhere still qualifies its own columns (`users.id` in a
   // subquery the regex above did not reach).

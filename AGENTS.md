@@ -98,7 +98,7 @@ heading disagree, so rename them in the same commit.
 - *The `Unreleased` heading form is safe here* — release notes are fixed text, never sliced from CHANGELOG; preflight requires a date on the tagged version.
 - *A long release run is not necessarily stuck* — a full run takes about two hours (legs run one at a time); confirm the active job step before treating it as hung.
 - *The draft release needs the numeric `releaseId`* — GitHub's tag lookup returns 404 for a draft, so `tauri-action` takes the id from `create-release`.
-- *Expected `cargo audit` noise* — `audit.yml` runs it weekly and fails outside the documented transitive warnings, listed in the entry and held equal to the workflow by a test. Also npm's unfixable `deepmerge` finding: never `npm audit fix --force`.
+- *Expected `cargo audit` noise* — `audit.yml` runs it weekly and fails outside the documented transitive warnings, listed in the entry and held equal to the workflow by a test.
 - *In-app updater* — the minisign key is the most critical secret; a release without `latest.json` looks green; `max-parallel: 1`; new `AppConfig` fields need `#[serde(default)]`.
 - *Distribution and the Homebrew tap* — a `v*` tag releases and `update-tap` bumps `tstone-1/homebrew-dblitz`; the cask keeps `auto_updates true`.
 - *macOS signing and notarization* — Developer ID shared with `screenpick` (a two-repo rotation); signing gates fail closed; the DMG is notarized separately.

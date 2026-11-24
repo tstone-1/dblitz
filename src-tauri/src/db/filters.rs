@@ -81,12 +81,24 @@ pub(crate) fn discrete_operator(op: &str, fractional: bool, negative: bool) -> O
     }
 }
 
-/// A numeric comparison for a SQLite column without affinity. Text cells
-/// retain the original bound spelling, including any significant spaces.
-fn numeric_comparison(col: &str, op: &str, operand: &str) -> Option<(String, usize)> {
+/// Compare integer cells to an exact decimal bound. Other storage classes
+/// keep the comparison semantics of their column's affinity.
+fn numeric_comparison(
+    col: &str,
+    op: &str,
+    operand: &str,
+    no_affinity: bool,
+) -> Option<(String, usize)> {
     let (whole, fractional, negative) = scaled_parts(operand, 0)?;
     let integer = whole.parse::<i64>().ok();
     if let (false, Some(n)) = (fractional, integer) {
+        if !no_affinity {
+            // SQLite already binds an ordinary integer spelling exactly. A dot
+            // or exponent would instead apply affinity through a double.
+            return operand
+                .contains(['.', 'e', 'E'])
+                .then(|| (format!("{col} {op} {n}"), 0));
+        }
         if op == "=" {
             return Some((format!("({col} = ? OR {col} = {n})"), 1));
         }
@@ -101,6 +113,9 @@ fn numeric_comparison(col: &str, op: &str, operand: &str) -> Option<(String, usi
         }
         _ => "0".into(),
     };
+    if !no_affinity {
+        return Some((format!("((typeof({col}) = 'integer' AND {int_predicate}) OR (typeof({col}) != 'integer' AND {col} {op} ?))"), 1));
+    }
     // CAST uses the same numeric conversion as the stored REAL. The original
     // operand is bound once for each storage class that needs its spelling.
     Some((format!("((typeof({col}) = 'integer' AND {int_predicate}) OR (typeof({col}) = 'real' AND {col} {op} CAST(? AS REAL)) OR (typeof({col}) = 'text' AND {col} {op} ?))"), 2))
@@ -271,7 +286,10 @@ pub(super) fn build_where_clause(
                 Err(e) => return Err(format!("Invalid regex '{}': {}", f.column, e)),
             }
         } else {
-            let no_affinity = has_no_affinity(&columns[idx].col_type);
+            let declared = &columns[idx].col_type;
+            let no_affinity = has_no_affinity(declared);
+            let numeric = super::export::is_numeric_affinity(declared)
+                || declared.trim().eq_ignore_ascii_case("ANY");
             let col_escaped = quote_ident(&f.column);
 
             // Split on semicolon for multi-criteria: exclusions=AND, inclusions=OR
@@ -310,8 +328,8 @@ pub(super) fn build_where_clause(
                             Criterion::Lt(_) => ("<", &mut and_parts, &mut and_params),
                             _ => ("=", &mut or_parts, &mut or_params),
                         };
-                        let (sql, binds) = if no_affinity {
-                            numeric_comparison(&col_escaped, op, rest)
+                        let (sql, binds) = if no_affinity || numeric {
+                            numeric_comparison(&col_escaped, op, rest, no_affinity)
                         } else {
                             None
                         }
@@ -646,21 +664,62 @@ mod tests {
 
     #[test]
     fn exact_decimal_spellings_and_spaces_compare_stored_integers() {
+        for declared in ["", "INTEGER", "NUMERIC"] {
+            let conn = rusqlite::Connection::open_in_memory().unwrap();
+            conn.execute_batch(&format!(
+                "CREATE TABLE t(v {declared});
+                 INSERT INTO t VALUES (2),(9),(9007199254740992),(9007199254740993)"
+            ))
+            .unwrap();
+            let cols = typed_cols(&[("v", declared)]);
+            for (bound, expected) in [
+                ("< 5", vec![1]),
+                ("<9007199254740992.5", vec![1, 2, 3]),
+                ("=9007199254740993", vec![4]),
+                ("=9007199254740993.0", vec![4]),
+                ("=9.007199254740993e15", vec![4]),
+                (">9007199254740992.5", vec![4]),
+            ] {
+                let pred = build_where_clause(&cols, &[filter("v", bound)], "").unwrap();
+                let ids = conn
+                    .prepare(&format!("SELECT rowid FROM t{}", pred.clause))
+                    .unwrap()
+                    .query_map(rusqlite::params_from_iter(&pred.params), |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                assert_eq!(ids, expected, "{declared} {bound}");
+                let count: i64 = conn
+                    .query_row(
+                        &format!("SELECT count(*) FROM t{}", pred.clause),
+                        rusqlite::params_from_iter(&pred.params),
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(count, expected.len() as i64);
+            }
+        }
+    }
+
+    #[test]
+    fn fractional_numeric_bound_preserves_other_storage_classes() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE t(v); INSERT INTO t VALUES (2),(9),(9007199254740992),(9007199254740993)",
-        )
-        .unwrap();
-        let cols = typed_cols(&[("v", "")]);
+        conn.execute_batch("CREATE TABLE t(v INTEGER);
+            INSERT INTO t VALUES (9007199254740992),(9007199254740993),(-1.5),('n/a'),(x'01'),(NULL);
+            CREATE INDEX idx_v ON t(v)").unwrap();
+        let cols = typed_cols(&[("v", "INTEGER")]);
         for (bound, expected) in [
-            ("< 5", vec![1]),
-            ("=9007199254740993.0", vec![4]),
-            ("=9.007199254740993e15", vec![4]),
-            (">9007199254740992.5", vec![4]),
+            (">9007199254740992.5", vec![2, 4, 5]),
+            ("<9007199254740992.5", vec![1, 3]),
         ] {
             let pred = build_where_clause(&cols, &[filter("v", bound)], "").unwrap();
             let ids = conn
-                .prepare(&format!("SELECT rowid FROM t{}", pred.clause))
+                .prepare(&format!(
+                    "SELECT rowid FROM t{} ORDER BY rowid",
+                    pred.clause
+                ))
                 .unwrap()
                 .query_map(rusqlite::params_from_iter(&pred.params), |row| {
                     row.get::<_, i64>(0)
@@ -668,8 +727,17 @@ mod tests {
                 .unwrap()
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
-            assert_eq!(ids, expected, "{bound}");
+            assert_eq!(ids, expected);
         }
+        let pred = build_where_clause(&cols, &[filter("v", "=9007199254740993.0")], "").unwrap();
+        let plan: String = conn
+            .query_row(
+                &format!("EXPLAIN QUERY PLAN SELECT v FROM t{}", pred.clause),
+                rusqlite::params_from_iter(&pred.params),
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("SEARCH") && plan.contains("idx_v"), "{plan}");
     }
 
     #[test]

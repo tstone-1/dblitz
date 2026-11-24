@@ -26,8 +26,8 @@ pub mod bench_api {
     pub use crate::pq::{query_table as parquet_query_table, ParquetSession};
 }
 
-pub(crate) use export::is_duckdb_numeric;
 pub use export::{export_to_xlsx, XlsxExport};
+pub(crate) use export::{is_duckdb_numeric, temporary_export_dir};
 pub(crate) use filters::{
     contains_pattern, discrete_operator, parse_criteria, push_column_criteria, scaled_parts,
     Criterion,

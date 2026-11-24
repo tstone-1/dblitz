@@ -84,20 +84,15 @@ fn comparison(
                     None,
                 );
             }
-            // An on-grid bound already casts exactly. Otherwise bind its nearest
-            // grid point toward zero and use the operator appropriate to its side.
-            let bound = if !fractional {
-                input.to_owned()
+            // DuckDB can reject an in-range exponent spelling before scaling.
+            let scale = usize::from(scale);
+            let padded = format!("{digits:0>width$}", width = scale + 1);
+            let (left, right) = padded.split_at(padded.len() - scale);
+            let sign = if negative { "-" } else { "" };
+            let bound = if right.is_empty() {
+                format!("{sign}{left}")
             } else {
-                let scale = usize::from(scale);
-                let padded = format!("{digits:0>width$}", width = scale + 1);
-                let (left, right) = padded.split_at(padded.len() - scale);
-                let sign = if negative { "-" } else { "" };
-                if right.is_empty() {
-                    format!("{sign}{left}")
-                } else {
-                    format!("{sign}{left}.{right}")
-                }
+                format!("{sign}{left}.{right}")
             };
             return (format!("{q} {op} CAST(? AS {t})"), Some(bound));
         }
@@ -283,6 +278,15 @@ mod tests {
             ("DECIMAL(8,2)", "1.23", "1.24", "=1.234", vec![]),
             ("DECIMAL(8,2)", "1.23", "1.24", "<1.234", vec![1]),
             ("DECIMAL(8,2)", "1.23", "1.24", "=1.23", vec![1]),
+            ("DECIMAL(4,2)", "1.23", "1.24", "=123e-2", vec![1]),
+            ("DECIMAL(4,2)", "1.23", "1.24", "<124e-2", vec![1]),
+            (
+                "DECIMAL(38,18)",
+                "12345678901234567890.123456789012345678",
+                "0",
+                "=12345678901234567890123456789012345678e-18",
+                vec![1],
+            ),
             ("DECIMAL(8,2)", "-1.24", "-1.23", ">-1.234", vec![2]),
             (
                 "DECIMAL(38,2)",
@@ -325,7 +329,7 @@ mod tests {
             w.clause,
             " WHERE (\"n\" >= CAST(? AS DECIMAL(18,4)) AND \"n\" < CAST(? AS DECIMAL(18,4)))"
         );
-        assert_eq!(w.params, ["2", "5"]);
+        assert_eq!(w.params, ["2.0000", "5.0000"]);
     }
 
     #[test]

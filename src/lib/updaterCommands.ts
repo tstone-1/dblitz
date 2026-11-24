@@ -39,6 +39,7 @@ export type DownloadEvent =
  */
 export type PendingUpdate = {
   version: string;
+  close: () => Promise<void>;
   download: (onEvent: (event: DownloadEvent) => void) => Promise<void>;
 };
 
@@ -53,6 +54,7 @@ export async function checkForUpdates(): Promise<PendingUpdate | null> {
 
   return {
     version: update.version,
+    close: () => update.close(),
     download: async (onEvent) => {
       let downloaded = 0;
       let total: number | null = null;

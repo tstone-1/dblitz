@@ -37,6 +37,7 @@ function pending(version = "26.8.0", download?: PendingUpdate["download"]): Pend
   return {
     version,
     download: download ?? vi.fn().mockResolvedValue(undefined),
+    close: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -97,6 +98,19 @@ describe("UpdateState.check", () => {
 
     expect(state.phase.kind).toBe("error");
     expect(state.showBar).toBe(true);
+  });
+
+  it.each(["replacement", "current", "failure"])("closes the old offer on a %s recheck", async outcome => {
+    const state = new UpdateState();
+    const old = pending();
+    const next = pending("26.9.0");
+    checkMock.mockResolvedValueOnce(old);
+    await state.check("manual");
+    if (outcome === "failure") checkMock.mockRejectedValueOnce(new Error("offline"));
+    else checkMock.mockResolvedValueOnce(outcome === "replacement" ? next : null);
+    await state.check("manual");
+    expect(old.close).toHaveBeenCalledOnce();
+    expect(next.close).not.toHaveBeenCalled();
   });
 
   it("ignores a second check while one is in flight", async () => {
@@ -245,6 +259,33 @@ describe("UpdateState.installAndRestart", () => {
 });
 
 describe("UpdateState.scheduleStartupCheck", () => {
+  beforeEach(() => { getPrefMock.mockResolvedValue(true); });
+
+  it.each([false, true])("waits for a delayed preference of %s", async enabled => {
+    vi.useFakeTimers();
+    const preference = Promise.withResolvers<boolean>();
+    getPrefMock.mockReturnValue(preference.promise);
+    checkMock.mockResolvedValue(null);
+    const state = new UpdateState();
+    state.scheduleStartupCheck();
+    await vi.advanceTimersByTimeAsync(STARTUP_CHECK_DELAY_MS);
+    expect(checkMock).not.toHaveBeenCalled();
+    preference.resolve(enabled);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(checkMock).toHaveBeenCalledTimes(enabled ? 1 : 0);
+  });
+
+  it("honors teardown while a preference read is pending after the timer", async () => {
+    vi.useFakeTimers();
+    const preference = Promise.withResolvers<boolean>();
+    getPrefMock.mockReturnValue(preference.promise);
+    const cancel = new UpdateState().scheduleStartupCheck();
+    await vi.advanceTimersByTimeAsync(STARTUP_CHECK_DELAY_MS);
+    cancel();
+    preference.resolve(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(checkMock).not.toHaveBeenCalled();
+  });
   it("evaluates the opt-out when the timer fires, not when it is scheduled", async () => {
     // The preference loads asynchronously over IPC, so at schedule time it is
     // still at its default. Reading it eagerly would check for updates for a
@@ -254,7 +295,7 @@ describe("UpdateState.scheduleStartupCheck", () => {
     const state = new UpdateState();
 
     state.scheduleStartupCheck();
-    state.checkAtStartup = false;
+    await state.setCheckAtStartup(false);
     await vi.advanceTimersByTimeAsync(STARTUP_CHECK_DELAY_MS);
 
     expect(checkMock).not.toHaveBeenCalled();

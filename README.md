@@ -43,8 +43,10 @@ dblitz has it open, dblitz won't see committed-but-uncheckpointed WAL rows, may
 show stale data, and can hit a read error mid-session. dblitz does not
 memory-map the file, so a file that shrinks underneath it — a cloud sync, another
 tool's `VACUUM` — surfaces as "database disk image is malformed" rather than
-killing the process. Close the writing application before opening its database
-in dblitz, or point dblitz at a copy.
+killing the process. Close the writing application and let SQLite checkpoint the
+database before opening or copying the main file. To view a live database, use
+the writer's backup function or run `sqlite3 live.db ".backup snapshot.db"`
+and open the resulting snapshot. The backup includes committed WAL rows.
 
 ### Built for large tables
 
@@ -287,9 +289,10 @@ and in the recent-files dropdown, so PROD and QA stay visually distinct.
   pastes as one cell instead of splitting into extra columns or rows
 - Export the current selection to `.xlsx` using SQLite type-affinity rules;
   integers larger than 2⁵³ are written as strings to preserve precision
-- "Open in Excel" writes the workbook to your OS temp folder by default; pick a
-  different destination under **Settings → Excel Export Folder** (it falls back
-  to temp if that folder later goes missing)
+- "Open in Excel" normally writes to the temporary export folder in dblitz's per-user cache. It cleans
+  up timestamped exports there after seven days. For workbooks you want to keep,
+  choose a destination under **Settings → Excel Export Folder**. Cleanup skips
+  custom folders. A missing destination falls back to the temporary folder.
 
 **Recent files**
 - Up to 10 most-recently-opened databases, each enriched with its tint and label

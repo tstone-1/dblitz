@@ -229,11 +229,13 @@ describe("sqlCompletionSource", () => {
     expect(r.from).toBe("SELECT * FROM ".length);
   });
 
-  it("offers an alias's columns after the dot", () => {
-    const r = complete("SELECT o.|  FROM orders o")!;
-    expect(r.options.map((o) => o.label)).toEqual(["id", "user_id", "total"]);
-    expect(r.from).toBe("SELECT o.".length);
-  });
+  it.each(["FROM orders o", "FROM users JOIN orders AS o ON users.id = o.user_id"])(
+    "offers alias columns after the dot for %s", from => {
+      const r = complete("SELECT o.|  " + from)!;
+      expect(r.options.map((o) => o.label)).toEqual(["id", "user_id", "total"]);
+      expect(r.from).toBe("SELECT o.".length);
+    },
+  );
 
   it("stays quiet inside a string literal and a comment", () => {
     expect(complete("SELECT 'us|'")).toBeNull();

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
+  import { beginClipboardCopy } from "./clipboardTable";
   import {
     getExportDir,
     setExportDir,
@@ -159,7 +160,8 @@
     const path = appState.dbPath;
     if (!path) return;
     try {
-      await navigator.clipboard.writeText(path);
+      const publish = beginClipboardCopy();
+      if (!await publish(() => navigator.clipboard.writeText(path))) return;
     } catch (e) {
       appState.error = `Could not copy the path: ${e}`;
       return;

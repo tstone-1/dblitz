@@ -74,7 +74,7 @@ export class UpdateState {
   checkAtStartup = $state(true);
 
   #pending: PendingUpdate | null = null;
-  #startupTimer: ReturnType<typeof setTimeout> | null = null;
+  #preferenceRevision = 0;
 
   showBar = $derived(
     !this.dismissed &&
@@ -121,7 +121,9 @@ export class UpdateState {
    */
   async loadStartupPreference(): Promise<void> {
     try {
-      this.checkAtStartup = await getCheckForUpdatesOnStartup();
+      const revision = this.#preferenceRevision;
+      const enabled = await getCheckForUpdatesOnStartup();
+      if (revision === this.#preferenceRevision) this.checkAtStartup = enabled;
     } catch (e) {
       console.warn("Could not read the update-check preference:", e);
     }
@@ -129,6 +131,8 @@ export class UpdateState {
 
   /** Persists the opt-out. Applies optimistically so the toggle feels instant. */
   async setCheckAtStartup(enabled: boolean): Promise<void> {
+    const revision = ++this.#preferenceRevision;
+    const previous = this.checkAtStartup;
     this.checkAtStartup = enabled;
     try {
       await setCheckForUpdatesOnStartup(enabled);
@@ -136,32 +140,34 @@ export class UpdateState {
       console.error("Could not save the update-check preference:", e);
       // Snap back rather than leave the UI claiming a preference that didn't
       // persist and won't survive a restart.
-      this.checkAtStartup = !enabled;
+      if (revision === this.#preferenceRevision) this.checkAtStartup = previous;
     }
   }
 
-  /**
-   * Schedules the automatic startup check. Returns a teardown that cancels a
-   * check not yet fired, so a page teardown can't leave a timer running against
-   * a torn-down state object.
-   *
-   * `checkAtStartup` is read when the timer fires, not when it is scheduled:
-   * the preference loads asynchronously over IPC, so at schedule time it is
-   * still sitting at its default `true`, and a snapshot taken here would check
-   * for updates for users who had turned that off.
-   */
+  /** Start both waits at launch. Teardown also cancels a check waiting for disk. */
   scheduleStartupCheck(): () => void {
-    this.#startupTimer = setTimeout(() => {
-      this.#startupTimer = null;
-      if (!this.checkAtStartup) return;
-      void this.check("startup");
+    const preference = this.loadStartupPreference();
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      await preference;
+      if (!cancelled && this.checkAtStartup) await this.check("startup");
     }, STARTUP_CHECK_DELAY_MS);
     return () => {
-      if (this.#startupTimer !== null) {
-        clearTimeout(this.#startupTimer);
-        this.#startupTimer = null;
-      }
+      cancelled = true;
+      clearTimeout(timer);
     };
+  }
+
+  async #discardPending(): Promise<void> {
+    const offer = this.#pending;
+    this.#pending = null;
+    if (offer) {
+      try {
+        await offer.close();
+      } catch (error) {
+        console.warn("Could not close the previous update offer:", error);
+      }
+    }
   }
 
   async check(origin: CheckOrigin): Promise<void> {
@@ -171,6 +177,7 @@ export class UpdateState {
 
     this.phase = { kind: "checking" };
     try {
+      await this.#discardPending();
       const update = await checkForUpdates();
       this.#pending = update;
       if (!update) {
@@ -180,7 +187,6 @@ export class UpdateState {
       this.dismissed = false;
       this.phase = { kind: "available", version: update.version };
     } catch (e) {
-      this.#pending = null;
       if (origin === "startup") {
         // Silent by design: an unreachable endpoint at launch is noise, not a
         // problem the user can act on.
@@ -244,6 +250,7 @@ export class UpdateState {
       }
       await relaunch();
     } catch (e) {
+      await this.#discardPending();
       console.error("Update install failed:", e);
       this.phase = {
         kind: "error",

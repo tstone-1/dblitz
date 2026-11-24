@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  beginClipboardCopy,
   serializeClipboardTable,
   writeClipboardTable,
   type ClipboardTable,
@@ -90,6 +91,17 @@ describe("serializeClipboardTable", () => {
     const { html } = serializeClipboardTable(null, [["a\tb", "c"]]);
     expect(html.match(/<td/g)).toHaveLength(2);
   });
+});
+
+it("finishes an in-flight clipboard write before publishing the newest copy", async () => {
+  const done = Promise.withResolvers<void>();
+  const writes: string[] = [];
+  const first = beginClipboardCopy()(async () => { await done.promise; writes.push("first"); });
+  const second = beginClipboardCopy()(async () => { writes.push("second"); });
+  const third = beginClipboardCopy()(async () => { writes.push("third"); });
+  done.resolve();
+  expect(await Promise.all([first, second, third])).toEqual([false, false, true]);
+  expect(writes).toEqual(["first", "third"]);
 });
 
 describe("writeClipboardTable", () => {

@@ -64,10 +64,7 @@
     // Resolves the running version, whether this launch follows an update, and
     // whether this install can replace itself at all.
     void update.loadStatus();
-    void update.loadStartupPreference();
-    // Fires ~10s from now and re-reads the opt-out at that point, not here: the
-    // preference load above is asynchronous, so a snapshot taken now would still
-    // see the default and check for a user who had turned that off.
+    // The automatic check waits for both the saved preference and the startup delay.
     const teardownUpdateCheck = update.scheduleStartupCheck();
 
     function onKeyDown(e: KeyboardEvent) {

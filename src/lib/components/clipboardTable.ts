@@ -27,6 +27,29 @@
  * rows and columns that were selected.
  */
 
+let latestCopy = 0;
+let pendingWrite: Promise<void> | null = null;
+
+/** Claim the clipboard when the user clicks, before any selected rows load. */
+export function beginClipboardCopy() {
+  const request = ++latestCopy;
+  return async (write: () => Promise<void>): Promise<boolean> => {
+    if (pendingWrite) await pendingWrite.catch(() => {});
+    if (request !== latestCopy) return false;
+    const writing = write();
+    pendingWrite = writing;
+    try {
+      await writing;
+      return request === latestCopy;
+    } catch (error) {
+      if (request === latestCopy) throw error;
+      return false;
+    } finally {
+      if (pendingWrite === writing) pendingWrite = null;
+    }
+  };
+}
+
 export interface ClipboardTable {
   text: string;
   html: string;

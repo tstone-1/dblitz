@@ -107,7 +107,7 @@ pub(crate) fn clear_recent_files() -> Result<(), String> {
 }
 
 /// Returns the configured Excel-export folder, or `None` when exports go to the
-/// OS temp directory (the default).
+/// application's temporary export directory.
 #[tauri::command(async)]
 pub(crate) fn get_export_dir() -> Option<String> {
     config::get_export_dir()
@@ -284,7 +284,7 @@ pub(crate) fn export_to_xlsx(
             }
         }
     }
-    let dest_dir = config::resolve_export_dir();
+    let dest_dir = config::resolve_export_dir().err_ctx("opening the Excel export folder")?;
     let export =
         db::export_to_xlsx(&headers, &rows, &types, &dest_dir).err_ctx("exporting to Excel")?;
     // Open with default application via opener plugin (safe, cross-platform)

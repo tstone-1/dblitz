@@ -18,6 +18,8 @@
   type-checking against a newer API surface than the runtime CI ships on passes
   locally and fails at runtime. Bump `.nvmrc` and `@types/node` together.
 - **Rust** (latest stable via [rustup](https://rustup.rs/))
+- **Python 3** on PATH as `python` on Windows or `python3` on macOS and Linux.
+  The frontend test suite uses it to exercise the release workflow.
 - **ripgrep** (`rg`) for release checklist verification commands
 - **Windows**: Visual Studio Build Tools with "Desktop development with C++" workload
 
@@ -810,8 +812,8 @@ locally — CI does. `npx tauri build` is only for a local desktop artifact.
 > `Cargo.lock` update; the release legs were not affected. Full account in
 > `docs/agent-notes.md`.)
 
-> **Gotcha — transient `publish`-job cancellation.** The `publish` job (a
-> one-line `gh release edit --draft=false`) is occasionally **cancelled** by a
+> **Transient publish-job cancellation.** The job that verifies the manifest and
+> publishes the draft is occasionally **cancelled** by a
 > GitHub Actions infra flake even when all five build legs succeed; `update-tap`
 > then shows `skipped` and the release is left as a draft with all assets
 > present. This is not a code failure. Re-run just the tail jobs — the builds are
@@ -877,9 +879,11 @@ To overwrite a pre-existing non-brew install, use `brew install --cask --force d
           spctl -a -vvv -t open --context context:primary-signature "$d"
         done   # expect "source=Notarized Developer ID" for each
         ```
-  - [ ] App launches from a *quarantined* copy without the "damaged" error —
-        the notarization payoff. Mount the downloaded DMG and open it, rather
-        than testing the brew-installed copy: `open -a dblitz`
+  - [ ] Mount the downloaded, quarantined DMG. Quit any running copy and launch the
+        bundle by its full path with `open -n "/Volumes/<mounted volume>/dblitz.app"`.
+        In Activity Monitor, inspect dblitz under **Open Files and Ports** and verify
+        the executable belongs to the mounted bundle. Confirm it opens without a
+        "damaged" error.
   - [ ] After opening a database, it appears in the Dock icon's right-click **Recent** menu and **File → Open Recent** (`NSDocumentController`, added 26.7.1)
 
 ## Quick Reference

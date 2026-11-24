@@ -4,7 +4,7 @@
   import { createDragReorder } from "./dragReorder.svelte";
   import { buildSelectionData, type SelectionData } from "./selectionData";
   import type { RowCountState } from "./browseQuery.svelte";
-  import { serializeClipboardTable, writeClipboardTable } from "./clipboardTable";
+  import { beginClipboardCopy, serializeClipboardTable, writeClipboardTable } from "./clipboardTable";
   import { buildSelectionStats, DEFAULT_MAX_STATS_ROWS } from "./selectionStats";
   import {
     buildGridTemplate,
@@ -326,8 +326,12 @@
     }, STATS_DEBOUNCE_MS);
   });
 
+  const statFormat = new Intl.NumberFormat(undefined, { maximumSignificantDigits: 15 });
+  const smallStatFormat = new Intl.NumberFormat(undefined, { notation: "scientific", maximumSignificantDigits: 15 });
+
   function fmtNum(n: number): string {
-    return Number.isInteger(n) ? n.toLocaleString() : n.toLocaleString(undefined, { maximumFractionDigits: 6 });
+    if (Number.isInteger(n)) return n.toLocaleString();
+    return (Math.abs(n) < 1e-6 ? smallStatFormat : statFormat).format(n);
   }
 
   // Context menu
@@ -364,6 +368,7 @@
   let copyRequest = 0;
   async function copySelection(withHeaders: boolean) {
     const request = ++copyRequest;
+    const publish = beginClipboardCopy();
     copying = true;
     try {
       const data = await materializeSelection();
@@ -371,11 +376,11 @@
       // Serialization is delegated because it is not a join: a cell holding a
       // tab or a newline used to become extra spreadsheet columns or rows while
       // the copy reported success. See clipboardTable.ts.
-      await writeClipboardTable(
+      const copied = await publish(() => writeClipboardTable(
         serializeClipboardTable(withHeaders ? data.headers : null, data.rows),
         navigator.clipboard,
-      );
-      if (request !== copyRequest) return;
+      ));
+      if (!copied) return;
       if (data.truncated) {
         onNotice?.(`Selection copied with the first ${data.rows.length.toLocaleString()} selected row(s) only.`);
       }
@@ -482,7 +487,8 @@
   async function copyColumnName(col: string) {
     closeHeaderCtx();
     try {
-      await navigator.clipboard.writeText(col);
+      const publish = beginClipboardCopy();
+      await publish(() => navigator.clipboard.writeText(col));
     } catch (e) {
       onError?.(String(e));
     }

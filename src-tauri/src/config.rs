@@ -218,7 +218,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub recent_files: Vec<String>,
     /// Directory into which "Open in Excel" exports are written. `None` means
-    /// use the OS temp directory (the historical default).
+    /// use the application's temporary export directory.
     #[serde(default)]
     pub export_dir: Option<String>,
     /// Whether to check GitHub for a new release shortly after launch. On by
@@ -470,8 +470,7 @@ impl ConfigStore {
         self.save_app_config(&config)
     }
 
-    /// Returns the configured Excel-export directory, or `None` when unset (the
-    /// caller should then fall back to the OS temp dir — see [`ConfigStore::resolve_export_dir`]).
+    /// Returns the configured folder, or `None` for the temporary export directory.
     pub fn get_export_dir(&self) -> Option<String> {
         self.load_app_config().export_dir
     }
@@ -488,21 +487,20 @@ impl ConfigStore {
 
     /// Resolve the directory exports should be written to. Returns the
     /// configured directory when it is set and currently exists as a directory;
-    /// otherwise falls back to the OS temp dir. The fallback keeps "Open in
+    /// otherwise falls back to the temporary export directory. This keeps "Open in
     /// Excel" working if the chosen folder was deleted, renamed, or lives on an
     /// unmounted drive.
-    pub fn resolve_export_dir(&self) -> PathBuf {
-        match self.get_export_dir() {
-            Some(dir) => {
-                let p = PathBuf::from(&dir);
-                if p.is_dir() {
-                    p
-                } else {
-                    warn!(dir = %dir, "Configured export directory missing, using temp dir");
-                    std::env::temp_dir()
-                }
+    pub fn resolve_export_dir(&self) -> Result<PathBuf, String> {
+        if let Some(dir) = self.get_export_dir() {
+            let path = PathBuf::from(&dir);
+            if path.is_dir() {
+                return Ok(path);
             }
-            None => std::env::temp_dir(),
+            warn!(dir = %dir, "Configured export directory missing, using temp dir");
+        }
+        match dirs::cache_dir() {
+            Some(cache) => crate::db::temporary_export_dir(&cache),
+            None => Ok(std::env::temp_dir()), // No per-user cache: write only, without cleanup.
         }
     }
 
@@ -590,7 +588,7 @@ pub fn set_export_dir(export_dir: Option<String>) -> Result<(), String> {
     ConfigStore::os_default().set_export_dir(export_dir)
 }
 
-pub fn resolve_export_dir() -> PathBuf {
+pub fn resolve_export_dir() -> Result<PathBuf, String> {
     ConfigStore::os_default().resolve_export_dir()
 }
 

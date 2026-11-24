@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { EditorState } from "@codemirror/state";
 import {
   blockReasonFor,
+  editorEngine,
+  runnableRange,
   diagnosticFor,
   editDistance,
   missingName,
@@ -27,6 +30,22 @@ const DUCK_FUNCTION =
 const DUCK_QUALIFIED =
   'Binder Error: Values list "d" does not have a column named "nosuch"\n\nLINE 1: SELECT d.nosuch FROM data d\n               ^^^^^^^^';
 const DUCK_SYNTAX = 'Parser Error: syntax error at or near "SELEC"\n\nLINE 1: SELEC 1\n        ^^^^^';
+
+it("keeps DuckDB comments and escaped strings inside the statement Execute selects", () => {
+  function at(doc: string, cursor: string, engine: "duckdb" | "sqlite" = "duckdb") {
+    const state = EditorState.create({
+      doc, selection: { anchor: doc.indexOf(cursor) }, extensions: [editorEngine.of(() => engine)],
+    });
+    return runnableRange(state).text;
+  }
+  const nested = "SELECT 1 /* outer /* inner */ ; SELECT 99; */; SELECT 2";
+  expect(at(nested, "99")).toBe("SELECT 1");
+  expect(at(nested, "SELECT 2")).toBe("SELECT 2");
+  expect(at(nested, "99", "sqlite")).toBe("SELECT 99");
+  const escaped = String.raw`SELECT E'it\'s; fine'`;
+  expect(at(escaped + "; SELECT 2", "fine")).toBe(escaped);
+  expect(at(escaped + "; SELECT 2", "SELECT 2")).toBe("SELECT 2");
+});
 
 describe("summarizeMessage", () => {
   it("drops DuckDB's LINE excerpt and keeps the rest", () => {

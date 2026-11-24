@@ -1,9 +1,7 @@
 use super::util::StrErr;
 use std::path::Path;
 
-/// Prefix every "Open in Excel" workbook is written with (see [`export_to_xlsx`]).
-/// The cleanup sweep only ever touches files carrying exactly this prefix and
-/// the `.xlsx` extension, so nothing else in the export directory is at risk.
+/// Prefix for workbooks written by Open in Excel.
 const EXPORT_PREFIX: &str = "dblitz_export_";
 
 /// Age past which a previously-exported workbook is eligible for the cleanup
@@ -11,16 +9,13 @@ const EXPORT_PREFIX: &str = "dblitz_export_";
 /// working day is never yanked out from under them.
 const EXPORT_RETENTION: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
 
-/// Best-effort removal of stale `dblitz_export_*.xlsx` files in `dir`. Every
-/// "Open in Excel" drops a fresh timestamped workbook and nothing ever
-/// reclaimed them, so the export directory grew without bound. Only files whose
-/// name carries the exact [`EXPORT_PREFIX`] and `.xlsx` extension this module
-/// writes are ever considered - no other file in the directory is touched.
-///
-/// Every step is deliberately fallible-and-ignored: a workbook the user still
-/// has open in Excel is locked on Windows, and silently skipping it is the
-/// desired behavior, not a failure worth surfacing. A directory that can't even
-/// be read just yields no sweep.
+/// Only the default temporary destination is eligible for cleanup.
+pub(crate) fn temporary_export_dir(cache_root: &Path) -> Result<std::path::PathBuf, String> {
+    let dir = cache_root.join("dblitz").join("exports");
+    std::fs::create_dir_all(&dir).str_err()?;
+    sweep_stale_exports(&dir);
+    Ok(dir)
+}
 fn sweep_stale_exports(dir: &Path) {
     let now = std::time::SystemTime::now();
     let entries = match std::fs::read_dir(dir) {
@@ -32,7 +27,10 @@ fn sweep_stale_exports(dir: &Path) {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if !(name.starts_with(EXPORT_PREFIX) && name.ends_with(".xlsx")) {
+        let timestamp = name
+            .strip_prefix(EXPORT_PREFIX)
+            .and_then(|s| s.strip_suffix(".xlsx"));
+        if !timestamp.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())) {
             continue;
         }
         let stale = entry
@@ -90,8 +88,8 @@ pub(crate) fn is_duckdb_numeric(t: &str) -> bool {
         )
 }
 
-/// Largest absolute integer that an f64 can represent exactly. Integers beyond
-/// this lose precision when stored as a number, so we emit them as text.
+/// Every integer through this magnitude is exactly representable as f64.
+/// Export larger integers as text to preserve all digits.
 const F64_EXACT_INT: i64 = 1i64 << 53;
 
 /// How a cell value should be written to the worksheet.
@@ -145,9 +143,15 @@ fn dedupe_headers(headers: &[String]) -> Vec<String> {
     let mut used: HashSet<String> = HashSet::with_capacity(headers.len());
     headers
         .iter()
-        .map(|header| {
+        .enumerate()
+        .map(|(index, header)| {
+            let header = if header.is_empty() {
+                format!("Column{}", index + 1)
+            } else {
+                header.clone()
+            };
             if used.insert(header.to_lowercase()) {
-                return header.clone();
+                return header;
             }
             // Keep bumping the suffix until it lands on a name nothing else
             // has claimed - a straight `_{count}` collided when a later
@@ -257,10 +261,6 @@ pub fn export_to_xlsx(
         .set_columns(&columns);
     ws.add_table(0, 0, last_row, last_col, &table).str_err()?;
     ws.autofit();
-
-    // Reclaim old exports before writing the new one. Best-effort: a failure
-    // here must never block the export the user actually asked for.
-    sweep_stale_exports(dest_dir);
 
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -421,6 +421,14 @@ mod tests {
         let rows = vec![vec!["a".to_string(), "b".to_string()]];
         let err = export_to_xlsx(&headers, &rows, &[], &std::env::temp_dir()).unwrap_err();
         assert!(err.contains("more cells than headers"), "got: {err}");
+    }
+
+    #[test]
+    fn empty_header_uses_its_positional_name_before_deduplication() {
+        let headers = vec![String::new(), "Column1".to_owned()];
+        assert_eq!(dedupe_headers(&headers), ["Column1", "Column1_2"]);
+        let dir = tempfile::tempdir().unwrap();
+        export_to_xlsx(&headers, &[vec!["1".into(), "2".into()]], &[], dir.path()).unwrap();
     }
 
     #[test]
@@ -600,36 +608,37 @@ mod tests {
     }
 
     #[test]
-    fn sweep_removes_only_stale_export_files() {
-        use std::time::{Duration, SystemTime};
-
-        let dir = tempfile::TempDir::new().unwrap();
-        let stale = dir.path().join("dblitz_export_111.xlsx");
-        let fresh = dir.path().join("dblitz_export_222.xlsx");
-        let wrong_ext = dir.path().join("dblitz_export_333.txt");
-        let unrelated = dir.path().join("quarterly_report.xlsx");
-        for p in [&stale, &fresh, &wrong_ext, &unrelated] {
-            std::fs::write(p, b"x").unwrap();
+    fn cleanup_is_confined_to_generated_names_in_the_temporary_export_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let managed = temporary_export_dir(temp.path()).unwrap();
+        let custom = tempfile::tempdir().unwrap();
+        let generated = "dblitz_export_123.xlsx";
+        let renamed = "dblitz_export_reviewed.xlsx";
+        let old =
+            std::time::SystemTime::now() - EXPORT_RETENTION - std::time::Duration::from_secs(60);
+        for dir in [managed.as_path(), custom.path()] {
+            for name in [generated, renamed, "dblitz_export_333.txt", "report.xlsx"] {
+                std::fs::File::create(dir.join(name))
+                    .unwrap()
+                    .set_modified(old)
+                    .unwrap();
+            }
         }
-
-        // Backdate only the stale export past the retention window. The others
-        // keep their just-now mtime.
-        let old = SystemTime::now() - EXPORT_RETENTION - Duration::from_secs(60);
-        let handle = std::fs::File::options().write(true).open(&stale).unwrap();
-        handle.set_modified(old).unwrap();
-        drop(handle);
-
-        sweep_stale_exports(dir.path());
-
-        assert!(!stale.exists(), "a stale dblitz export must be swept");
-        assert!(fresh.exists(), "a recent dblitz export must be kept");
-        assert!(
-            wrong_ext.exists(),
-            "a non-.xlsx file must never be swept, even with the export prefix"
-        );
-        assert!(
-            unrelated.exists(),
-            "a file without the dblitz_export_ prefix must never be swept"
-        );
+        std::fs::File::create(managed.join("dblitz_export_456.xlsx")).unwrap();
+        let store = crate::config::ConfigStore::new(temp.path().join("config"));
+        store
+            .set_export_dir(Some(custom.path().to_str().unwrap().into()))
+            .unwrap();
+        let dest = store.resolve_export_dir().unwrap();
+        assert_eq!(dest, custom.path());
+        export_to_xlsx(&["v".into()], &[vec!["1".into()]], &[], &dest).unwrap();
+        temporary_export_dir(temp.path()).unwrap();
+        assert!(!managed.join(generated).exists());
+        assert!(managed.join("dblitz_export_456.xlsx").exists());
+        assert!(custom.path().join(generated).exists());
+        for name in [renamed, "dblitz_export_333.txt", "report.xlsx"] {
+            assert!(managed.join(name).exists());
+            assert!(custom.path().join(name).exists());
+        }
     }
 }

@@ -763,7 +763,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # Every build matrix leg succeeded (needs: build), so the release now
         # has artifacts for every platform - flip it from draft to published.
-        run: gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"
+        run: |
+          set -euo pipefail
+          latest=$(gh api graphql \
+            -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){latestRelease{tagName}}}' \
+            -f owner="$GITHUB_REPOSITORY_OWNER" -f name="${GITHUB_REPOSITORY#*/}" \
+            | python3 scripts/release-latest.py "$GITHUB_REF_NAME")
+          gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY" --latest="$latest"
 
   update-tap:
     needs: publish
