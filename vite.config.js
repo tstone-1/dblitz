@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defaultClientConditions, defineConfig } from "vite";
 import adapter from "@sveltejs/adapter-static";
 import { sveltekit } from "@sveltejs/kit/vite";
 import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
@@ -11,6 +11,11 @@ export default defineConfig(async () => ({
   // Tauri has no Node.js server for SSR, so adapter-static prerenders the app
   // (SSG). See https://v2.tauri.app/start/frontend/sveltekit/
   plugins: [sveltekit({ adapter: adapter(), preprocess: vitePreprocess() })],
+  // Component tests run in jsdom. Resolve Svelte's browser lifecycle in
+  // Vitest's client environment while leaving Node tests on server conditions.
+  environments: process.env.VITEST
+    ? { client: { resolve: { conditions: [...defaultClientConditions] } } }
+    : undefined,
   test: {
     environment: "node",
     include: ["src/**/*.test.ts"],

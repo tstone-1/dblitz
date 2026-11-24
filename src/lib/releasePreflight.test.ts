@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,7 @@ import {
   cargoPackageName,
   cargoPackageVersion,
   checkReleaseContract,
+  checkVersionFiles,
   readReleaseFiles,
 } from "../../scripts/release-preflight.mjs";
 
@@ -119,9 +120,10 @@ describe("release preflight", () => {
   });
 
   it("rejects a tag that is not CalVer YY.M.MICRO", () => {
-    for (const tag of ["v1.2.3", "26.8.2", "vlatest", "v2026.8.2"]) {
-      expect(checkReleaseContract({ tag, ...consistentFiles("26.8.2") })).not.toEqual([]);
+    for (const tag of ["v1.2.3", "26.8.2", "vlatest", "v2026.8.2", "v26.21.0", "v26.00.0", "v26.08.1"]) {
+      expect(checkReleaseContract({ tag, ...consistentFiles(tag.replace(/^v/, "")) })).not.toEqual([]);
     }
+    expect(checkReleaseContract({ tag: "v26.12.0", ...consistentFiles("26.12.0") })).toEqual([]);
   });
 
   it("reads the [package] version, not a dependency's", () => {
@@ -168,13 +170,13 @@ describe("release preflight", () => {
     expect(cargoPackageName('[dependencies]\nname = "nope"\n')).toBe(null);
   });
 
-  it("passes against this repository's own files at its declared version", () => {
+  it("keeps the repository's version files in agreement throughout the release cycle", () => {
     // Guards the check itself against drifting away from the real file layout:
     // a renamed key or moved file would make every synthetic test above pass
     // while the CI gate answered "missing" for everything.
     const files = readReleaseFiles(root, readText);
     const version = JSON.parse(files.packageJson).version as string;
-    expect(checkReleaseContract({ tag: `v${version}`, ...files })).toEqual([]);
+    expect(checkVersionFiles(version, files)).toEqual([]);
   });
 });
 
@@ -201,7 +203,7 @@ describe("release workflow wires the preflight in", () => {
  * is already a symlink). The temp dir below has both.
  */
 describe("the preflight CLI actually runs from an awkward path", () => {
-  function runCopyIn(dir: string, tag: string) {
+  function runCopyIn(dir: string, tag: string, changelog?: string) {
     mkdirSync(join(dir, "scripts"));
     mkdirSync(join(dir, "src-tauri"));
     for (const f of [
@@ -214,6 +216,7 @@ describe("the preflight CLI actually runs from an awkward path", () => {
     ]) {
       copyFileSync(join(root, f), join(dir, f));
     }
+    if (changelog !== undefined) writeFileSync(join(dir, "CHANGELOG.md"), changelog);
     const script = join(dir, "scripts", "release-preflight.mjs");
     copyFileSync(join(root, "scripts/release-preflight.mjs"), script);
     return spawnSync(process.execPath, [script, tag], { encoding: "utf8" });
@@ -236,7 +239,7 @@ describe("the preflight CLI actually runs from an awkward path", () => {
     const version = (JSON.parse(readText(join(root, "package.json"))) as { version: string }).version;
     const dir = mkdtempSync(join(tmpdir(), "preflight gate "));
     try {
-      const run = runCopyIn(dir, `v${version}`);
+      const run = runCopyIn(dir, `v${version}`, consistentFiles(version).changelog);
       expect(run.status).toBe(0);
       expect(run.stdout).toContain("[OK] Release preflight");
     } finally {

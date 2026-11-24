@@ -1,3 +1,6 @@
+import type { Theme } from "#lib/store.svelte.ts";
+import { columnColorForTheme } from "./columnView";
+
 // Extract the primary (first top-level) table name from a SQL query so the
 // Execute SQL grid can reuse the column colors saved for that table in Browse
 // Data. This is a deliberately lightweight scanner, not a full SQL parser:
@@ -236,6 +239,7 @@ export function resolveResultColumnColors(params: {
   sql: string;
   columns: string[];
   tableNames: string[];
+  theme: Theme;
   getColumnColors: (table: string) => Record<string, string>;
 }): Record<string, string> {
   const { sql, columns, tableNames, getColumnColors } = params;
@@ -252,7 +256,7 @@ export function resolveResultColumnColors(params: {
   const saved = getColumnColors(canonical);
   const map: Record<string, string> = {};
   for (const col of columns) {
-    if (saved[col]) map[col] = saved[col];
+    if (saved[col]) map[col] = columnColorForTheme(saved[col], params.theme);
   }
   return map;
 }

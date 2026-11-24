@@ -42,9 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&dir)?;
     let pq_path = Path::new(&dir).join(format!("data-{rows}.parquet"));
     let db_path = Path::new(&dir).join(format!("data-{rows}.sqlite"));
-    if !pq_path.exists() || !db_path.exists() {
-        generate(&pq_path, &db_path, rows)?;
-    }
+    prepare_fixtures(&pq_path, &db_path, rows)?;
     let pq_str = pq_path.to_str().expect("UTF-8 path");
     let db_str = db_path.to_str().expect("UTF-8 path");
     println!(
@@ -174,6 +172,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn prepare_fixtures(pq: &Path, db: &Path, rows: i64) -> Result<(), Box<dyn std::error::Error>> {
+    match (pq.try_exists()?, db.try_exists()?) {
+        (true, true) => return Ok(()),
+        (false, false) => {}
+        _ => {
+            return Err(
+                "Incomplete benchmark pair. Use a fresh directory or restore the missing file."
+                    .into(),
+            )
+        }
+    }
+    let staging = tempfile::tempdir_in(db.parent().expect("benchmark directory"))?;
+    let parquet = staging.path().join("benchmark.parquet");
+    let sqlite = staging.path().join("benchmark.sqlite");
+    generate(&parquet, &sqlite, rows)?;
+    // Publish complete files without replacing a destination created during generation.
+    std::fs::hard_link(parquet, pq)?;
+    std::fs::hard_link(sqlite, db)?;
+    Ok(())
+}
+
 fn generate(pq: &Path, db: &Path, rows: i64) -> Result<(), Box<dyn std::error::Error>> {
     let t = Instant::now();
     let duck = duckdb::Connection::open_in_memory()?;
@@ -197,7 +216,6 @@ fn generate(pq: &Path, db: &Path, rows: i64) -> Result<(), Box<dyn std::error::E
     println!("Parquet written in {:.1} s", t.elapsed().as_secs_f64());
 
     let t = Instant::now();
-    let _ = std::fs::remove_file(db);
     let mut lite = rusqlite::Connection::open(db)?;
     lite.execute_batch(
         "PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;
@@ -302,4 +320,53 @@ fn gb(p: &Path) -> f64 {
 
 fn ms(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_partial_pair_is_preserved_in_either_direction() {
+        for sqlite_exists in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = dir.path().join("data.sqlite");
+            let pq = dir.path().join("data.parquet");
+            let (present, missing) = if sqlite_exists {
+                (&db, &pq)
+            } else {
+                (&pq, &db)
+            };
+            std::fs::write(present, b"original").unwrap();
+            assert!(prepare_fixtures(&pq, &db, 10)
+                .unwrap_err()
+                .to_string()
+                .contains("Incomplete"));
+            assert_eq!(std::fs::read(present).unwrap(), b"original");
+            assert!(!missing.exists());
+        }
+    }
+
+    #[test]
+    fn a_new_pair_contains_all_rows_and_can_be_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("data.sqlite");
+        let pq = dir.path().join("data.parquet");
+        prepare_fixtures(&pq, &db, 10).unwrap();
+        prepare_fixtures(&pq, &db, 5).unwrap();
+        let sqlite = rusqlite::Connection::open(db).unwrap();
+        let count: i64 = sqlite
+            .query_row("SELECT count(*) FROM data", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 10);
+        let duck = duckdb::Connection::open_in_memory().unwrap();
+        let count: i64 = duck
+            .query_row(
+                "SELECT count(*) FROM read_parquet(?)",
+                [pq.to_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 10);
+    }
 }

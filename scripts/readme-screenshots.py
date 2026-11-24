@@ -3,6 +3,7 @@
 1. Build the demo database and copy it to a neutral path, because the toolbar
    shows the full path and it lands in every image:
        uv run scripts/make-demo-db.py C:/demo/roastery.sqlite
+       To regenerate that fixture, pass --replace.
 2. Start Vite (`npm run dev`) and a debug build with CDP enabled:
        $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222'
        $env:WEBVIEW2_USER_DATA_FOLDER = "$env:TEMP\\dblitz-shots-udf"

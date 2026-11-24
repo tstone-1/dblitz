@@ -22,10 +22,11 @@
   import { createPinnedFilters } from "./pinnedFilters.svelte";
   import { createAutoSelectFirstTable } from "./autoSelectFirstTable.svelte";
   import { createDbGenerationReset } from "./dbGenerationReset.svelte";
-  import { createBrowseQuery } from "./browseQuery.svelte";
+  import { createBrowseQuery, type RowCountState } from "./browseQuery.svelte";
   import {
     applyColumnPreset,
     colorPresetsForTheme,
+    columnColorForTheme,
     orderColumns,
     reorderColumn,
     removeColumnPreset,
@@ -69,7 +70,7 @@
       progress = null;
     };
   });
-  let countPending = $state(false);
+  let countState = $state<RowCountState>("known");
   let showColumnSettings = $state(false);
   let showFinder = $state(false);
   // Bumping `n` re-triggers the locate effect inside DataGrid even when the
@@ -79,24 +80,16 @@
 
   // Auto-select the lone table when opening a single-table DB. The helper
   // owns the "did we already auto-select for this open?" bookkeeping.
-  // `onReset` is not belt-and-braces: closing a database does not bump
-  // dbOpenGeneration, so this is the ONLY thing that clears the view when
-  // dbPath goes null.
-  const checkAutoSelect = createAutoSelectFirstTable(
-    (name) => {
-      sidebarCollapsed = true;
-      selectTable(name);
-    },
-    () => resetForNewDatabase(),
-  );
+  const checkAutoSelect = createAutoSelectFirstTable((name) => {
+    sidebarCollapsed = true;
+    selectTable(name);
+  });
 
   // BrowseData used to keep selectedTable/columns/totalRows/the row
   // cache alive across a Toolbar-driven openDatabase() call (Open DB /
   // recents), so switching to a different database left the grid showing
   // (and querying) the PREVIOUS database's table. Reset every per-database
-  // local state whenever a new backend session is published. The close-to-null
-  // case is covered separately: checkAutoSelect() fires onReset (->
-  // resetForNewDatabase) whenever dbPath becomes null.
+  // local state as soon as the backend swaps or closes the session.
   const checkDbReset = createDbGenerationReset({
     getGeneration: () => appState.dbOpenGeneration,
     onReset: () => resetForNewDatabase(),
@@ -188,7 +181,7 @@
     getSortAsc: () => sortAsc,
     setSortAsc: (value) => { sortAsc = value; },
     setLoading: (value) => { loading = value; },
-    setCountPending: (value) => { countPending = value; },
+    setCountState: (value) => { countState = value; },
     setError: (message) => { appState.error = message; },
     getVisibleColumns: () => visColsList,
     getColumnIndex: (col) => colIndexMap.get(col),
@@ -228,7 +221,7 @@
     // session then starts with the spinner stuck on until some later reload
     // happens to finish.
     loading = false;
-    countPending = false;
+    countState = "known";
     columnFilters = {};
     globalFilter = "";
     sortColumn = null;
@@ -343,7 +336,7 @@
 
   function getColumnColor(col: string): string {
     if (!selectedTable) return "";
-    return getTableConfig(selectedTable).column_colors[col] || "";
+    return columnColorForTheme(getTableConfig(selectedTable).column_colors[col] || "", appState.theme);
   }
 
   function handleFilterInput(col: string, value: string) {
@@ -467,8 +460,8 @@
             <input
               type="text"
               placeholder="Global filter (all columns)..."
-              bind:value={globalFilter}
-              oninput={debouncedReload}
+              value={globalFilter}
+              oninput={(e) => { globalFilter = e.currentTarget.value; debouncedReload(); }}
               class="global-filter"
             />
             <button
@@ -524,7 +517,7 @@
                 </tbody></table>
                 <div class="help-divider"></div>
                 <div class="help-hint">Toggle <code>.*</code> for regex mode</div>
-                <div class="help-hint">Empty (NULL) cells are excluded by any active filter</div>
+                <div class="help-hint">Column filters skip NULL cells. Regex filters treat NULL as empty text.</div>
               </div>
             {/if}
           </div>
@@ -542,7 +535,13 @@
             <span>Find column</span>
             <kbd class="kbd-hint">{modKey}+Shift+F</kbd>
           </button>
-          <span class="row-info">{countPending ? 'counting...' : `${totalRows.toLocaleString()} rows`}</span>
+          <span class="row-info">
+            {#if countState === "failed"}
+              Row count unavailable <button onclick={() => void reloadData()}>Retry</button>
+            {:else}
+              {countState === "pending" ? "counting..." : `${totalRows.toLocaleString()} rows`}
+            {/if}
+          </span>
           {#if loading}<span class="loading-indicator">{progressLabel(progress)}</span>{/if}
         </div>
 
@@ -584,7 +583,7 @@
             setVisibleWindow: virtualRows.setVisibleWindow,
             rowsVersion: virtualRows.cacheVersion,
             viewToken: virtualRows.currentEpoch,
-            countPending,
+            countState,
           }}
           columnColors={visColColors}
           sortColumn={sortColumn}

@@ -263,6 +263,13 @@ export function createCellSelection() {
 
   return {
     get sel() { return sel; },
+    snapshot() {
+      const rectangles = bounds;
+      return {
+        selection: sel,
+        isSelected: (row: number, col: number) => rectangles.some((b) => contains(b, row, col)),
+      };
+    },
     get selectedRowCount() { return selectedRowCount; },
     get selectedColumnCount() { return selectedColumnCount; },
     get hasMultipleSelectedCells() { return hasMultipleSelectedCells; },

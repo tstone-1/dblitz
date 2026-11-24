@@ -98,10 +98,10 @@ fn classify_cell(numeric: bool, val: &str) -> CellValue {
             CellValue::Text
         }
     } else if let Ok(n) = val.parse::<f64>() {
-        // `inf`/`-inf`/`nan` parse successfully but aren't valid XLSX numbers
-        // (Excel has no representation for them) - fall back to text rather
-        // than writing a value the file format can't hold.
-        if n.is_finite() {
+        // A plain integer reaching this branch exceeded i64. DuckDB's UBIGINT
+        // and HUGEINT values must retain every digit. Only a decimal or
+        // exponent spelling can be a floating-point value here.
+        if n.is_finite() && val.contains(['.', 'e', 'E']) {
             CellValue::Number(n)
         } else {
             CellValue::Text
@@ -280,6 +280,13 @@ mod tests {
 
     #[test]
     fn bigints_beyond_f64_exact_range_stay_text() {
+        for n in [
+            u64::MAX.to_string(),
+            i128::MIN.to_string(),
+            i128::MAX.to_string(),
+        ] {
+            assert_eq!(classify_cell(true, &n), CellValue::Text);
+        }
         // 2^53 is exactly representable; 2^53 + 1 is not.
         assert_eq!(
             classify_cell(true, "9007199254740992"),
@@ -295,6 +302,71 @@ mod tests {
         // (debug) or wrap (release) via the old `.abs()` check. It's also far
         // beyond F64_EXACT_INT, so the correct classification is Text.
         assert_eq!(classify_cell(true, "-9223372036854775808"), CellValue::Text);
+    }
+
+    #[test]
+    fn duckdb_integer_cells_keep_exact_values_in_the_exported_worksheet() {
+        use std::io::Read;
+        use std::sync::atomic::AtomicU64;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("one.csv");
+        std::fs::write(&source, "id\n1\n").unwrap();
+        let session = crate::pq::ParquetSession::open(source.to_str().unwrap()).unwrap();
+        let result = session.execute_sql(
+            "SELECT id, '-9223372036854775808'::BIGINT AS lo, \
+             '9223372036854775807'::BIGINT AS hi, \
+             '18446744073709551615'::UBIGINT AS u, \
+             '-170141183460469231731687303715884105728'::HUGEINT AS h FROM data",
+            &AtomicU64::new(0),
+        );
+        assert_eq!(result.error, None);
+        let rows: Vec<Vec<String>> = result
+            .rows
+            .into_iter()
+            .map(|row| row.into_iter().map(Option::unwrap).collect())
+            .collect();
+        let export =
+            export_to_xlsx(&result.columns, &rows, &result.column_types, dir.path()).unwrap();
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(export.path).unwrap()).unwrap();
+        let mut sheet = String::new();
+        archive
+            .by_name("xl/worksheets/sheet1.xml")
+            .unwrap()
+            .read_to_string(&mut sheet)
+            .unwrap();
+        let mut strings = String::new();
+        archive
+            .by_name("xl/sharedStrings.xml")
+            .unwrap()
+            .read_to_string(&mut strings)
+            .unwrap();
+
+        assert!(
+            sheet.contains(r#"<c r="A2"><v>1</v></c>"#),
+            "ordinary integer should be numeric"
+        );
+        for (reference, expected) in [
+            ("B2", i64::MIN.to_string()),
+            ("C2", i64::MAX.to_string()),
+            ("D2", u64::MAX.to_string()),
+            ("E2", i128::MIN.to_string()),
+        ] {
+            let prefix = format!(r#"<c r="{reference}" t="s"><v>"#);
+            let (_, remainder) = sheet
+                .split_once(&prefix)
+                .expect("expected a shared-string cell");
+            let (index, _) = remainder.split_once("</v>").unwrap();
+            let item = strings
+                .split("<si>")
+                .skip(1)
+                .nth(index.parse().unwrap())
+                .unwrap();
+            assert!(
+                item.starts_with(&format!("<t>{expected}</t></si>")),
+                "{reference} lost digits"
+            );
+        }
     }
 
     #[test]

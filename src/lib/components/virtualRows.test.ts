@@ -63,6 +63,25 @@ describe("createVirtualRows", () => {
     expect(rows.getVisibleRow(1)).toEqual(["bravo"]);
   });
 
+  it("uses the column order from when a pending range was requested", async () => {
+    const columns = ["id", "name"];
+    let visible = ["name", "id"];
+    const pending = deferred<QueryResult>();
+    const rows = createVirtualRows({
+      defer: runNow, chunkSize: 2,
+      getSelectedTable: () => "items",
+      loadChunk: () => pending.promise,
+      cancelQueries: async () => {},
+      getVisibleColumns: () => visible,
+      getColumnIndex: col => columns.indexOf(col),
+      hasColumns: () => true, setColumns: () => {}, setTotalRows: () => {}, setError: () => {},
+    });
+    const copying = rows.getVisibleRows(0, 0);
+    visible = ["id"];
+    pending.resolve({ columns, rows: [["1", "A"]], total_rows: 1, offset: 0 });
+    await expect(copying).resolves.toEqual([["A", "1"]]);
+  });
+
   it("materializes visible row ranges across chunks", async () => {
     const columns = ["id", "name"];
     const rows = createVirtualRows({

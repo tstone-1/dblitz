@@ -28,6 +28,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  CALVER,
   cargoPackageName,
   checkReleaseContract,
   checkVersionFiles,
@@ -35,7 +36,6 @@ import {
   readReleaseFiles,
 } from "./release-preflight.mjs";
 
-const CALVER = /^(\d{2})\.(\d{1,2})\.(\d+)$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**

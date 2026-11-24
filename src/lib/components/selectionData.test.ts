@@ -1,7 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { buildSelectionData, selectionColumnTypes } from "./selectionData";
+import { createCellSelection } from "./cellSelection.svelte";
 
 describe("buildSelectionData", () => {
+  it("retains the selected cells while waiting for uncached rows", async () => {
+    const selection = createCellSelection();
+    selection.setSelection({ row: 0, col: 0 }, { row: 0, col: 1 });
+    const ready = Promise.withResolvers<string[][]>();
+    const action = buildSelectionData({
+      ...selection.snapshot(), columns: ["A", "B"], getRow: () => null, getRows: () => ready.promise,
+    });
+    selection.setSelection({ row: 1, col: 1 }, { row: 1, col: 1 });
+    ready.resolve([["first", "second"]]);
+    await expect(action).resolves.toMatchObject({ headers: ["A", "B"], rows: [["first", "second"]] });
+  });
+
   it("loads unloaded virtual rows before serializing a selection", async () => {
     const data = await buildSelectionData({
       selection: { r0: 1, r1: 3, c0: 0, c1: 1 },

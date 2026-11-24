@@ -36,6 +36,15 @@ function steps(job: string): string[] {
  * tag.
  */
 describe("Windows signing configuration", () => {
+  it("documents the release and the two files signed only in the rehearsal", () => {
+    const readme = readText("README.md");
+    const policy = readme.split("## Code signing policy")[1]?.split("### Privacy")[0];
+    expect(policy).toContain("(.github/workflows/release.yml)");
+    expect(policy).toContain("(.github/workflows/sign-rehearsal.yml)");
+    expect(policy?.replace(/\s+/g, " ")).toContain("a copy of the signing client and an old unsigned installer");
+    expect(rehearsal).toContain("Copy-Item (Get-Command ssign).Source work\\plain.exe");
+    expect(rehearsal).toContain("--pattern '*_x64-setup.exe'");
+  });
   it("names the sign command in an overlay, not in the main config", () => {
     const overlay = readJson("src-tauri/tauri.signing.conf.json");
     const windows = (overlay.bundle as Record<string, unknown>).windows as Record<string, unknown>;

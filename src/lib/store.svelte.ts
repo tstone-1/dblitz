@@ -58,13 +58,8 @@ export function loadTheme(): Theme {
 // Global reactive state
 export const appState = $state({
   dbPath: null as string | null,
-  // Bumped by openDatabase on every SUCCESSFUL open, including reopening the
-  // already-open path. dbPath alone can't gate a frontend reset because a
-  // Toolbar/recents reopen of the current file reopens the backend connection
-  // (clearing its caches) without changing dbPath -- so the row cache, schema,
-  // and SQL results would otherwise keep serving the previous connection's
-  // stale data. Reset effects in BrowseData/DatabaseStructure/ExecuteSQL and
-  // the single-table auto-select key on this instead of (or alongside) dbPath.
+  // Every successful native swap or close immediately invalidates panel work.
+  // A same-path reopen also gets a fresh generation.
   dbOpenGeneration: 0,
   tables: [] as TableInfo[],
   activeTab: "structure" as "structure" | "browse" | "sql",
@@ -92,8 +87,8 @@ export function initTheme() {
 
 // Database opening spans several IPC calls (open, config load, then column
 // introspection). Serialize those transactions so two user actions cannot race
-// the singleton backend connection, and use a generation so an older request
-// that was already running stops before publishing frontend state.
+// the singleton backend connection. Skip obsolete opens before they start,
+// but publish every successful native swap: the next queued open can fail.
 let databaseRequestGeneration = 0;
 let databaseRequestQueue: Promise<void> = Promise.resolve();
 
@@ -101,9 +96,22 @@ async function runOpenDatabase(path: string, request: number) {
   if (request !== databaseRequestGeneration) return;
   try {
     const tables = await openDatabaseCmd(path);
-    if (request !== databaseRequestGeneration) return;
-    const config = await loadViewConfig();
-    if (request !== databaseRequestGeneration) return;
+    // Native queries now use the new connection. Retire the old path and its
+    // pending work before fetching any metadata for the replacement session.
+    retireDatabaseSession();
+    let config: FileConfig;
+    try {
+      config = await loadViewConfig();
+    } catch (e) {
+      // The backend has already switched. Drop the session rather than show
+      // the old file or overwrite the new file's settings with defaults.
+      try {
+        await closeDatabaseCmd();
+      } catch (closeError) {
+        throw new Error(`Could not load view settings: ${e}. Closing the database also failed: ${closeError}`);
+      }
+      throw e;
+    }
     // Fetch column names for all tables (for SQL autocomplete + as a
     // schema source for filter validation before the first query result).
     const colMap: Record<string, string[]> = {};
@@ -120,8 +128,6 @@ async function runOpenDatabase(path: string, request: number) {
     // Best-effort like the columns above: a failure leaves the SQLite
     // function list in the editor, which costs suggestions, not correctness.
     const engine: SqlEngine = (await sqlEngineCmd().catch(() => null)) ?? "sqlite";
-    if (request !== databaseRequestGeneration) return;
-
     // Single synchronous publish - auto-select effect sees consistent state.
     // Order matters: `appState.tables = tables` MUST be last because it's
     // the trigger for the auto-select effect in BrowseData. By the time the
@@ -131,10 +137,7 @@ async function runOpenDatabase(path: string, request: number) {
     appState.tableColumns = colMap;
     appState.tableColumnTypes = typeMap;
     appState.sqlEngine = engine;
-    // Bump BEFORE `tables` so that by the time the reset+auto-select effect
-    // fires (Svelte batches effects to after this synchronous publish), the
-    // new generation is already visible alongside the fresh tables.
-    appState.dbOpenGeneration++;
+
     appState.tables = tables;
     if (tables.length === 1) appState.activeTab = "browse";
   } catch (e) {
@@ -154,22 +157,26 @@ export function openDatabase(path: string): Promise<void> {
   return task;
 }
 
+function retireDatabaseSession() {
+  appState.dbPath = null;
+  appState.tables = [];
+  appState.tableColumns = {};
+  appState.tableColumnTypes = {};
+  appState.fileConfig = { tables: {}, tint: null, label: null };
+  appState.dbOpenGeneration++;
+}
+
 export async function closeDatabase() {
   const request = ++databaseRequestGeneration;
   appState.loading = true;
   const task = databaseRequestQueue.then(async () => {
     try {
       await closeDatabaseCmd();
+      retireDatabaseSession();
     } catch (e) {
-      console.error("Failed to close database:", e);
+      if (request === databaseRequestGeneration) appState.error = String(e);
     }
-    if (request !== databaseRequestGeneration) return;
-    appState.dbPath = null;
-    appState.tables = [];
-    appState.tableColumns = {};
-    appState.tableColumnTypes = {};
-    appState.fileConfig = { tables: {}, tint: null, label: null };
-    appState.loading = false;
+    if (request === databaseRequestGeneration) appState.loading = false;
   });
   databaseRequestQueue = task.catch(() => {});
   await task;

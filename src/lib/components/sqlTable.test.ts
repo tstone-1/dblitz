@@ -93,12 +93,26 @@ describe("resolveResultColumnColors", () => {
   };
   const getColumnColors = (t: string) => colorsByTable[t] ?? {};
 
+  it.each([
+    ["dark", "#fde8e8", "#3b1c1c"],
+    ["light", "#3b1c1c", "#fde8e8"],
+  ] as const)("uses the %s palette for SQL result columns", (theme, saved, expected) => {
+    expect(resolveResultColumnColors({
+      sql: "SELECT id FROM sample",
+      columns: ["id"],
+      tableNames: ["sample"],
+      theme,
+      getColumnColors: () => ({ id: saved }),
+    })).toEqual({ id: expected });
+  });
+
   it("colors only columns saved for the FROM table", () => {
     expect(
       resolveResultColumnColors({
         sql: "SELECT BusinessLine, MainArticleGroup FROM db",
         columns: ["BusinessLine", "MainArticleGroup"],
         tableNames: ["db"],
+        theme: "light",
         getColumnColors,
       }),
     ).toEqual({ BusinessLine: "#f00" });
@@ -110,6 +124,7 @@ describe("resolveResultColumnColors", () => {
         sql: "SELECT PackageType FROM DB",
         columns: ["PackageType"],
         tableNames: ["db"],
+        theme: "light",
         getColumnColors,
       }),
     ).toEqual({ PackageType: "#0f0" });
@@ -121,6 +136,7 @@ describe("resolveResultColumnColors", () => {
         sql: "SELECT 1 AS one",
         columns: ["one"],
         tableNames: ["db"],
+        theme: "light",
         getColumnColors,
       }),
     ).toEqual({});
@@ -132,6 +148,7 @@ describe("resolveResultColumnColors", () => {
         sql: "SELECT a FROM other",
         columns: ["a"],
         tableNames: ["db", "other"],
+        theme: "light",
         getColumnColors,
       }),
     ).toEqual({});
@@ -143,6 +160,7 @@ describe("resolveResultColumnColors", () => {
         sql: "SELECT * FROM db",
         columns: [],
         tableNames: ["db"],
+        theme: "light",
         getColumnColors,
       }),
     ).toEqual({});

@@ -179,12 +179,12 @@ with the committed placeholder produces artifacts no client can verify.
   `tauri signer sign` CLI. With just `_PATH` set, the build runs all the way to
   the end and *then* fails with "A public key has been found, but no private
   key".
-- **A release with no `latest.json` updates nobody, and looks completely green.**
-  When the signing secret is missing or empty, `tauri-action` logs "Signature not
-  found for the updater JSON. Skipping upload..." and **succeeds**. The release
-  ships with installers and no manifest, and the failure only surfaces as users
-  silently never updating. Always `curl` the manifest after publishing and check
-  that *every* platform key is present (see post-release verification below).
+- **An updater asset can be missing even when the build succeeds.**
+  The publish job checks the draft manifest's version, matches every URL to the
+  release's asset inventory, and verifies each payload's Minisign signature and
+  signed version against the configured public key. When a published release
+  exists, its key must also match. A missing platform or failed check leaves
+  the release in draft.
 - **Updater endpoints must be `https`.** Tauri validates this while
   deserializing the config, so a plain-`http` endpoint makes the packaged app
   **panic on startup** rather than merely warn.
@@ -720,22 +720,17 @@ leg reads every signature back.
 
 ### 2. Build Release
 
-```bash
-npx tauri build
+On Windows, build the portable executable and check its embedded product version:
+
+```powershell
+pwsh -NoProfile -File scripts/build-local-windows.ps1
 ```
 
-> **This exits 1 even when it succeeds.** With `createUpdaterArtifacts` enabled
-> the bundler ends by signing the updater artifacts, and locally
-> `TAURI_SIGNING_PRIVATE_KEY` is deliberately unset (the key lives only in
-> the password manager and the repo secrets) — so the build writes the exe and the
-> installer, *then* fails with "A public key has been found, but no private
-> key". Judge this step by the artifact check below, not the exit code; signed
-> updater artifacts only ever come from CI.
-
-**Verify build:**
-```bash
-ls -lh src-tauri/target/release/dblitz.exe
-```
+The script moves the previous executable aside, runs `tauri build --no-bundle`
+and requires a successful exit and a matching version on the new executable.
+If verification fails it restores the previous copy. The tagged workflow builds
+and verifies the signed installers. On other platforms, `npx tauri build --no-bundle`
+checks the local release binary without requiring updater signing credentials.
 
 ### 3. Git Commit and Tag
 
@@ -770,8 +765,8 @@ git push origin vYY.M.MICRO
 
 Pushing the `vYY.M.MICRO` tag triggers `.github/workflows/release.yml`, which
 runs the quality gate, creates a draft release, builds and uploads every
-platform artifact (Windows x64 + ARM, macOS `aarch64` + `x64` DMGs, Linux), checks
-`latest.json` has an entry for all five, flips the
+platform artifact (Windows x64 + ARM, macOS `aarch64` + `x64` DMGs, Linux), verifies
+the signed updater payloads for all five platforms, flips the
 release to published, then auto-bumps the Homebrew cask in
 `tstone-1/homebrew-dblitz`. You do **not** build the cross-platform artifacts
 locally — CI does. `npx tauri build` is only for a local desktop artifact.
@@ -846,9 +841,8 @@ To overwrite a pre-existing non-brew install, use `brew install --cask --force d
 
 - [ ] Confirm GitHub shows the new release as latest: `gh release list --limit 5`
 - [ ] Confirm the tap cask bumped to the new version (both `sha256` lines updated)
-- [ ] **The updater manifest exists and covers every platform.** A release with no
-      `latest.json` looks entirely green (see the Updater section above), so check
-      it explicitly — expect `darwin-aarch64`, `darwin-x86_64`, `windows-x86_64`,
+- [ ] **The published updater manifest is accessible and covers every platform.**
+      Expect `darwin-aarch64`, `darwin-x86_64`, `windows-x86_64`,
       `windows-aarch64` and `linux-x86_64` keys, and a non-empty `signature` on
       each. The `publish` job refuses to publish without all five; this reads the
       published file:
@@ -902,7 +896,12 @@ npm run quality
 # all five version files and date the heading; the script ends with the same
 # check CI's preflight job runs, so [OK] means the tag is accepted
 node scripts/bump-version.mjs next --release
-npx tauri build
+npm run quality || exit 1   # run on the exact tree to be tagged
+if [ "${OS:-}" = Windows_NT ]; then
+  pwsh -NoProfile -File scripts/build-local-windows.ps1 || exit 1
+else
+  npx tauri build --no-bundle || exit 1
+fi
 git status --porcelain && git diff --stat   # review the whole tree before staging
 # Explicit pathspec, never `git add -A` -- this repo is public (see step 3)
 git add package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock \

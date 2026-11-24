@@ -6,7 +6,8 @@
 # Activate per-clone with: git config core.hooksPath .githooks
 # Skip a single push (rare, use with care): SKIP_AGENT_MEMORY_AUDIT=1 git push
 
-set -u
+set -eu
+export GIT_NO_REPLACE_OBJECTS=1
 
 if [ "${SKIP_AGENT_MEMORY_AUDIT:-}" = "1" ]; then
     echo "[pre-push] SKIP_AGENT_MEMORY_AUDIT=1 -- skipping public-safe audit."
@@ -104,61 +105,90 @@ read_forbidden_patterns() {
         }'
 }
 
-public_safe_fallback() {
-    echo "[pre-push] pwsh not found; running POSIX public-safe fallback."
-
-    if ! forbidden_patterns=$(read_forbidden_patterns "$AUDIT"); then
-        echo "[pre-push] Push BLOCKED. Install PowerShell 7 (pwsh), or override with SKIP_AGENT_MEMORY_AUDIT=1."
-        return 1
-    fi
-    count=$(printf '%s\n' "$forbidden_patterns" | grep -c .)
-    echo "[pre-push] read $count patterns from $AUDIT"
-
-    scan_file() {
-        case "$1" in
-            *.md|*.txt|*.rst|*.adoc|*.json|*.toml|*.yaml|*.yml|*.ini|*.cfg|*.conf|*.ps1|*.psm1|*.sh|*.bash|*.zsh|*.py|*.pyi|*.rs|*.go|*.js|*.ts|*.jsx|*.tsx|*.svelte|*.vue|*.html|*.css|*.scss|*.sql|*.gitignore|*.gitattributes|Dockerfile|Makefile)
-                return 0
-                ;;
-            *)
-                return 1
-                ;;
-        esac
-    }
-
-    # The file list is taken first and checked: piped straight into the loop,
-    # a failing or missing git gave the loop nothing to read and the check
-    # printed OK having scanned no file.
-    if [ -z "$REPO_ROOT" ] || ! tracked=$(git -C "$REPO_ROOT" ls-files) || [ -z "$tracked" ]; then
-        echo "[public-safe-check] cannot list the tracked files. Push BLOCKED."
-        return 1
-    fi
-
-    hits=0
-    printf '%s\n' "$tracked" | while IFS= read -r rel; do
-        [ -f "$REPO_ROOT/$rel" ] || continue
-        scan_file "$rel" || continue
-
-        printf '%s\n' "$forbidden_patterns" | while IFS= read -r pat; do
-            if grep -Eiq -- "$pat" "$REPO_ROOT/$rel"; then
-                echo "[public-safe-check] BLOCKED: $rel matches forbidden public-repo pattern."
-                exit 3
-            fi
-        done || exit 3
-    done || hits=$?
-
-    if [ "$hits" -ne 0 ]; then
-        echo "[public-safe-check] Push BLOCKED."
-        return 1
-    fi
-
-    echo "[public-safe-check] OK - no forbidden tokens found."
-    return 0
+# Check the same committed content with and without PowerShell. Keep private
+# expressions outside the repository and never print a match or its contents.
+blocked() {
+    echo "[pre-push] Push BLOCKED. $1" >&2
+    exit 1
 }
 
-if ! command -v pwsh >/dev/null 2>&1; then
-    public_safe_fallback
-    exit $?
-fi
+[ -n "$REPO_ROOT" ] || blocked "Cannot find the repository."
+scratch=$(mktemp -d) || blocked "Cannot create a temporary audit directory."
+trap 'rm -rf "$scratch"' 0
+trap 'exit 1' HUP INT TERM
+read_forbidden_patterns "$AUDIT" > "$scratch/patterns" || blocked "Cannot read the private pattern list."
 
-pwsh -NoProfile -ExecutionPolicy Bypass -File "$AUDIT" -CheckPublicSafe -CheckRepoPath "$REPO_ROOT"
-exit $?
+# The hook receives one line per ref. Git supplies an all-zero old ID for a
+# new ref, so use the remote's advertised history as its lower bound. Local
+# remote-tracking refs can be stale or absent. An unrecognised remote commit
+# can safely be omitted from the exclusions; that only scans more history.
+: > "$scratch/revisions"
+: > "$scratch/trees"
+: > "$scratch/blobs"
+new_ref=false
+exclude_published_commit() {
+    if commit=$(git rev-parse --verify --quiet "$1^{commit}"); then
+        printf '^%s\n' "$commit" >> "$scratch/revisions"
+    fi
+}
+while read -r local_ref local_oid remote_ref remote_oid extra; do
+    case "$local_oid:$remote_oid" in
+        *[!0-9a-f:]*|:*|*:) blocked "Invalid object ID in ref update." ;;
+    esac
+    [ -n "$local_ref" ] && [ -n "$remote_ref" ] && [ -z "$extra" ] || blocked "Invalid ref update."
+    case "$remote_oid" in *[!0]*) exclude_published_commit "$remote_oid" ;; esac
+    case "$local_oid" in *[!0]*) ;; *) continue ;; esac
+    case "$remote_oid" in *[!0]*) ;; *) new_ref=true ;; esac
+    target=$(git rev-parse --verify "$local_oid^{}") || blocked "Cannot resolve $local_ref."
+    kind=$(git cat-file -t "$target") || blocked "Cannot read $local_ref."
+    case "$kind" in
+        commit)
+            printf '%s\n' "$target" >> "$scratch/revisions"
+            git rev-parse --verify "$target^{tree}" >> "$scratch/trees" || blocked "Cannot read the outgoing tree."
+            ;;
+        tree) printf '%s\n' "$target" >> "$scratch/trees" ;;
+        blob) printf '%s\n' "$target" >> "$scratch/blobs" ;;
+        *) blocked "Unsupported outgoing object." ;;
+    esac
+done
+
+if [ "$new_ref" = true ]; then
+    git ls-remote --refs -- "${2:?missing push destination}" > "$scratch/advertised" 2> "$scratch/errors" || blocked "Cannot determine existing remote history."
+    while read -r oid ref; do
+        exclude_published_commit "$oid"
+    done < "$scratch/advertised"
+fi
+git rev-list --format=%T --no-commit-header --stdin < "$scratch/revisions" >> "$scratch/trees" || blocked "Cannot enumerate outgoing history."
+awk '!seen[$0]++' "$scratch/trees" > "$scratch/unique-trees" || blocked "Cannot enumerate outgoing trees."
+
+# Scan whole trees, including scripts with unusual names and files restored
+# from already-published history. Checking stderr also catches partial reads
+# reported by git grep alongside its ordinary no-match exit code.
+while IFS= read -r tree; do
+    status=0
+    git -C "$REPO_ROOT" grep --threads=1 -a -ilE --no-textconv -f "$scratch/patterns" "$tree" -- > /dev/null 2> "$scratch/errors" || status=$?
+    [ ! -s "$scratch/errors" ] || blocked "Cannot search tree $tree."
+    case "$status" in
+        0) blocked "Tree $tree contains a forbidden public-repo pattern." ;;
+        1) ;;
+        *) blocked "Cannot search tree $tree." ;;
+    esac
+done < "$scratch/unique-trees"
+
+# Tags can point directly at a blob as well as at a commit or tree.
+while IFS= read -r blob; do
+    git cat-file blob "$blob" > "$scratch/blob" || blocked "Cannot read blob $blob."
+    status=0
+    grep -Eil -f "$scratch/patterns" "$scratch/blob" > /dev/null 2> "$scratch/errors" || status=$?
+    [ ! -s "$scratch/errors" ] || blocked "Cannot search blob $blob."
+    case "$status" in
+        0) blocked "Blob $blob contains a forbidden public-repo pattern." ;;
+        1) ;;
+        *) blocked "Cannot search blob $blob." ;;
+    esac
+done < "$scratch/blobs"
+
+if command -v pwsh >/dev/null 2>&1; then
+    pwsh -NoProfile -ExecutionPolicy Bypass -File "$AUDIT" -CheckPublicSafe -CheckRepoPath "$REPO_ROOT" || exit $?
+fi
+echo "[pre-push] OK - outgoing content passed the public-safe check."

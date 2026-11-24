@@ -32,7 +32,7 @@ describe("grid geometry helpers", () => {
       overscan: 2,
     });
 
-    expect(indices[0]).toBe(3);
+    expect(indices[0]).toBe(5);
     expect(indices.at(-1)).toBe(10);
   });
 
@@ -140,12 +140,26 @@ describe("scrollTopToRevealRow", () => {
   // Where the row lands below the sticky header at a given scrollTop, using
   // the same mapping the grid renders with.
   function rowTopBelowHeader(row: number, scrollTop: number, geometry: ReturnType<typeof virtualScrollGeometry>) {
-    return row * rowHeight - virtualScrollTopToDataScroll(scrollTop, geometry, viewportHeight);
+    return row * rowHeight - virtualScrollTopToDataScroll(scrollTop, geometry, visibleHeight);
   }
 
   function reveal(row: number, scrollTop: number, geometry: ReturnType<typeof virtualScrollGeometry>) {
     return scrollTopToRevealRow({ row, rowHeight, geometry, viewportHeight, stickyHeight, scrollTop });
   }
+
+  it.each([26, 54])("renders the last row at the real scrollbar limit with a %i px header", (header) => {
+    const rowCount = 100_000_000;
+    const geometry = virtualScrollGeometry({ rowCount, rowHeight, maxSpacerHeight: 20_000_000 });
+    const maxScroll = geometry.spacerHeight + header - viewportHeight;
+    const usableHeight = viewportHeight - header;
+    const dataScroll = virtualScrollTopToDataScroll(maxScroll, geometry, usableHeight);
+    const range = visibleRowIndices({
+      rowCount, rowHeight, scrollTop: dataScroll, viewportHeight, stickyHeight: header, overscan: 4,
+    });
+    expect(range.at(-1)).toBe(rowCount - 1);
+    const bottom = rowIndexToVirtualTop(rowCount - 1, rowHeight, geometry, usableHeight, maxScroll) + rowHeight;
+    expect(bottom).toBeCloseTo(geometry.spacerHeight);
+  });
 
   it("leaves the scroll position alone when the row is already fully visible", () => {
     const geometry = virtualScrollGeometry({ rowCount: 1000, rowHeight, maxSpacerHeight: 20_000_000 });

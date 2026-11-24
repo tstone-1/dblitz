@@ -144,7 +144,16 @@ pub fn query_table(
     let browse = s.browse.lock();
     let conn = browse.conn();
     let (rows, total) = if !s.row_numbers {
-        offset_page(conn, &proj, &filter, sort.as_ref(), req, gen, generation)?
+        offset_page(
+            conn,
+            &columns,
+            &proj,
+            &filter,
+            sort.as_ref(),
+            req,
+            gen,
+            generation,
+        )?
     } else if sort.is_none() && filter.clause.is_empty() {
         let end = req.offset.saturating_add(req.limit);
         let sql = format!(
@@ -259,6 +268,7 @@ fn order_by(sort: &(String, bool), tiebreak: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 fn offset_page(
     conn: &Connection,
+    columns: &[String],
     proj: &str,
     filter: &Where,
     sort: Option<&(String, bool)>,
@@ -266,9 +276,24 @@ fn offset_page(
     gen: u64,
     generation: &AtomicU64,
 ) -> Result<Page, String> {
-    let order = sort.map(|s| order_by(s, "")).unwrap_or_default();
+    // A user column shadows the engine's row identity on this path. Number
+    // the input in file order before filtering and sorting so equal keys
+    // cannot move between independently evaluated LIMIT/OFFSET pages.
+    let (source, order) = if let Some(sort) = sort {
+        let mut position = "__dblitz_position".to_string();
+        while columns.iter().any(|c| c.eq_ignore_ascii_case(&position)) {
+            position.push('_');
+        }
+        let position = quote_ident(&position);
+        (
+            format!("(SELECT *, row_number() OVER () AS {position} FROM data) AS numbered"),
+            order_by(sort, &format!(", {position}")),
+        )
+    } else {
+        ("data".to_string(), String::new())
+    };
     let sql = format!(
-        "SELECT {proj} FROM data{}{order} LIMIT {} OFFSET {}",
+        "SELECT {proj} FROM {source}{}{order} LIMIT {} OFFSET {}",
         filter.clause, req.limit, req.offset
     );
     let rows = fetch(conn, &sql, &filter.params, gen, generation)?;
@@ -1107,6 +1132,30 @@ mod tests {
         assert!(!s.row_numbers);
         let r = query_table(&s, &req(250, 10), &AtomicU64::new(0)).unwrap();
         assert_eq!(ids(&r), (250..260).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn pages_with_shadowed_rowid_keep_equal_keys_in_file_order() {
+        let dir = scratch_dir("offset_ties");
+        let file = dir.join("ties.csv");
+        let mut csv = String::from("rowid,k,__dblitz_position\n");
+        for id in 0..2500 {
+            csv.push_str(&format!("{id},{},0\n", id % 3));
+        }
+        std::fs::write(&file, csv).unwrap();
+        let s = ParquetSession::open(file.to_str().unwrap()).unwrap();
+        for asc in [true, false] {
+            let mut expected: Vec<i64> = (0..2500).collect();
+            expected.sort_by_key(|id| if asc { id % 3 } else { -(id % 3) });
+            let mut got = Vec::new();
+            for offset in (0..2500).step_by(500) {
+                let mut page = req(offset, 500);
+                page.sort_column = Some("k".into());
+                page.sort_asc = asc;
+                got.extend(ids(&query_table(&s, &page, &AtomicU64::new(0)).unwrap()));
+            }
+            assert_eq!(got, expected);
+        }
     }
 
     #[test]

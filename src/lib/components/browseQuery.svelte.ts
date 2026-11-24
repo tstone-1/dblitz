@@ -49,6 +49,8 @@ export interface QuerySnapshot {
   sortAsc: boolean;
 }
 
+export type RowCountState = "pending" | "known" | "failed";
+
 export interface BrowseQueryDeps {
   chunkSize: number;
   filterDebounceMs: number;
@@ -68,7 +70,7 @@ export interface BrowseQueryDeps {
   getSortAsc: () => boolean;
   setSortAsc: (asc: boolean) => void;
   setLoading: (loading: boolean) => void;
-  setCountPending: (pending: boolean) => void;
+  setCountState: (state: RowCountState) => void;
   setError: (message: string) => void;
 
   // ---- view plumbing -------------------------------------------------------
@@ -214,6 +216,9 @@ export function createBrowseQuery(deps: BrowseQueryDeps) {
    */
   async function reloadData(): Promise<boolean> {
     if (!deps.getSelectedTable()) return false;
+    cancelDebounce();
+    lastFilterState = filterMemoKey();
+    deps.setCountState("pending");
     deps.setLoading(true);
     const reload = await virtualRows.beginReload();
     if (reload === null) return false;
@@ -239,12 +244,12 @@ export function createBrowseQuery(deps: BrowseQueryDeps) {
 
       if (result.total_rows !== null) {
         deps.setTotalRows(result.total_rows);
-        deps.setCountPending(false);
+        deps.setCountState("known");
       } else {
         deps.setTotalRows(
           result.rows.length < deps.chunkSize ? result.rows.length : deps.chunkSize,
         );
-        deps.setCountPending(true);
+
         retryAfterSharedCancel(myEpoch, () =>
           deps.countRows({
             table,
@@ -255,12 +260,12 @@ export function createBrowseQuery(deps: BrowseQueryDeps) {
           .then((count) => {
             if (virtualRows.isCurrent(myEpoch)) {
               deps.setTotalRows(count);
-              deps.setCountPending(false);
+              deps.setCountState("known");
             }
           })
           .catch((e: unknown) => {
             if (virtualRows.isCurrent(myEpoch)) {
-              deps.setCountPending(false);
+              deps.setCountState("failed");
               deps.setError(String(e));
             }
           });
@@ -271,7 +276,7 @@ export function createBrowseQuery(deps: BrowseQueryDeps) {
       // See the file header: the previous query's row count would otherwise
       // keep the grid rendering blank rows that re-fire the failing query.
       if (virtualRows.failFirstChunk(myEpoch)) {
-        deps.setCountPending(false);
+        deps.setCountState("failed");
         deps.setError(String(e));
       }
     } finally {
@@ -288,26 +293,14 @@ export function createBrowseQuery(deps: BrowseQueryDeps) {
   }
 
   function filterMemoKey(): string {
-    return deps.getGlobalFilter().trim() + JSON.stringify(deps.getColumnFilters());
+    return JSON.stringify([deps.getGlobalFilter().trim(), buildFilters()]);
   }
 
   function debouncedReload(): void {
-    if (hasIncompleteFilter()) return;
-    if (filterMemoKey() === lastFilterState) {
-      // The edit was undone inside the debounce window (`10` -> `100` -> `10`):
-      // the loaded view already matches, so the armed timer must go too. Left
-      // armed, it used to record the `100` it was armed with as loaded while
-      // reloadData() queried the live `10`, and retyping `100` then matched the
-      // memo and never queried: the grid showed `10`'s rows under `100`.
-      cancelDebounce();
-      return;
-    }
     cancelDebounce();
+    if (hasIncompleteFilter() || filterMemoKey() === lastFilterState) return;
     filterDebounce = setTimeout(() => {
       filterDebounce = null;
-      // The memo records what reloadData() is about to query, which is the
-      // live state at fire time, not the state the timer was armed with.
-      lastFilterState = filterMemoKey();
       void reloadData();
     }, deps.filterDebounceMs);
   }
@@ -363,7 +356,6 @@ export function createBrowseQuery(deps: BrowseQueryDeps) {
       ),
     );
     deps.setGlobalFilter(cfg.pinned_global_filter ?? "");
-    lastFilterState = filterMemoKey();
 
     const published = await reloadData();
 

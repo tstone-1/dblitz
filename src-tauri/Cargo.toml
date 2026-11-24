@@ -12,6 +12,10 @@ edition = "2021"
 name = "dblitz_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[example]]
+name = "format_comparison_benchmark"
+test = true
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -39,11 +43,8 @@ rust_xlsxwriter = "0.101.0"
 tauri-plugin-opener = "2.7.2"
 # In-app updater. Fetches the `latest.json` manifest published by release.yml,
 # verifies the payload against `plugins.updater.pubkey` in tauri.conf.json
-# (minisign — the ONLY cryptographic control on the update path, since dblitz
-# builds are ad-hoc signed at best), then installs. `process` supplies
-# `relaunch()`: macOS swaps the .app in place and restarts, Windows hands off to
-# the NSIS installer and exits. On Linux only AppImage installs can self-update,
-# which `updates.rs` gates.
+# (minisign), then installs. The process plugin supplies relaunch().
+# On Linux, `updates.rs` enables self-update only for AppImage installs.
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 
@@ -67,6 +68,7 @@ objc2-foundation = { version = "0.3", features = ["NSString", "NSURL"] }
 
 [dev-dependencies]
 tempfile = "3"
+zip = { version = "9", default-features = false }
 
 # Dev builds: optimize everything for near-release perf, keep debuginfo
 [profile.dev]

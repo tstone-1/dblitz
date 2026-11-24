@@ -1,20 +1,22 @@
 """Build the synthetic demo database used for the README screenshots.
 
-Usage:  uv run scripts/make-demo-db.py [out.sqlite]   (default: demo/roastery.sqlite)
+Usage:  uv run scripts/make-demo-db.py [--replace] [out.sqlite]   (default: demo/roastery.sqlite)
 
 Everything is invented: a fictional coffee roaster's catalogue, customers and
 orders, generated from a fixed seed so every run writes the same rows. No real
 person, company or record is represented.
 """
 
+import argparse
+import os
 import random
 import sqlite3
-import sys
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 SEED = 26_10_29
-OUT = Path(sys.argv[1] if len(sys.argv) > 1 else "demo/roastery.sqlite")
 
 FIRST = ["Ada", "Ben", "Clara", "Dario", "Elif", "Finn", "Greta", "Hugo", "Ines", "Jonas",
          "Kaito", "Lena", "Mateo", "Nora", "Oskar", "Priya", "Quinn", "Rosa", "Sami", "Tilda",
@@ -124,14 +126,28 @@ def build(con: sqlite3.Connection, rng: random.Random) -> None:
 
 
 def main() -> None:
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.unlink(missing_ok=True)
-    con = sqlite3.connect(OUT)
-    with con:
-        build(con, random.Random(SEED))
-    con.execute("VACUUM")
-    con.close()
-    print(f"[OK] wrote {OUT} ({OUT.stat().st_size // 1024} KiB)")
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("output", nargs="?", type=Path, default=Path("demo/roastery.sqlite"))
+    parser.add_argument("--replace", action="store_true", help="replace an existing demo file")
+    args = parser.parse_args()
+    out = args.output
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if out.exists() and not args.replace:
+        parser.exit(1, f"File exists: {out}. Use --replace to regenerate it.\n")
+
+    # Build beside the destination so a failed generation leaves existing data intact.
+    with TemporaryDirectory(dir=out.parent) as staging:
+        generated = Path(staging) / "roastery.sqlite"
+        with closing(sqlite3.connect(generated)) as con:
+            with con:
+                build(con, random.Random(SEED))
+            con.execute("VACUUM")
+        if args.replace:
+            os.replace(generated, out)
+        else:
+            # Another process can create the destination while we build.
+            os.link(generated, out)
+    print(f"[OK] wrote {out} ({out.stat().st_size // 1024} KiB)")
 
 
 if __name__ == "__main__":

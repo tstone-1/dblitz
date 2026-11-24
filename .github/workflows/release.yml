@@ -716,37 +716,44 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-24.04
-    # Observed max 6 s -- one `gh release edit`.
+    # Downloads and verifies the draft's signed updater payloads before publishing.
     timeout-minutes: 10
     permissions:
       # `gh release edit --draft=false`.
       contents: write
     steps:
-      # A leg that uploads no updater entry is green (BUILD.md, "Post-release
-      # Verification"), and with five legs merging into one latest.json a
-      # missing platform is easy to overlook. Read the manifest on the draft
-      # and refuse to publish unless every platform is in it, with a URL and
-      # a signature. The list is the build matrix: a leg added there is added
-      # here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # tauri-action can succeed with an incomplete manifest. Verify the actual
+      # draft assets, their platform mapping, signed versions and signatures.
       - name: Check the updater manifest covers every platform
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y minisign
+          python3 scripts/test-update-manifest.py
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            --pattern latest.json -D manifest
-          missing=""
-          for platform in darwin-aarch64 darwin-x86_64 windows-x86_64 windows-aarch64 linux-x86_64; do
-            jq -e --arg p "$platform" \
-              '.platforms[$p] | (.url // "") != "" and (.signature // "") != ""' \
-              manifest/latest.json > /dev/null || missing="$missing $platform"
-          done
-          if [ -n "$missing" ]; then
-            echo "::error::latest.json has no complete entry for:$missing"
-            jq '.platforms | keys' manifest/latest.json
-            exit 1
+            --pattern latest.json --pattern '*.app.tar.gz' --pattern '*-setup.exe' \
+            --pattern '*.AppImage' --pattern '*.deb' --pattern '*.rpm' -D manifest
+          release_id=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json databaseId --jq .databaseId)
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" \
+            | jq -e 'add | select(type == "array" and length > 0)' > manifest/assets.json
+          # Installed copies trust the last published key. Check continuity too:
+          # changing both the build's key and the secret would otherwise verify here.
+          previous=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
+            --limit 1 --json tagName --jq '.[0].tagName // ""')
+          if [ -n "$previous" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/contents/src-tauri/tauri.conf.json?ref=$previous" \
+              --jq .content | base64 -d > manifest/previous-config.json
+            old_key=$(jq -er .plugins.updater.pubkey manifest/previous-config.json)
+            current_key=$(jq -er .plugins.updater.pubkey src-tauri/tauri.conf.json)
+            [ "$old_key" = "$current_key" ] || { echo "::error::The last published updater key differs"; exit 1; }
           fi
-          echo "latest.json covers every platform."
+          python3 scripts/verify-update-manifest.py manifest "${GITHUB_REF_NAME#v}" src-tauri/tauri.conf.json
 
       - name: Publish release
         env:

@@ -31,9 +31,9 @@ export function virtualScrollGeometry({
   return { naturalHeight, spacerHeight: maxSpacerHeight, scale: naturalHeight / maxSpacerHeight };
 }
 
-function scrollRangeRatio(geometry: VirtualScrollGeometry, viewportHeight: number): number {
-  const virtualRange = Math.max(0, geometry.spacerHeight - viewportHeight);
-  const dataRange = Math.max(0, geometry.naturalHeight - viewportHeight);
+function scrollRangeRatio(geometry: VirtualScrollGeometry, dataViewportHeight: number): number {
+  const virtualRange = Math.max(0, geometry.spacerHeight - dataViewportHeight);
+  const dataRange = Math.max(0, geometry.naturalHeight - dataViewportHeight);
   if (virtualRange === 0) return 1;
   return dataRange / virtualRange;
 }
@@ -41,9 +41,9 @@ function scrollRangeRatio(geometry: VirtualScrollGeometry, viewportHeight: numbe
 export function virtualScrollTopToDataScroll(
   scrollTop: number,
   geometry: VirtualScrollGeometry,
-  viewportHeight: number,
+  dataViewportHeight: number,
 ): number {
-  return Math.max(0, scrollTop * scrollRangeRatio(geometry, viewportHeight));
+  return Math.max(0, scrollTop * scrollRangeRatio(geometry, dataViewportHeight));
 }
 
 // Position a row within the (possibly compressed) scroll spacer.
@@ -60,10 +60,10 @@ export function rowIndexToVirtualTop(
   rowIndex: number,
   rowHeight: number,
   geometry: VirtualScrollGeometry,
-  viewportHeight: number,
+  dataViewportHeight: number,
   scrollTop: number,
 ): number {
-  const dataScroll = virtualScrollTopToDataScroll(scrollTop, geometry, viewportHeight);
+  const dataScroll = virtualScrollTopToDataScroll(scrollTop, geometry, dataViewportHeight);
   return scrollTop + rowIndex * rowHeight - dataScroll;
 }
 
@@ -77,11 +77,12 @@ export function visibleRowIndices({
 }: VisibleRowRangeOptions): number[] {
   if (rowCount === 0) return [];
 
-  const dataScroll = Math.max(0, scrollTop - stickyHeight);
+  const dataScroll = Math.max(0, scrollTop);
+  const visibleHeight = Math.max(0, viewportHeight - stickyHeight);
   const first = Math.max(0, Math.floor(dataScroll / rowHeight) - overscan);
   const last = Math.min(
     rowCount - 1,
-    Math.ceil((dataScroll + viewportHeight) / rowHeight) + overscan,
+    Math.ceil((dataScroll + visibleHeight) / rowHeight) + overscan,
   );
 
   const indices: number[] = [];
@@ -125,13 +126,13 @@ export function scrollTopToRevealRow({
   stickyHeight,
   scrollTop,
 }: RevealRowOptions): number | null {
-  const visibleHeight = Math.max(rowHeight, viewportHeight - stickyHeight);
-  const dataScroll = virtualScrollTopToDataScroll(scrollTop, geometry, viewportHeight);
+  const visibleHeight = Math.max(0, viewportHeight - stickyHeight);
+  const dataScroll = virtualScrollTopToDataScroll(scrollTop, geometry, visibleHeight);
   const top = row * rowHeight - dataScroll;
   if (top >= 0 && top + rowHeight <= visibleHeight) return null;
 
   const targetDataScroll = Math.max(0, row * rowHeight - (visibleHeight - rowHeight) / 2);
-  const ratio = scrollRangeRatio(geometry, viewportHeight);
-  const maxScrollTop = Math.max(0, geometry.spacerHeight + stickyHeight - viewportHeight);
+  const ratio = scrollRangeRatio(geometry, visibleHeight);
+  const maxScrollTop = Math.max(0, geometry.spacerHeight - visibleHeight);
   return Math.min(maxScrollTop, Math.round(targetDataScroll / ratio));
 }

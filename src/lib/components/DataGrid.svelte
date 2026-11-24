@@ -3,6 +3,7 @@
   import { createCellSelection, createViewChangeDetector } from "./cellSelection.svelte";
   import { createDragReorder } from "./dragReorder.svelte";
   import { buildSelectionData, type SelectionData } from "./selectionData";
+  import type { RowCountState } from "./browseQuery.svelte";
   import { serializeClipboardTable, writeClipboardTable } from "./clipboardTable";
   import { buildSelectionStats, DEFAULT_MAX_STATS_ROWS } from "./selectionStats";
   import {
@@ -21,8 +22,6 @@
   import { findCell, makeCellMatcher, type FindDirection } from "./gridFind";
 
   const ROW_HEIGHT = 26;
-  const HEADER_HEIGHT = 26;
-  const FILTER_ROW_HEIGHT = 28;
   const OVERSCAN = 20;
   const MAX_SCROLL_SPACER_HEIGHT = 20_000_000;
 
@@ -44,9 +43,8 @@
          *  reloaded. A find that sees it change stops instead of selecting a
          *  cell in a view it did not search. */
         viewToken: () => number;
-        /** True while `totalRows` is provisional (a filtered view whose count
-         *  is still running): at most one chunk, not the view's size. */
-        countPending: boolean;
+        /** Only a known count permits operations over the entire view. */
+        countState: RowCountState;
       };
 
   // Props. The grid runs in two modes: mode.kind === "virtual" (BrowseData,
@@ -147,11 +145,7 @@
   }
 
   let showFilters = $derived(filtering?.columnFilters != null);
-  // Approximate sticky-header height used only for virtual-scroll row culling
-  // (firstVisible/lastVisible). Actual rendered height may drift by a px or two
-  // under display scaling — OVERSCAN absorbs the slack. Do NOT reuse this for
-  // CSS positioning; the sticky wrapper handles that structurally.
-  let stickyHeight = $derived(HEADER_HEIGHT + (showFilters ? FILTER_ROW_HEIGHT : 0));
+  let stickyHeight = $state(0);
 
   let rowCount = $derived(mode.kind === "virtual" ? mode.totalRows : mode.rows.length);
   let scrollGeometry = $derived(virtualScrollGeometry({
@@ -175,6 +169,7 @@
   // Scroll state
   let scrollTop = $state(0);
   let viewportHeight = $state(600);
+  const dataViewportHeight = $derived(Math.max(0, viewportHeight - stickyHeight));
   let scrollContainer: HTMLDivElement | undefined = $state();
 
   // Scroll is coalesced to one frame. A trackpad or a smooth-scrolling wheel
@@ -202,7 +197,7 @@
     const indices = getVisibleRowIndices({
       rowCount,
       rowHeight: ROW_HEIGHT,
-      scrollTop: virtualScrollTopToDataScroll(scrollTop, scrollGeometry, viewportHeight),
+      scrollTop: virtualScrollTopToDataScroll(scrollTop, scrollGeometry, dataViewportHeight),
       stickyHeight,
       viewportHeight,
       overscan: OVERSCAN,
@@ -272,16 +267,20 @@
   // cache, and reads the token untracked. Chunk arrivals bump it too and are
   // filtered out by the token comparison. The write happens here, in an
   // effect, never in a `$derived` or a template read.
+  function viewIdentity(): unknown {
+    return mode.kind === "virtual" ? mode.viewToken() : mode.rows;
+  }
+
   const viewChanged = createViewChangeDetector();
   $effect(() => {
     void (mode.kind === "virtual" ? mode.rowsVersion : mode.rows);
     const cols = columns;
-    const token = untrack(() => (mode.kind === "virtual" ? mode.viewToken() : mode.rows));
+    const token = untrack(viewIdentity);
     if (viewChanged(token, cols)) untrack(() => selection.clear());
   });
 
-  function countIsPending(): boolean {
-    return mode.kind === "virtual" && mode.countPending;
+  function countIsProvisional(): boolean {
+    return mode.kind === "virtual" && mode.countState !== "known";
   }
 
   // Selection statistics are an explicit, debounced computation over CACHED
@@ -338,17 +337,26 @@
 
   const MAX_COPY_ROWS = 100_000;
 
+  let disposed = false;
+  async function materializeSelection() {
+    const source = viewIdentity();
+    const headers = columns;
+    const data = await buildSelectionData({
+      ...selection.snapshot(),
+      columns,
+      getRow: getRowData,
+      getRows: mode.kind === "virtual" ? mode.getRows : undefined,
+      maxRows: MAX_COPY_ROWS,
+    });
+    // Export reads the current column types. A completed range from a replaced
+    // table must never reach that callback under the new table's schema.
+    return !disposed && viewIdentity() === source && columns === headers ? data : null;
+  }
+
   async function copySelection(withHeaders: boolean) {
     materializingSelection = true;
     try {
-      const data = await buildSelectionData({
-        selection: sel,
-        columns,
-        getRow: getRowData,
-        getRows: mode.kind === "virtual" ? mode.getRows : undefined,
-        maxRows: MAX_COPY_ROWS,
-        isSelected: selection.isSelected,
-      });
+      const data = await materializeSelection();
       if (!data) return;
       // Serialization is delegated because it is not a join: a cell holding a
       // tab or a newline used to become extra spreadsheet columns or rows while
@@ -372,14 +380,7 @@
     if (!onExport) return;
     materializingSelection = true;
     try {
-      const data = await buildSelectionData({
-        selection: sel,
-        columns,
-        getRow: getRowData,
-        getRows: mode.kind === "virtual" ? mode.getRows : undefined,
-        maxRows: MAX_COPY_ROWS,
-        isSelected: selection.isSelected,
-      });
+      const data = await materializeSelection();
       if (!data) return;
       await onExport(data);
       if (data.truncated) {
@@ -438,6 +439,7 @@
   });
 
   onDestroy(() => {
+    disposed = true;
     document.removeEventListener('mousemove', onResizeMove);
     document.removeEventListener('mouseup', onResizeEnd);
     selection.cleanup();
@@ -518,9 +520,8 @@
     const m = mode;
     const cols = columns;
     const total = rowCount;
-    const token: unknown = m.kind === "virtual" ? m.viewToken() : m.rows;
-    const currentToken = (): unknown => (mode.kind === "virtual" ? mode.viewToken() : mode.rows);
-    const isCancelled = () => myId !== findSearchId || currentToken() !== token || columns !== cols;
+    const token = viewIdentity();
+    const isCancelled = () => myId !== findSearchId || viewIdentity() !== token || columns !== cols;
     const loadRows =
       m.kind === "virtual"
         ? m.getRows
@@ -538,7 +539,7 @@
         loadRows,
         blockRows: FIND_BLOCK_ROWS,
         isCancelled,
-        isCountPending: countIsPending,
+        isCountPending: countIsProvisional,
         currentRowCount: () => rowCount,
         onProgress: (searched) => {
           if (myId !== findSearchId || Date.now() - startedAt < FIND_PROGRESS_DELAY_MS) return;
@@ -549,7 +550,9 @@
       if (result.kind === "cancelled") {
         findStatus = "Search stopped: the view changed.";
       } else if (result.kind === "incomplete") {
-        findStatus = "Still counting rows. Search again when the count is in.";
+        findStatus = mode.kind === "virtual" && mode.countState === "failed"
+          ? "Search incomplete. Retry the row count to search all rows."
+          : "Still counting rows. Search again when the count is in.";
       } else if (result.kind === "none") {
         findStatus = "No match";
       } else {
@@ -640,8 +643,10 @@
       e.preventDefault();
       // While the count runs, rowCount is at most one chunk: selecting
       // 0..rowCount-1 would silently select only the rows loaded so far.
-      if (countIsPending()) {
-        onNotice?.("Still counting rows. Select all again when the count is in.");
+      if (countIsProvisional()) {
+        onNotice?.(mode.kind === "virtual" && mode.countState === "failed"
+          ? "Retry the row count to select all rows."
+          : "Still counting rows. Select all again when the count is in.");
         return;
       }
       if (rowCount > 0 && columns.length > 0) {
@@ -702,7 +707,7 @@
       <input
         bind:this={findInput}
         bind:value={findQuery}
-        oninput={() => (findStatus = "")}
+        oninput={() => { cancelFind(); findStatus = ""; }}
         onkeydown={handleFindInputKeydown}
         class="find-input"
         type="text"
@@ -718,7 +723,7 @@
   <div class="scroll-viewport" role="grid" tabindex="0" bind:this={scrollContainer} bind:clientHeight={viewportHeight} onscroll={handleScroll} onkeydown={handleGridKeydown}>
     <!-- Sticky header stack: header row + (optional) filter row pinned together
          to avoid 1px subpixel drift between two independently-sticky elements -->
-    <div class="sticky-header">
+    <div class="sticky-header" bind:clientHeight={stickyHeight}>
       <div class="grid-row header-row" role="row">
         <div class="grid-cell row-num-header" role="columnheader">#</div>
         {#each columns as col, colIdx}
@@ -804,7 +809,7 @@
         <div class="grid-row data-row"
           role="row"
           tabindex="-1"
-          style="position: absolute; top: {rowIndexToVirtualTop(rowIdx, ROW_HEIGHT, scrollGeometry, viewportHeight, scrollTop)}px; height: {ROW_HEIGHT}px; width: 100%;"
+          style="position: absolute; top: {rowIndexToVirtualTop(rowIdx, ROW_HEIGHT, scrollGeometry, dataViewportHeight, scrollTop)}px; height: {ROW_HEIGHT}px; width: 100%;"
           oncontextmenu={(e) => handleContextMenu(e, rowIdx)}
           onmousedown={(e) => selection.onCellMouseDown(e, rowIdx)}>
           <div class="grid-cell row-num" class:crosshair={rowInSel} role="gridcell" tabindex="-1">{rowIdx + 1}</div>

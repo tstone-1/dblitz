@@ -7,6 +7,7 @@
 
   let selectedTable = $state<string | null>(null);
   let columns = $state<ColumnInfo[]>([]);
+  let columnsMessage = $state("");
   let schema = $state<SchemaEntry[]>([]);
   let schemaView = $state(false);
 
@@ -26,13 +27,9 @@
   // table just to see its columns.
   const checkAutoSelect = createAutoSelectFirstTable(
     (name) => selectTable(name),
-    () => resetForNewDatabase(),
   );
 
-  // Same stale-state class as BrowseData: selectedTable/columns used to
-  // survive a direct A -> B database switch (and a same-path reopen), leaving
-  // the previous database's table "selected" with its stale column list. The
-  // close-to-null case is covered by checkAutoSelect's onReset.
+  // Each close, swap or same-path reopen retires the previous schema.
   const checkDbReset = createDbGenerationReset({
     getGeneration: () => appState.dbOpenGeneration,
     onReset: () => resetForNewDatabase(),
@@ -48,6 +45,7 @@
   function resetForNewDatabase() {
     selectedTable = null;
     columns = [];
+    columnsMessage = "";
     schema = [];
   }
 
@@ -63,8 +61,14 @@
   });
   const requestColumns = createSessionOwnedRequest<ColumnInfo[]>({
     getGeneration: () => appState.dbOpenGeneration,
-    publish: (value) => { columns = value; },
-    onError: (message) => { appState.error = message; },
+    publish: (value) => {
+      columns = value;
+      columnsMessage = "";
+    },
+    onError: (message) => {
+      columnsMessage = "Could not load columns.";
+      appState.error = message;
+    },
   });
 
   async function loadSchema() {
@@ -72,10 +76,9 @@
   }
 
   async function selectTable(name: string) {
-    // Selection is published immediately and deliberately: the click must show
-    // as selected at once. Only the COLUMNS wait for ownership, which is what
-    // makes a stale response a no-op instead of a mislabelled table.
     selectedTable = name;
+    columns = [];
+    columnsMessage = "Loading columns...";
     await requestColumns(() => getColumns(name));
   }
 
@@ -152,6 +155,9 @@
                 </tr>
               </thead>
               <tbody>
+                {#if columnsMessage}
+                  <tr><td colspan="6"><span role="status">{columnsMessage}</span></td></tr>
+                {/if}
                 {#each columns as col}
                   <tr>
                     <td class="cid">{col.cid}</td>

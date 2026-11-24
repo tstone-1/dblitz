@@ -74,66 +74,16 @@ describe("createAutoSelectFirstTable", () => {
     expect(selected).toEqual(["only_table", "only_table"]);
   });
 
-  it("calls onReset once per close, not on every check while closed", () => {
-    // Repeated firing is not merely wasteful: both consumers call check() from a
-    // $effect, and BrowseData's onReset writes state that its own reset path
-    // reads back, so an effect that re-fired it every run invalidated itself
-    // until Svelte aborted with `effect_update_depth_exceeded`.
-    let resetCalls = 0;
-    const check = createAutoSelectFirstTable(
-      () => {},
-      () => { resetCalls++; },
-    );
-
+  it("waits until a native session's metadata has been published", () => {
+    const selected: string[] = [];
+    const check = createAutoSelectFirstTable((name) => selected.push(name));
     appState.dbOpenGeneration = 1;
-    appState.dbPath = "/a.db";
-    appState.tables = [];
     check();
-    expect(resetCalls).toBe(0);
+    expect(selected).toEqual([]);
 
-    appState.dbPath = null;
-    check();
-    check();
-    check();
-    expect(resetCalls).toBe(1);
-  });
-
-  it("does not reset on mount, when no database has been open yet", () => {
-    // A freshly mounted component is already in the closed state; there is
-    // nothing to clear, and clearing anyway is what started the effect loop.
-    let resetCalls = 0;
-    const check = createAutoSelectFirstTable(
-      () => {},
-      () => { resetCalls++; },
-    );
-
-    check();
-    check();
-
-    expect(resetCalls).toBe(0);
-  });
-
-  it("resets again on a second close", () => {
-    // The latch must unlatch while a database is open, or only the first close
-    // would ever clear the view.
-    let resetCalls = 0;
-    const check = createAutoSelectFirstTable(
-      () => {},
-      () => { resetCalls++; },
-    );
-
-    appState.dbOpenGeneration = 1;
-    appState.dbPath = "/a.db";
-    check();
-    appState.dbPath = null;
-    check();
-    expect(resetCalls).toBe(1);
-
-    appState.dbOpenGeneration = 2;
     appState.dbPath = "/b.db";
+    appState.tables = [table("ready")];
     check();
-    appState.dbPath = null;
-    check();
-    expect(resetCalls).toBe(2);
+    expect(selected).toEqual(["ready"]);
   });
 });

@@ -1,4 +1,6 @@
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -251,6 +253,41 @@ describe("release instructions stage by explicit pathspec", () => {
   });
 });
 
+describe.skipIf(process.platform !== "win32")("local portable build verification", () => {
+  it("rejects a failed or empty build despite an existing exe, and accepts a fresh matching one", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dblitz-local-build-"));
+    try {
+      const script = join(dir, "scripts", "build-local-windows.ps1");
+      const release = join(dir, "src-tauri", "target", "release");
+      const cli = join(dir, "node_modules", ".bin", "tauri.cmd");
+      mkdirSync(dirname(script));
+      mkdirSync(dirname(cli), { recursive: true });
+      mkdirSync(release, { recursive: true });
+      copyFileSync(join(root, "scripts", "build-local-windows.ps1"), script);
+      const exe = join(release, "dblitz.exe");
+      writeFileSync(exe, "previous test output");
+      const env = { ...process.env, FIXTURE_EXE: process.execPath };
+      const version = spawnSync("pwsh", ["-NoProfile", "-Command",
+        "(Get-Item -LiteralPath $env:FIXTURE_EXE).VersionInfo.ProductVersion"], { env, encoding: "utf8" });
+      expect(version.status).toBe(0);
+      writeFileSync(join(dir, "src-tauri", "tauri.conf.json"), JSON.stringify({ version: version.stdout.trim() }));
+      const run = (batch: string) => {
+        writeFileSync(cli, `@echo off\r\n${batch}\r\n`);
+        return spawnSync("pwsh", ["-NoProfile", "-File", script], { env, encoding: "utf8" });
+      };
+      for (const batch of ["exit /b 9", "exit /b 0"]) {
+        expect(run(batch).status).toBe(1);
+        expect(readFileSync(exe, "utf8")).toBe("previous test output");
+      }
+      const built = run('copy /y "%FIXTURE_EXE%" "src-tauri\\target\\release\\dblitz.exe" >nul');
+      expect(built.status, built.stderr).toBe(0);
+      expect(built.stdout).toContain("[OK] Built dblitz");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
+
 describe("workflow jobs are bounded and least-privileged", () => {
   for (const file of WORKFLOWS) {
     it(`gives every job in ${file} a timeout`, () => {
@@ -306,7 +343,8 @@ describe("workflow jobs are bounded and least-privileged", () => {
     const lines = WORKFLOWS.flatMap((f) => readText(f).split("\n")).filter(
       (l) => !l.trimStart().startsWith("#"),
     );
-    const installs = lines.filter((l) => /apt-get install/.test(l));
+    // The publish job only needs the updater signature verifier.
+    const installs = lines.filter((l) => /apt-get install/.test(l) && l.trim() !== "sudo apt-get install -y minisign");
     expect(installs.length).toBeGreaterThan(0);
     const inline = installs.filter((l) => !/apt-get install -y \$deps\b/.test(l));
     expect(inline).toEqual([]);

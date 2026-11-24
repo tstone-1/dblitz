@@ -242,7 +242,7 @@ pub fn open_database(state: &DbState, path: &str) -> Result<Vec<TableInfo>, Stri
 
 fn get_tables_inner(conn: &Connection) -> Result<Vec<TableInfo>, String> {
     let mut stmt = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND lower(substr(name, 1, 7)) != 'sqlite_' ORDER BY name")
         .str_err()?;
 
     let table_names: Vec<String> = stmt
@@ -418,6 +418,18 @@ mod tests {
         let state = DbState::new();
         open_database(&state, path.to_str().unwrap()).unwrap();
         (state, path)
+    }
+
+    #[test]
+    fn table_listing_only_hides_the_literal_reserved_prefix() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE sqliteCache(id INTEGER PRIMARY KEY AUTOINCREMENT)")
+            .unwrap();
+        let tables = super::get_tables_inner(&conn).unwrap();
+        assert_eq!(
+            tables.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            ["sqliteCache"]
+        );
     }
 
     #[test]

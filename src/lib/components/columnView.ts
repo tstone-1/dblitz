@@ -53,32 +53,18 @@ export function buildActiveFilters(
     }));
 }
 
-export function colorPresetsForTheme(theme: Theme): string[] {
-  if (theme === "dark") {
-    return [
-      "",
-      "#3b1c1c",
-      "#1c3b1c",
-      "#1c1c3b",
-      "#3b3b1c",
-      "#3b1c3b",
-      "#1c3b3b",
-      "#2d1f1f",
-      "#1f2d1f",
-    ];
-  }
+const darkPresets = ["", "#3b1c1c", "#1c3b1c", "#1c1c3b", "#3b3b1c", "#3b1c3b", "#1c3b3b", "#2d1f1f", "#1f2d1f"];
+const lightPresets = ["", "#fde8e8", "#e8fde8", "#e8e8fd", "#fdfde8", "#fde8fd", "#e8fdfd", "#f5eded", "#edf5ed"];
 
-  return [
-    "",
-    "#fde8e8",
-    "#e8fde8",
-    "#e8e8fd",
-    "#fdfde8",
-    "#fde8fd",
-    "#e8fdfd",
-    "#f5eded",
-    "#edf5ed",
-  ];
+export function colorPresetsForTheme(theme: Theme): string[] {
+  return theme === "dark" ? darkPresets : lightPresets;
+}
+
+/** Existing configs store the color that was visible when the preset was chosen. */
+export function columnColorForTheme(saved: string, theme: Theme): string {
+  const other = theme === "dark" ? lightPresets : darkPresets;
+  const index = other.indexOf(saved.toLowerCase());
+  return index < 0 ? saved : colorPresetsForTheme(theme)[index];
 }
 
 /**

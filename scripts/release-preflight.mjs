@@ -20,7 +20,7 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 /** CalVer `YY.M.MICRO`, the scheme declared in BUILD.md and AGENTS.md. */
-const CALVER = /^(\d{2})\.(\d{1,2})\.(\d+)$/;
+export const CALVER = /^(\d{2})\.([1-9]|1[0-2])\.(0|[1-9]\d*)$/;
 
 /**
  * @typedef {object} ReleaseContractInput

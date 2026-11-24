@@ -96,7 +96,67 @@ describe("saveViewConfig failure notice", () => {
 });
 
 describe("database open sequencing", () => {
-  it("lets only the latest overlapping open request publish state", async () => {
+  it("keeps a completed native swap when the next queued open fails", async () => {
+    let connected: string | null = null;
+    const swapped = Promise.withResolvers<void>();
+    const metadata = Promise.withResolvers<void>();
+    vi.mocked(invoke).mockReset().mockImplementation(async (command, args) => {
+      if (command === "open_database") {
+        const { path } = args as { path: string };
+        if (path === "B.db") await swapped.promise;
+        if (path === "missing.db") throw new Error("file missing");
+        connected = path;
+        return [{ name: path, row_count: 1 }];
+      }
+      if (command === "load_view_config") {
+        if (connected === "B.db") await metadata.promise;
+        return { tables: {}, tint: null, label: connected };
+      }
+      if (command === "get_columns") return [{ name: connected, col_type: "TEXT" }];
+      return undefined;
+    });
+    await openDatabase("A.db");
+    const generation = appState.dbOpenGeneration;
+    const openingB = openDatabase("B.db");
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("open_database", { path: "B.db" }));
+    const failing = openDatabase("missing.db");
+    swapped.resolve();
+    await vi.waitFor(() => expect(connected).toBe("B.db"));
+    expect(appState.dbOpenGeneration).toBeGreaterThan(generation);
+    expect(appState.dbPath).toBeNull();
+    expect(appState.tables).toEqual([]);
+    await saveViewConfig();
+    expect(invoke).not.toHaveBeenCalledWith("save_view_config", expect.anything());
+
+    metadata.resolve();
+    await Promise.all([openingB, failing]);
+    expect(appState.dbPath).toBe(connected);
+    expect(appState.tables[0].name).toBe(connected);
+    expect(appState.tableColumns["B.db"]).toEqual([connected]);
+    expect(appState.fileConfig.label).toBe(connected);
+    expect(appState.error).toContain("file missing");
+    expect(appState.loading).toBe(false);
+  });
+
+  it("retires the old session even if loading settings and cleanup both fail", async () => {
+    vi.mocked(invoke).mockReset().mockImplementation(async command => {
+      if (command === "open_database") return [{ name: "new_table", row_count: 1 }];
+      if (command === "load_view_config") throw new Error("settings failed");
+      if (command === "close_database") throw new Error("cleanup failed");
+      return undefined;
+    });
+    appState.dbPath = "A.db";
+    const generation = appState.dbOpenGeneration;
+    await openDatabase("B.db");
+    expect(appState.dbPath).toBeNull();
+    expect(appState.tables).toEqual([]);
+    expect(appState.dbOpenGeneration).toBeGreaterThan(generation);
+    expect(appState.error).toContain("settings failed");
+    expect(appState.error).toContain("cleanup failed");
+    expect(appState.loading).toBe(false);
+  });
+
+  it("publishes the last successful overlapping open", async () => {
     let resolveFirst!: (tables: { name: string; row_count: number }[]) => void;
     const firstOpen = new Promise<{ name: string; row_count: number }[]>((resolve) => {
       resolveFirst = resolve;

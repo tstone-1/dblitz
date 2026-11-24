@@ -182,10 +182,12 @@ describe("the bump CLI", () => {
     const dir = copyTree();
     try {
       const before = readReleaseFiles(dir, (p) => readFileSync(p, "utf8"));
-      const run = node(dir, "scripts/bump-version.mjs", "26.11");
-      expect(run.status).toBe(1);
-      expect(run.stderr).toContain("[FAIL]");
-      expect(readReleaseFiles(dir, (p) => readFileSync(p, "utf8"))).toEqual(before);
+      for (const invalid of ["26.11", "26.21.0", "26.00.0", "26.08.1"]) {
+        const run = node(dir, "scripts/bump-version.mjs", invalid, "--release");
+        expect(run.status).toBe(1);
+        expect(run.stderr).toContain("not CalVer");
+        expect(readReleaseFiles(dir, (p) => readFileSync(p, "utf8"))).toEqual(before);
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

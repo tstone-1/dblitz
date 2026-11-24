@@ -5,6 +5,20 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
+## [26.11.1] - Unreleased
+
+### Fixed
+
+- Opening files in quick succession keeps the displayed path, schema and query results together, including when the last file fails to open.
+- Sorted pages retain every tied row when an input column shadows the engine's row identifier. SQLite filters preserve exact 64-bit integer comparisons and global search finds text stored in BLOB columns.
+- Browse keeps the applied filters in sync with sorting and undo. Find and Select All handle a failed row count, and scrolling reaches the last row of very large tables.
+- Copy and Excel export use the selection captured when the operation starts. Excel preserves the digits of very large integers. Saved column colors follow the active theme in Browse and SQL results.
+- Structure clears the previous table's columns when a new selection is loading. Table discovery includes user tables such as `sqliteCache`.
+
+### Security
+
+- Updated the Rust `cookie` and `url` dependencies for RUSTSEC-2026-0594 and RUSTSEC-2026-0592.
+
 ## [26.11.0] - 2026-11-10
 
 ### Security

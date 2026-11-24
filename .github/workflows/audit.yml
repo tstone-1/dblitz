@@ -68,7 +68,8 @@ jobs:
             "RUSTSEC-2024-0429",
             "RUSTSEC-2026-0370",
             "RUSTSEC-2026-0371",
-            "RUSTSEC-2026-0372"
+            "RUSTSEC-2026-0372",
+            "RUSTSEC-2026-0543"
           ]'
           # Why each one is allowed:
           # RUSTSEC-2024-0370  proc-macro-error, unmaintained. A build-time
@@ -81,6 +82,8 @@ jobs:
           # RUSTSEC-2026-0372  zvariant_derive, unmaintained. The three come with
           #                    zbus, which tauri-plugin-opener uses on Linux to ask
           #                    the file manager over D-Bus to show a file.
+          # RUSTSEC-2026-0543  chrono, required by Arrow via DuckDB. Recheck on each
+          #                    upgrade against apache/arrow-rs#9183 (migration to jiff).
           report="$RUNNER_TEMP/audit.json"
           status=0
           cargo audit --file src-tauri/Cargo.lock --json > "$report" || status=$?

@@ -42,7 +42,7 @@ function harness(options: HarnessOptions = {}) {
     sortColumn: null as string | null,
     sortAsc: true,
     loading: false,
-    countPending: false,
+    countState: "known",
   };
   const errors: string[] = [];
   const configs: Record<string, ViewConfig> = options.configs ?? {};
@@ -70,7 +70,7 @@ function harness(options: HarnessOptions = {}) {
     getSortAsc: () => state.sortAsc,
     setSortAsc: (value) => { state.sortAsc = value; },
     setLoading: (value) => { state.loading = value; },
-    setCountPending: (value) => { state.countPending = value; },
+    setCountState: (value) => { state.countState = value; },
     setError: (message) => errors.push(message),
     getVisibleColumns: () => state.columns,
     getColumnIndex: (col) => state.columns.indexOf(col),
@@ -217,6 +217,26 @@ describe("createBrowseQuery.selectTable", () => {
 });
 
 describe("createBrowseQuery.reloadData", () => {
+  it("keeps a failed count provisional until retry supplies the true total", async () => {
+    const countRows = vi.fn().mockRejectedValueOnce(new Error("count failed")).mockResolvedValue(87);
+    const h = harness({
+      queryTable: async () => ({ columns: ["id"], rows: [["1"], ["2"]], total_rows: null, offset: 0 }),
+      countRows,
+    });
+    h.state.selectedTable = "items";
+    await h.query.reloadData();
+    await flush();
+    expect(h.state.totalRows).toBe(2);
+    expect(h.state.countState).toBe("failed");
+    expect(h.errors[0]).toContain("count failed");
+    const retry = h.query.reloadData();
+    expect(h.state.countState).toBe("pending");
+    await retry;
+    await flush();
+    expect(h.state.countState).toBe("known");
+    expect(h.state.totalRows).toBe(87);
+  });
+
   it("zeroes the row count and reports the error when the first chunk fails", async () => {
     // The reported defect: a regex filter of "(" returns "Invalid regex".
     // beginReload() has already emptied the row cache, but totalRows still held
@@ -237,7 +257,7 @@ describe("createBrowseQuery.reloadData", () => {
 
     expect(h.state.totalRows).toBe(0);
     expect(h.state.loading).toBe(false);
-    expect(h.state.countPending).toBe(false);
+    expect(h.state.countState).toBe("failed");
     expect(h.errors[0]).toContain("Invalid regex");
 
     // And nothing the grid still renders can restart it.
@@ -309,7 +329,7 @@ describe("createBrowseQuery.reloadData", () => {
     h.state.columns = ["id", "name"];
 
     await h.query.reloadData();
-    expect(h.state.countPending).toBe(true);
+    expect(h.state.countState).toBe("pending");
 
     await h.query.reloadData(); // a newer reload takes over
     resolveCount(999999);
@@ -368,7 +388,7 @@ describe("createBrowseQuery.reloadData", () => {
 
     expect(countCalls).toBe(2);
     expect(h.errors).toEqual([]);
-    expect(h.state.countPending).toBe(false);
+    expect(h.state.countState).toBe("known");
     expect(h.state.totalRows).toBe(42);
   });
 
@@ -429,6 +449,29 @@ describe("createBrowseQuery.reloadData", () => {
 });
 
 describe("createBrowseQuery.debouncedReload", () => {
+  it("restores a filter edited back after a sort applied the intermediate value", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      h.state.selectedTable = "items";
+      h.state.columns = ["id", "name"];
+      h.state.globalFilter = "10";
+      await h.query.reloadData();
+      h.state.globalFilter = "100";
+      h.query.debouncedReload();
+      h.query.handleSort("id");
+      await vi.advanceTimersByTimeAsync(0);
+      h.state.globalFilter = "10";
+      h.query.debouncedReload();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(h.queries.map(q => [q.globalFilter, q.sortColumn])).toEqual([
+        ["10", null], ["100", "id"], ["10", "id"],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("coalesces keystrokes into one query and dedupes an unchanged filter", async () => {
     vi.useFakeTimers();
     try {

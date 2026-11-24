@@ -105,7 +105,7 @@
   <!-- App-global error/notice/update bars: they sit between the toolbar and the
        tab content, so the order is decided here rather than inside Toolbar. -->
   <AppBanners />
-  <div class="content">
+  <div class="content" hidden={appState.loading}>
     <div class="tab-panel" class:hidden={appState.activeTab !== "structure"}>
       <DatabaseStructure />
     </div>

@@ -1,76 +1,12 @@
-/**
- * Single-table auto-select helper.
- *
- * When the user opens a database with exactly one table, both BrowseData and
- * DatabaseStructure should auto-select that lone table — there's no choice
- * to make, so the user shouldn't have to click. This helper encapsulates the
- * "track which db path was last auto-selected, fire when conditions met"
- * bookkeeping so each component doesn't reinvent the same effect.
- *
- * Usage from a Svelte component:
- *
- *     const checkAutoSelect = createAutoSelectFirstTable(
- *       (tableName) => {
- *         sidebarCollapsed = true;
- *         selectTable(tableName);
- *       },
- *       () => {
- *         // optional: clear local view state when the database closes
- *         selectedTable = null;
- *         columns = [];
- *       },
- *     );
- *
- *     $effect(() => {
- *       checkAutoSelect();
- *     });
- *
- * The `$effect` lives in the calling component so its reactive reads of
- * `appState.dbPath` and `appState.tables` are tracked by the component's
- * own reactive scope. The factory only owns the per-instance `autoSelectedDb`
- * flag (via closure) so different consumers don't race against a shared one.
- */
-
 import { appState } from "#lib/store.svelte.ts";
 
-export function createAutoSelectFirstTable(
-  onSelect: (tableName: string) => void,
-  onReset?: () => void,
-): () => void {
-  // Keyed on dbOpenGeneration, NOT dbPath: reopening the already-open file
-  // (Toolbar/recents) must re-auto-select the lone table after the reset that
-  // reopen triggers, and dbPath doesn't change in that case. 0 is the "no db
-  // opened yet" sentinel matching appState.dbOpenGeneration's initial value.
-  let autoSelectedGen = 0;
-
-  // `onReset` fires on the close TRANSITION, not on every check while closed.
-  // Both consumers call `check()` from a `$effect`, and BrowseData's onReset
-  // (`resetForNewDatabase`) writes selectedTable/filters/sort and then calls
-  // `virtualRows.reset()`, which reads those same values back through
-  // `makeSnapshot()`. An effect that writes state it also reads re-triggers
-  // itself, so firing unconditionally looped until Svelte gave up with
-  // `effect_update_depth_exceeded` — 9 console errors on every launch with no
-  // database open, and the effect never settling.
-  //
-  // Starts `true` because a freshly mounted component is already in the closed
-  // state with nothing to clear; the flag only unlatches once a database has
-  // actually been open.
-  let resetFired = true;
-
-  return function check() {
-    if (!appState.dbPath) {
-      autoSelectedGen = 0;
-      if (!resetFired) {
-        resetFired = true;
-        onReset?.();
-      }
-      return;
-    }
-    resetFired = false;
-    const gen = appState.dbOpenGeneration;
-    if (appState.tables.length === 1 && autoSelectedGen !== gen) {
-      autoSelectedGen = gen;
-      onSelect(appState.tables[0].name);
-    }
+/** Select the sole table once per native database session, including same-path reopens. */
+export function createAutoSelectFirstTable(onSelect: (name: string) => void): () => void {
+  let selectedGeneration = 0;
+  return () => {
+    const generation = appState.dbOpenGeneration;
+    if (!appState.dbPath || appState.tables.length !== 1 || generation === selectedGeneration) return;
+    selectedGeneration = generation;
+    onSelect(appState.tables[0].name);
   };
 }

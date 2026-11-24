@@ -413,10 +413,14 @@ The committer, reviewer and release approver is
   compiled from source into `dblitz.exe`. The installer builder also signs the
   NSIS plugin DLLs it packs into the installer: they are NSIS's and Tauri's
   files, run only while the installer runs, and are not left on the disk. No
-  other file is signed with this certificate here.
-- **Where.** Only in the public [release workflow](.github/workflows/release.yml),
+  other files are signed for distribution.
+- **Where.** Releases are signed in the public [release workflow](.github/workflows/release.yml)
   on a GitHub-hosted runner, for a version tag the maintainer pushes. The
   workflow reads every signature back and fails if one is missing or not his.
+- **Rehearsal.** The maintainer can also run the [signing rehearsal](.github/workflows/sign-rehearsal.yml)
+  on `main`. It signs a copy of the signing client and an old unsigned installer,
+  verifies both signatures, and installs the test copy. The runner discards the
+  two signed copies when it finishes. Neither is published.
 - **Approval.** A release is published only when every platform built and every
   check passed. A version tag is pushed by the maintainer alone, and that push
   is the approval.
@@ -477,7 +481,8 @@ out — the `db` submodules, the rowid paging and caching rules, and the four
 read-only layers; [AGENTS.md](AGENTS.md) indexes it.
 
 The screenshots show a synthetic coffee-roaster database, every row invented;
-`uv run scripts/make-demo-db.py` rebuilds the same file from a fixed seed.
+`uv run scripts/make-demo-db.py` creates the fixture from a fixed seed. Use
+`--replace` to regenerate an existing fixture.
 
 ## Contributing
 

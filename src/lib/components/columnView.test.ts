@@ -3,6 +3,7 @@ import {
   applyColumnPreset,
   buildActiveFilters,
   colorPresetsForTheme,
+  columnColorForTheme,
   normalizePresetName,
   orderColumns,
   PRESET_NAME_MAX_LEN,
@@ -55,6 +56,19 @@ describe("column view helpers", () => {
     expect(reorderColumn(["a", "b", "c"], [], "c", "a")).toEqual(["c", "a", "b"]);
     expect(reorderColumn(["a", "b"], ["b", "gone", "a"], "a", "b")).toEqual(["a", "b"]);
     expect(reorderColumn(["a", "b"], ["b", "a"], "gone", "a")).toBeNull();
+  });
+
+  it("resolves every saved Browse swatch for the current theme", () => {
+    const light = colorPresetsForTheme("light");
+    const dark = colorPresetsForTheme("dark");
+    expect(dark).toHaveLength(light.length);
+    light.forEach((color, i) => {
+      expect(columnColorForTheme(color, "dark")).toBe(dark[i]);
+      expect(columnColorForTheme(dark[i], "light")).toBe(color);
+      expect(columnColorForTheme(color, "light")).toBe(color);
+      expect(columnColorForTheme(dark[i], "dark")).toBe(dark[i]);
+    });
+    expect(columnColorForTheme("#123456", "dark")).toBe("#123456");
   });
 
   it("returns theme-specific column color presets", () => {

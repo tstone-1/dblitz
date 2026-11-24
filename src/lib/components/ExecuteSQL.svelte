@@ -72,6 +72,7 @@
           sql: executedSql,
           columns: result.columns,
           tableNames: appState.tables.map((t) => t.name),
+          theme: appState.theme,
           getColumnColors: (t) => getTableConfig(t).column_colors,
         })
       : {},

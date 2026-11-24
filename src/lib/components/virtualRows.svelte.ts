@@ -8,12 +8,9 @@ import type { QueryResult } from "#lib/ipc.ts";
 // late-arriving async result repopulate a cache it no longer belongs to.
 // The layers, outermost to innermost, and what each protects against:
 //
-// * store.databaseRequestGeneration (+ databaseRequestQueue) -- serializes
-//   overlapping open/close IPC transactions against the singleton backend
-//   connection; an older open that's still running stops before it publishes
-//   frontend state. store.dbOpenGeneration -- bumped on EVERY successful open
-//   (same-path reopen included) and is the signal every frontend reset keys on,
-//   because dbPath alone can't detect "reopened the file I already had open".
+// * The store serializes native open/close requests. Every successful swap
+//   advances dbOpenGeneration and retires the previous view before metadata
+//   loads. A queued open can fail, so each completed swap is published.
 //
 // * BrowseData's reset effect -- on a dbOpenGeneration change, drops
 //   selectedTable/columns/filters/sort and calls virtualRows.reset(). Its
@@ -348,6 +345,7 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
     if (!deps.getSelectedTable()) return [];
 
     const myEpoch = epoch;
+    const project = visibleProjector();
     const firstChunk = Math.floor(start / deps.chunkSize);
     const lastChunk = Math.floor(end / deps.chunkSize);
     const chunkCount = lastChunk - firstChunk + 1;
@@ -420,8 +418,6 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
       throw new Error("Selection changed while rows were loading. Try again.");
     }
 
-    // One projector for the whole range, not one per row.
-    const project = visibleProjector();
     const out: Row[] = [];
     for (let idx = start; idx <= end; idx++) {
       const chunkIdx = Math.floor(idx / deps.chunkSize);

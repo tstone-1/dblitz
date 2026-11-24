@@ -23,7 +23,7 @@ Read the section before working in its area.
 
 ### Vitest's global environment is `node`
 
-- **Vitest's global environment is `node`.** The two test files that need a DOM opt in per file with `// @vitest-environment jsdom` on line 1: `sqlEditorExtensions.test.ts` and `dragReorder.test.ts`. Keep it per file: a global jsdom would hide that most of this suite is pure logic. jsdom 30 has no `document.elementFromPoint`, which `dragReorder.test.ts` supplies and asserts is still absent.
+- **Vitest's global environment is `node`.** Tests that use the DOM opt in per file with `// @vitest-environment jsdom` on line 1. Mounted components also need the browser export of Svelte in Vitest's client environment (see `vite.config.js`). Keep it per file: a global jsdom would hide that most of this suite is pure logic. jsdom 30 has no `document.elementFromPoint`, which `dragReorder.test.ts` supplies and asserts is still absent.
 
 ### A green gate on one OS says nothing about a `cfg`-gated symbol on another
 
@@ -71,8 +71,10 @@ several minutes, so run it in the background.
 
 The images in `docs/images/` come from the synthetic database
 `scripts/make-demo-db.py` builds (fixed seed, byte-identical across runs, every row
-invented), driven over CDP; the script's docstring has the launch steps. Five things
-each cost a retry:
+invented), driven over CDP. Pass `--replace` to regenerate an existing demo
+database. The format-comparison benchmark reuses a complete SQLite/Parquet pair
+and requires a fresh directory if only one file exists. The screenshot script's
+docstring has the launch steps. Five things each cost a retry:
 
 - **The toolbar shows the full database path**, and it lands in every image. Copy the
   database to a neutral path (`C:\demo\roastery.sqlite`) first; a scratch or home path
@@ -196,6 +198,9 @@ the `json` feature of the `duckdb` crate, because extension autoinstall is off.
   (the SQL tab) is locked, see below. The file is exposed as the view `data`; `browse`
   also has `data_rn` with DuckDB's virtual `file_row_number`, unless the file has its own
   column of that name, in which case every view falls back to `LIMIT/OFFSET`.
+  When input columns shadow the engine row identifier, sorted fallback pages use
+  the input row position as a final tie-breaker. Equal sort keys can otherwise
+  repeat or disappear between consecutive pages.
 - **The SQL tab lockdown is two layers, and the order is load-bearing** (`pq/lockdown.rs`).
   Settings (`allowed_paths` = the file, external access off, extension autoload/install off,
   then `lock_configuration`) stop every file and network access. A single-SELECT classifier
@@ -429,7 +434,8 @@ the `json` feature of the `duckdb` crate, because extension autoinstall is off.
 - **An `await` in a component publishes only if it still owns publication.** Two facts, both captured BEFORE the await: a monotonic per-caller token and `appState.dbOpenGeneration`. The token alone lets a closed database's answer repopulate a reset panel; the generation alone lets two requests inside one session finish out of order and label table B with table A's columns. `createSessionOwnedRequest` in `sessionOwnedRequest.ts` is the seam — a publication guard, not a request bus: it cancels nothing, the in-flight call still completes and its answer is dropped, and its errors are gated too. Users: `DatabaseStructure.svelte` and `createSqlExecution` in `sqlExecution.ts` (a SQL result from a closed or replaced session is dropped, writes no history entry, and clears `running`). `store.svelte.ts` and `virtualRows.svelte.ts` enforce the same rule inline. Pinned by `sessionOwnedRequest.test.ts` and `sqlExecution.test.ts`.
 - **`reloadData` resolves true only when it published its first chunk and is still current.** The `selectTable` auto-fit tail keys on that, because comparing table names cannot tell two selections of the same table apart: a double-click during a slow first load auto-fitted on an empty row cache and saved header-only widths.
 - **A first chunk or row count stopped by `cancel_queries` while its epoch is still current is issued once more** (`retryAfterSharedCancel`). `cancel_queries` is shared with the SQL tab, so Cancel there used to empty a loading Browse view. Browse's own cancels come from a newer reload, whose epoch has already moved, and are not retried.
-- **The filter debounce memo records what was queried, at the time the timer fires**, and an edit undone inside the window cancels the armed timer. Armed and left alone, the timer recorded the filter it was armed with while the reload queried the live one, and retyping that filter then matched the memo and never queried.
+- Record the filter snapshot at the start of every browse reload. Sorting can apply a filter before its debounce timer fires. Undoing that edit must compare against the snapshot the sort actually queried.
+- A successful native open changes which file all subsequent IPC requests use, even when another open is queued. Retire the old view when the backend swaps. Structure also clears the previous columns as soon as a new table is selected.
 
 ### Find in the grid searches the rows the grid shows
 
@@ -594,9 +600,9 @@ caught it either", which is the more useful result.
   read-only layers above, a crafted database file (the app's one genuinely
   untrusted input), updater signature verification, webview escape, and a file
   signed with the Windows certificate that the release workflow did not build.
-  A SmartScreen warning on a signed build, and the unsigned Windows builds up
-  to 26.10.0, are documented states, not findings.
-
+- The hook reads private expressions from the audit script's `$ForbiddenPatterns` array. Its strict reader blocks an empty list, unexpected syntax, or an expression it cannot translate. Pattern values and matched lines stay out of its output. When PowerShell 7 is available the private audit runs as well.
+- Git supplies one update per pushed ref on standard input. The hook searches the committed tree at each outgoing tip and each intermediate commit, covering all tracked file names, including `.mjs`. For a new ref, it uses the destination's advertised refs to identify already-published history. An unavailable remote, unreadable object, or search error blocks the push.
+- `src/lib/prePushHook.test.ts` exercises the hook against local synthetic repositories and a private pattern fixture. Never put a real blocked value into this repository to test the hook.
 ### The pre-push hook holds none of the names it blocks
 
 - `.githooks/pre-push` runs the maintainer's private public-safe audit before a push and blocks the push when that audit script is not found. Until 2026-11-10 its fallback for a machine without `pwsh` carried its own copy of the blocked names, split across `printf` calls: that stops a grep and nothing else, and this file is public. The values are still in the history before that date.
@@ -634,10 +640,11 @@ caught it either", which is the more useful result.
 
 ### Expected `cargo audit` noise
 
-- **`.github/workflows/audit.yml` runs `cargo audit` on `src-tauri/Cargo.lock` every Monday and on demand, and fails on every finding not allowed below.** A vulnerability is never allowed: it is fixed. The allowed warnings, measured 2026-11-10 with cargo-audit 0.22.2, are all transitive crates of Tauri's Linux side:
+- **`.github/workflows/audit.yml` runs `cargo audit` on `src-tauri/Cargo.lock` every Monday and on demand, and fails on every finding not allowed below.** A vulnerability is never allowed: it is fixed. The first five warnings come from Tauri on Linux. The last comes from DuckDB on all platforms:
   - `RUSTSEC-2024-0370`: `proc-macro-error`, unmaintained. A build-time macro under `glib-macros` and `gtk3-macros`, the GTK 3 stack of the Linux webview; none of it runs.
   - `RUSTSEC-2024-0429`: `glib` 0.18, unsound `VariantStrIter`. The same GTK 3 stack; dblitz never iterates a GVariant.
   - `RUSTSEC-2026-0370`, `RUSTSEC-2026-0371`, `RUSTSEC-2026-0372`: `zvariant`, `zbus_names` and `zvariant_derive`, unmaintained. They come with `zbus`, which `tauri-plugin-opener` uses on Linux to ask the file manager over D-Bus to show a file.
+  - `RUSTSEC-2026-0543`: unmaintained `chrono` is required by Arrow 60 via DuckDB. dblitz has no direct dependency to replace. On each DuckDB or Arrow upgrade, run `cargo tree -i chrono` and remove the exception once the tree is clear. [Arrow's migration to jiff](https://github.com/apache/arrow-rs/issues/9183).
 - The workflow's list and the one above must name the same entries, each with its reason in the workflow; `checksWorkflow.test.ts` holds them equal (it reads every RUSTSEC ID and every "yanked" crate in the sub-bullets above, so history goes here, not there). A yanked `async-executor` 1.14.0 under `zbus` was on both lists until the 26.11.0 `cargo update` moved it to 1.14.1. A finding is added to both only with a reason, and the workflow warns about an allowed entry that nothing matches any more, so the list shrinks. The report is read as JSON: cargo-audit exits 1 for a vulnerability and for a crash alike, passes warnings unless told otherwise, and its `--ignore` cannot name a yanked version. The BUILD.md pre-release `cargo audit` stays: the workflow says nothing about a lockfile that is not yet on `main`.
 - The npm `cookie` override (`^0.7.2`) that answered an old finding on the unreachable SvelteKit SSR path was removed with SvelteKit 3, which needs `cookie` 2; re-evaluate a `cookie` finding if one reappears.
 - **`npm audit` reports 4 low `deepmerge` findings, and they have no fix** (measured 2026-10-29). GHSA-gcqx-w48m-w2h4 covers every `deepmerge` from 4.2.0 up; `@sveltejs/vite-plugin-svelte` uses it to merge config at build time, and nothing of it ships in the app. The "fix" `npm audit fix --force` offers is a downgrade to `@sveltejs/kit` 0.0.30: never run it. Re-check when `vite-plugin-svelte` drops or patches the dependency.
@@ -645,8 +652,8 @@ caught it either", which is the more useful result.
 ### In-app updater
 
 - **The updater's minisign private key is the most safety-critical secret in this repo.** It lives in the maintainer's password manager and in the `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repo secrets; the public key is committed in `tauri.conf.json`. It is a **dblitz-only** key — deliberately not shared with `screenpick`. Losing it permanently orphans every installed copy: a new key cannot sign for clients holding the old public key, so each user would have to reinstall by hand. It is unrelated to OS code signing and is not fixed by adding an Apple Developer ID. Never print, echo, or paste the private key into a tool call; custody and regeneration live in [BUILD.md](../BUILD.md#updater-signing-key).
-- **A release with no `latest.json` updates nobody, and looks green.** When the signing secret is missing or empty, `tauri-action` logs "Signature not found for the updater JSON. Skipping upload..." and still succeeds. The release ships with installers and no manifest, and the failure only surfaces as users silently never updating. BUILD.md's post-release checks exist for this.
-- **The release matrix must stay `max-parallel: 1`.** `tauri-action` builds `latest.json` by read-modify-write against the release asset, so parallel legs clobber each other's platform entries and produce a manifest that updates only some platforms. dblitz has five legs (two of them macOS, two Windows), so this bites harder here than in a two-leg repo. The `publish` job reads `latest.json` back on the draft and refuses to publish unless all five platforms are in it. Nothing fails; the manifest is just incomplete.
+- **A release with no `latest.json` updates nobody, and looks green.** When the signing secret is missing or empty, `tauri-action` logs "Signature not found for the updater JSON. Skipping upload..." and still succeeds. The release ships with installers and no manifest, and the failure only surfaces as users silently never updating. The publish gate now requires the draft manifest. BUILD.md also checks the published copy.
+- **The release matrix must stay `max-parallel: 1`.** `tauri-action` builds `latest.json` by read-modify-write against the release asset, so parallel legs clobber each other's platform entries and produce a manifest that updates only some platforms. dblitz has five legs (two of them macOS, two Windows), so this bites harder here than in a two-leg repo. Before publishing, the job compares the updater key with the previous release and checks all five required platform mappings against the draft's asset inventory. It verifies the bytes for every advertised payload with Minisign and requires the signed version to match the tag. The GitHub CLI refuses `--slurp` with its built-in `--jq`: pipe the paginated response into external `jq` to combine the asset pages. The verifier was exercised against all seven payloads and twelve platform entries published for 26.11.0.
 - **Not every install can self-update, and the UI must not pretend otherwise.** The updater hands its payload to an installer, and neither a package-managed Linux install nor a standalone Windows exe has one that owns this copy. `InstallProvenance` in `updates.rs` enumerates all five artifacts and `self_update_supported` matches exhaustively, so a new artifact cannot inherit a default answer. Do not "fix" the gate by always offering the install. Pinned by `updates::tests::{macos_can_always_self_update, installed_windows_build_can_self_update, portable_windows_build_does_not_offer_install, linux_appimage_can_self_update, linux_deb_or_rpm_cannot_self_update}`.
 - **Windows provenance is read from the registry, not guessed from the path.** `windows_install_provenance` in `platform/windows.rs` compares the running executable's directory against the `InstallLocation` the NSIS installer recorded under `Software\Microsoft\Windows\CurrentVersion\Uninstall\dblitz` (HKCU per-user, HKLM per-machine; the value is stored **with** surrounding quotes, so it must be trimmed). Path identity is the test rather than the key merely existing: a user can have dblitz installed *and* be running a portable copy out of Downloads. Anything unreadable reports portable, because the two failure directions are not symmetric — wrongly claiming portable costs one manual download, while wrongly claiming installed runs the NSIS installer, which cannot find the standalone exe and instead creates a *second*, installed copy at the new version while the file the user launches stays old. The last segment of that key is `productName` and nothing at build time couples them (`uninstall_key_tracks_the_bundle_product_name`).
 - **`updates.rs` is deliberately pure** — no `tauri::` imports, no env reads, no `cfg!`, no registry access. Everything host-dependent is resolved in `lib.rs` and arrives as one `InstallProvenance`, which is what lets the Linux *and* Windows gates be unit-tested from any machine. Keep it that way. The `allow(dead_code)` on the enum is there because every build constructs exactly one variant; the tests construct all five.

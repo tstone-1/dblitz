@@ -25,8 +25,7 @@
  *   (Toolbar / recents) reopens the backend connection and clears its caches
  *   without changing `dbPath`, so a path-only gate would keep serving the
  *   previous connection's stale state. The generation bumps on every successful
- *   open, same-path included. The close-to-null case is NOT covered here --
- *   `createAutoSelectFirstTable`'s `onReset` owns that transition.
+ *   native swap, same-path reopen and close included.
  *
  * * The `$effect` stays in the calling component, and this module owns no
  *   effect of its own. That keeps the reactive read of `appState` inside the
