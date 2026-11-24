@@ -5,7 +5,7 @@
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getInitialFile, toggleDevtools } from "#lib/ipc.ts";
   import { openSucceeded } from "#lib/openOutcome.ts";
-  import { appState, initTheme, openDatabase } from "#lib/store.svelte.ts";
+  import { appState, initTheme, openDatabase, refreshSharedHistory } from "#lib/store.svelte.ts";
   import { update } from "#lib/updateState.svelte.ts";
   import { cancelPendingClipboardCopy } from "#lib/components/clipboardTable.ts";
   import Toolbar from "#lib/components/Toolbar.svelte";
@@ -34,6 +34,7 @@
 
   onMount(() => {
     initTheme();
+    window.addEventListener("storage", refreshSharedHistory);
 
     // macOS delivers a document open (Finder double-click, Dock "Open Recent",
     // `open -a dblitz file.db`) as an Apple event that reaches the backend as
@@ -59,8 +60,10 @@
       }
       unlistenOpenFile = unlisten;
       const path = await getInitialFile();
-      if (path) await handleOpenFile(path);
-    })();
+      if (path && !disposed) await handleOpenFile(path);
+    })().catch((error: unknown) => {
+      if (!disposed) appState.error = String(error);
+    });
 
     // Resolves the running version, whether this launch follows an update, and
     // whether this install can replace itself at all.
@@ -91,6 +94,7 @@
 
     return () => {
       disposed = true;
+      window.removeEventListener("storage", refreshSharedHistory);
       unlistenOpenFile?.();
       document.removeEventListener("keydown", onKeyDown);
       document.removeEventListener("copy", cancelPendingClipboardCopy, true);

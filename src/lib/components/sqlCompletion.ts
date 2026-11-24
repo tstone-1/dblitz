@@ -26,6 +26,7 @@ import {
   type CompletionResult,
 } from "@codemirror/autocomplete";
 import { syntaxTree } from "@codemirror/language";
+import { PostgreSQL, SQLite } from "@codemirror/lang-sql";
 import type { SqlEngine } from "#lib/ipc.ts";
 import functionLists from "./sqlFunctions.json";
 
@@ -52,18 +53,14 @@ export function functionsFor(engine: SqlEngine): SqlFunctionDoc[] {
 /** One identifier token: "double quoted", [bracketed], `backticked`, or bare. */
 const IDENT = String.raw`(?:"(?:[^"]|"")+"|\[[^\]]+\]|` + "`[^`]+`" + String.raw`|[A-Za-z_][\w$]*)`;
 
-/** Words that cannot be used as a bare identifier, so a name equal to one is
- *  inserted quoted. Not SQLite's full list: the ones a column is plausibly
- *  called (`order`, `group`, `key`, `values`, ...). */
-const RESERVED = new Set(
-  (
-    "all and as asc between by case cast check collate create cross default delete desc " +
-    "distinct drop else end except exists from full glob group having in index inner insert " +
-    "intersect into is join key left like limit natural not null offset on or order outer " +
-    "primary references right select set table then to union unique update using values when " +
-    "where with"
-  ).split(" "),
-);
+// Use the editor dialects' keyword sets for schema suggestions. Clock and
+// session expressions can execute successfully when an identifier is left bare.
+const RESERVED = new Set([
+  ...(SQLite.spec.keywords ?? "").split(/\s+/),
+  ...(PostgreSQL.spec.keywords ?? "").split(/\s+/),
+  "current_date", "current_time", "current_timestamp", "current_catalog",
+  "current_schema", "current_user", "session_user", "localtime", "localtimestamp",
+].map(word => word.toLowerCase()));
 
 /** `name` as it must be written in SQL: bare when that is unambiguous,
  *  double-quoted (with `"` doubled) otherwise. */
@@ -76,7 +73,8 @@ export function quoteIdent(name: string): string {
 export function unquoteIdent(token: string): string {
   const first = token[0];
   if (first === '"') return token.slice(1, -1).replace(/""/g, '"');
-  if (first === "[" || first === "`") return token.slice(1, -1);
+  if (first === "`") return token.slice(1, -1).replaceAll("``", "`");
+  if (first === "[") return token.slice(1, -1);
   return token;
 }
 

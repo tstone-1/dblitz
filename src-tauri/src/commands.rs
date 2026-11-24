@@ -44,6 +44,11 @@ pub(crate) fn update_window_title(app: &AppHandle, path: Option<&str>) {
 }
 
 #[tauri::command(async)]
+pub(crate) fn view_config_identity(path: String) -> String {
+    config::normalize_for_dedup(&path)
+}
+
+#[tauri::command(async)]
 pub(crate) fn close_database(app: AppHandle, state: State<'_, Arc<DbState>>) {
     db::close_database(&state);
     update_window_title(&app, None);
@@ -124,7 +129,7 @@ pub(crate) fn set_export_dir(dir: Option<String>) -> Result<(), String> {
 /// argument. The page calls this once on mount, *after* registering its
 /// `open-file` listener — which is what makes the ready flag mean what it says.
 #[tauri::command]
-pub(crate) fn get_initial_file(pending: State<'_, PendingOpen>) -> Option<String> {
+pub(crate) fn get_initial_file(pending: State<'_, PendingOpen>) -> Result<Option<String>, String> {
     pending.take_initial(launch_argument())
 }
 
@@ -313,38 +318,28 @@ pub(crate) fn toggle_devtools(app: tauri::AppHandle) {
 }
 
 #[tauri::command(async)]
-pub(crate) fn load_view_config(state: State<'_, Arc<DbState>>) -> FileConfig {
-    let path = state.current_path.lock();
-    match path.as_ref() {
-        Some(p) => config::load_config(p),
-        None => FileConfig::default(),
+pub(crate) fn load_view_config(
+    state: State<'_, Arc<DbState>>,
+    identity: String,
+) -> Result<FileConfig, String> {
+    let path = state.current_path.lock().clone();
+    match path {
+        Some(path) => config::load_config(&path, &identity),
+        None => Ok(FileConfig::default()),
     }
 }
 
-/// Persist a view config against the database the CALLER names, not against
-/// whatever happens to be open when this runs.
-///
-/// `#[tauri::command(async)]` means this executes on Tauri's threadpool at a
-/// time the frontend does not control, while `state.current_path` is mutable
-/// and changes on every open. Selecting the destination from it made the
-/// destination depend on scheduling: a save queued for database A that ran
-/// after the user opened database B wrote A's settings under B's key, silently
-/// replacing them. `path` closes that by carrying the answer with the request.
-///
-/// Deliberately does NOT also require `path` to still be the open database. A
-/// save legitimately outlives its session - the user changes a filter and
-/// immediately opens another file - and rejecting it there would throw away a
-/// change they made while showing them a save-failed notice for doing nothing
-/// wrong. Writing it to the file it belongs to is both lossless and correct.
-///
-/// That is safe because `path` is a lookup KEY, not a destination: the config
-/// lands at `<app-config-dir>/<sha256(path)[..16]>.json` (see
-/// `ConfigStore::config_path_for_db`), so no value of `path` can direct a write
-/// outside dblitz's own config directory.
+/// Hash the identity captured when the file opened. Its spelling may now
+/// resolve to a different junction target. The path also names legacy keys.
 #[tauri::command(async)]
-pub(crate) fn save_view_config(config: FileConfig, path: String) -> Result<(), String> {
-    if path.is_empty() {
+pub(crate) fn save_view_config(
+    config: FileConfig,
+    path: String,
+    identity: String,
+) -> Result<(), String> {
+    if path.is_empty() || identity.is_empty() {
         return Err("Cannot save view config without a database path".to_string());
     }
-    config::save_config(&path, &config).err_ctx(&format!("saving view config for {path}"))
+    config::save_config(&path, &identity, &config)
+        .err_ctx(&format!("saving view config for {path}"))
 }

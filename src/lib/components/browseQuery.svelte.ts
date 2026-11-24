@@ -30,6 +30,7 @@ import type {
   QueryResult,
   ViewConfig,
 } from "#lib/ipc.ts";
+import { livePinnedFilters } from "./pinnedFilters.svelte";
 import { buildActiveFilters } from "./columnView";
 import { hasIncompleteOperator, stripIncompleteSegments } from "./filterOperators";
 import { shouldAutoFitWidths } from "./autoFitWidths";
@@ -358,16 +359,8 @@ export function createBrowseQuery(deps: BrowseQueryDeps) {
     deps.setSortColumn(deps.getTableConfig(name).sort_column);
     deps.setSortAsc(deps.getTableConfig(name).sort_asc);
     // Hydrate ephemeral filter state from pinned defaults.
-    // Orphaned filters (pinned column no longer in schema) are silently
-    // dropped at query time by buildFilters() against the live `columns`.
-    deps.setColumnFilters(
-      Object.fromEntries(
-        Object.entries(cfg.pinned_filters).map(([col, pf]) => [
-          col,
-          { value: pf.value, is_regex: pf.is_regex },
-        ]),
-      ),
-    );
+    // An orphaned bare operator must not block edits to the remaining filters.
+    deps.setColumnFilters(livePinnedFilters(cfg, columns));
     deps.setGlobalFilter(cfg.pinned_global_filter ?? "");
 
     const published = await reloadData();

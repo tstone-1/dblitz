@@ -24,6 +24,7 @@ let target: HTMLElement;
 let page: ReturnType<typeof mount>;
 
 beforeEach(() => {
+  window.localStorage.clear();
   target = document.body.appendChild(document.createElement("div"));
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
   page = mount(Page, { target });
@@ -45,6 +46,7 @@ it("executes the clicked history entry even when its editor text has a selection
   appState.dbPath = "example.db";
   appState.activeTab = "sql";
   appState.sqlHistory = [{ sql: statement, timestamp: 0, error: false }];
+  window.localStorage.setItem("dblitz-sql-history", JSON.stringify(appState.sqlHistory));
   flushSync();
   await vi.waitFor(() => expect(target.querySelector(".cm-content")).toBeTruthy());
   target.querySelector<HTMLButtonElement>(".history-btn")!.click();

@@ -728,16 +728,31 @@ pub(crate) mod tests {
 
     /// A fresh directory for one test. Every test gets its own, so parallel
     /// tests cannot see each other's artifacts.
-    pub(crate) fn scratch_dir(name: &str) -> PathBuf {
-        static N: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "dblitz-pq-{name}-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    pub(crate) fn scratch_dir(name: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("dblitz-pq-{name}-"))
+            .tempdir()
+            .unwrap()
+    }
+
+    /// Drop the open database before removing its source files on Windows.
+    pub(super) struct Fixture<T> {
+        pub value: T,
+        pub dir: tempfile::TempDir,
+    }
+
+    impl<T> std::ops::Deref for Fixture<T> {
+        type Target = T;
+
+        fn deref(&self) -> &T {
+            &self.value
+        }
+    }
+
+    impl<T> std::ops::DerefMut for Fixture<T> {
+        fn deref_mut(&mut self) -> &mut T {
+            &mut self.value
+        }
     }
 
     /// `rows` rows with one column of each kind the renderer distinguishes.
@@ -763,8 +778,9 @@ pub(crate) mod tests {
 
     #[test]
     fn detects_parquet_by_content() {
-        let dir = scratch_dir("detect");
-        let pq = fixture(&dir, 5);
+        let root = scratch_dir("detect");
+        let dir = root.path();
+        let pq = fixture(dir, 5);
         assert!(is_parquet(pq.to_str().unwrap()));
         let renamed = dir.join("looks.sqlite");
         std::fs::copy(&pq, &renamed).unwrap();
@@ -780,7 +796,8 @@ pub(crate) mod tests {
 
     #[test]
     fn csv_and_json_are_detected_by_extension_and_parquet_by_content() {
-        let dir = scratch_dir("detect-format");
+        let root = scratch_dir("detect-format");
+        let dir = root.path();
         let of = |name: &str| {
             let p = dir.join(name);
             std::fs::write(&p, "a\n1\n").unwrap();
@@ -796,7 +813,7 @@ pub(crate) mod tests {
         assert_eq!(of("csv"), None, "a bare name is not an extension");
         // Content wins over the extension for Parquet.
         let renamed = dir.join("really.csv");
-        std::fs::copy(fixture(&dir, 3), &renamed).unwrap();
+        std::fs::copy(fixture(dir, 3), &renamed).unwrap();
         assert_eq!(
             FileFormat::of(renamed.to_str().unwrap()),
             Some(FileFormat::Parquet)
@@ -805,7 +822,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_tsv_reports_what_the_sniffer_decided() {
-        let dir = scratch_dir("tsv");
+        let root = scratch_dir("tsv");
+        let dir = root.path();
         let path = dir.join("people.tsv");
         std::fs::write(&path, "name\tage\nAda\t36\nBen\t41\n").unwrap();
         let s = ParquetSession::open(path.to_str().unwrap()).unwrap();
@@ -823,7 +841,8 @@ pub(crate) mod tests {
 
     #[test]
     fn the_sql_tab_reads_the_opened_csv_and_no_other_file() {
-        let dir = scratch_dir("csv-sql");
+        let root = scratch_dir("csv-sql");
+        let dir = root.path();
         let path = dir.join("rows.csv");
         let other = dir.join("other.csv");
         std::fs::write(&path, "id,price\n1,9.5\n2,12.0\n3,4.25\n").unwrap();
@@ -869,7 +888,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_csv_with_text_below_the_sample_opens_with_that_column_as_text() {
-        let dir = scratch_dir("csv-late-type");
+        let root = scratch_dir("csv-late-type");
+        let dir = root.path();
         let path = dir.join("late.csv");
         with_late_row(&path, "name,node", "a,123", "b,-");
         let s = ParquetSession::open(path.to_str().unwrap()).unwrap();
@@ -896,7 +916,8 @@ pub(crate) mod tests {
 
     #[test]
     fn the_pinned_csv_reader_survives_what_the_sniffers_prompt_does_not() {
-        let dir = scratch_dir("csv-pinned").join("o'brien dir");
+        let root = scratch_dir("csv-pinned");
+        let dir = root.path().join("o'brien dir");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("it's.csv");
         with_late_row(
@@ -933,7 +954,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_json_file_changing_below_the_sample_opens_with_every_key() {
-        let dir = scratch_dir("json-late");
+        let root = scratch_dir("json-late");
+        let dir = root.path();
         let path = dir.join("late.jsonl");
         with_late_row(
             &path,
@@ -967,7 +989,8 @@ pub(crate) mod tests {
     fn a_json_file_with_an_apostrophe_in_a_nested_key_below_the_sample_opens() {
         // The key is part of the column's type, `STRUCT("it's" BIGINT)`, which
         // the pinned reader writes out for the SQL tab.
-        let dir = scratch_dir("json-late-nested");
+        let root = scratch_dir("json-late-nested");
+        let dir = root.path();
         let path = dir.join("nested.jsonl");
         with_late_row(
             &path,
@@ -1015,7 +1038,8 @@ pub(crate) mod tests {
     fn a_bracketed_file_name_opens_that_file_and_not_its_glob_match() {
         // Unescaped, the pattern `t[1].csv` matched `t1.csv` and that file
         // was shown; the literal name was read only when nothing matched.
-        let dir = scratch_dir("glob-text");
+        let root = scratch_dir("glob-text");
+        let dir = root.path();
         for (opened, sibling) in [("t[1].csv", "t1.csv"), ("j[1].json", "j1.json")] {
             let json = opened.ends_with(".json");
             let body = |v: u8| {
@@ -1039,7 +1063,8 @@ pub(crate) mod tests {
     fn a_bracketed_parquet_name_opens_that_file_and_not_its_glob_matches() {
         // Unescaped, `d[12].parquet` read `d1.parquet` and `d2.parquet`
         // concatenated.
-        let dir = scratch_dir("glob-parquet");
+        let root = scratch_dir("glob-parquet");
+        let dir = root.path();
         let c = Connection::open_in_memory().unwrap();
         for (name, v) in [("d[12].parquet", 12), ("d1.parquet", 1), ("d2.parquet", 2)] {
             c.execute_batch(&format!(
@@ -1059,7 +1084,8 @@ pub(crate) mod tests {
     fn a_bracketed_name_with_nothing_beside_it_still_opens() {
         // The control: the escaped pattern finds the file on its own, and so
         // does a directory with a bracket in its name.
-        let dir = scratch_dir("glob-alone").join("run[1]");
+        let root = scratch_dir("glob-alone");
+        let dir = root.path().join("run[1]");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir_all(dir.with_file_name("run1")).unwrap();
         std::fs::write(dir.with_file_name("run1").join("x.csv"), "a\n2\n").unwrap();
@@ -1078,7 +1104,8 @@ pub(crate) mod tests {
     #[cfg(not(windows))]
     #[test]
     fn a_name_with_a_star_or_a_question_mark_opens_that_file() {
-        let dir = scratch_dir("glob-unix");
+        let root = scratch_dir("glob-unix");
+        let dir = root.path();
         for (opened, sibling) in [("s*.csv", "sa.csv"), ("q?.csv", "qa.csv")] {
             std::fs::write(dir.join(opened), "a\n1\n").unwrap();
             std::fs::write(dir.join(sibling), "a\n2\n").unwrap();
@@ -1114,7 +1141,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_csv_the_full_scan_cannot_read_reports_the_first_error() {
-        let dir = scratch_dir("csv-bad");
+        let root = scratch_dir("csv-bad");
+        let dir = root.path();
         let path = dir.join("bad.csv");
         with_late_row(&path, "a,b", "1,2", "1,2,3,4,5");
         let err = ParquetSession::open(path.to_str().unwrap())
@@ -1125,7 +1153,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_malformed_json_file_fails_to_open_with_duckdbs_message() {
-        let dir = scratch_dir("bad-json");
+        let root = scratch_dir("bad-json");
+        let dir = root.path();
         let path = dir.join("broken.json");
         std::fs::write(&path, "[{\"a\": 1}, {\"a\": ").unwrap();
         let err = ParquetSession::open(path.to_str().unwrap())
@@ -1136,8 +1165,9 @@ pub(crate) mod tests {
 
     #[test]
     fn open_reports_one_table_with_its_columns_and_count() {
-        let dir = scratch_dir("open");
-        let s = ParquetSession::open(fixture(&dir, 2500).to_str().unwrap()).unwrap();
+        let root = scratch_dir("open");
+        let dir = root.path();
+        let s = ParquetSession::open(fixture(dir, 2500).to_str().unwrap()).unwrap();
         let t = s.tables();
         assert_eq!(
             (t.len(), t[0].name.as_str(), t[0].row_count),
@@ -1183,8 +1213,9 @@ pub(crate) mod tests {
 
     #[test]
     fn open_creates_the_parent_of_the_spill_directory() {
-        let dir = scratch_dir("spill-parent");
-        let s = ParquetSession::open(fixture(&dir, 5).to_str().unwrap()).unwrap();
+        let root = scratch_dir("spill-parent");
+        let dir = root.path();
+        let s = ParquetSession::open(fixture(dir, 5).to_str().unwrap()).unwrap();
         assert!(
             s._cache.dir.path().is_dir(),
             "DuckDB only creates the last path component; a big sort fails without this"
@@ -1193,7 +1224,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_column_named_file_row_number_disables_the_fast_path_only() {
-        let dir = scratch_dir("clash");
+        let root = scratch_dir("clash");
+        let dir = root.path();
         let path = dir.join("clash.parquet");
         Connection::open_in_memory()
             .unwrap()

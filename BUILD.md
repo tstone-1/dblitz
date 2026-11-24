@@ -673,6 +673,10 @@ leg verifies the installer, portable executable, installed application and unins
     lines, `git diff --stat -- src-tauri/Cargo.lock` must list it. On
     2026-09-30 `cargo update` printed 55 updates and exited 0 three times in a
     row without writing the file.
+  - Check `Downgrading` lines for security regressions. The three-day age
+    limit can roll back a recent security fix. Restore that crate with
+    `cargo update -p <crate> --precise <fixed-version>` under
+    `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow`, then run `cargo audit`.
   - Review output for major version bumps — check changelogs before proceeding.
     **The `duckdb` crate hides DuckDB's major in its minor:** `1.10505` is
     DuckDB 1.5.5 and `1.20000` is DuckDB 2.0, so cargo treats an engine major
@@ -842,18 +846,18 @@ To overwrite a pre-existing non-brew install, use `brew install --cask --force d
 
 ### 5. Post-release Verification
 
-- [ ] Confirm GitHub shows the new release as latest: `gh release list --limit 5`
-- [ ] Confirm the tap cask bumped to the new version (both `sha256` lines updated)
+- [ ] Confirm GitHub Latest is the highest published version with `gh release list --limit 5`. An older retry keeps the newer release current.
+- [ ] Confirm the cask and both SHA-256 values match the newest published version, including after an older retry.
 - [ ] **The published updater manifest is accessible and covers every platform.**
       Expect `darwin-aarch64`, `darwin-x86_64`, `windows-x86_64`,
       `windows-aarch64` and `linux-x86_64` keys, and a non-empty `signature` on
       each. The `publish` job refuses to publish without all five; this reads the
       published file:
       ```sh
-      curl -sL https://github.com/tstone-1/dblitz/releases/latest/download/latest.json \
+      curl -fsSL "https://github.com/tstone-1/dblitz/releases/download/${TAG:?set TAG to the release tag}/latest.json" \
         | python3 -m json.tool
       ```
-- [ ] An older install actually offers the update (the point of all of the above):
+- [ ] An older install offers the newest published version:
       launch a previous build and confirm the bar appears within ~10 s
 - **Windows:**
   - [ ] The release has `_x64-setup.exe` and `_arm64-setup.exe`, their `.sig`

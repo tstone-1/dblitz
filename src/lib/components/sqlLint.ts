@@ -27,6 +27,7 @@ import {
   quoteIdent,
   statementAtCursor,
   tablesInStatement,
+  unquoteIdent,
   type SqlSchema,
 } from "./sqlCompletion";
 
@@ -71,8 +72,8 @@ export type MissingKind = "table" | "column" | "function";
  *  wording; null for every other error. */
 export function missingName(message: string): { kind: MissingKind; name: string } | null {
   const patterns: [RegExp, MissingKind][] = [
-    [/no such column: (?:\S+\.)?(\S+)/, "column"],
-    [/no such table: (?:main\.)?(\S+)/, "table"],
+    [/no such column: (?:\S+\.)?([^\n]+)/, "column"],
+    [/no such table: (?:main\.)?([^\n]+)/, "table"],
     [/no such function: (\S+)/, "function"],
     [/Referenced column "([^"]+)" not found/, "column"],
     [/does not have a column named "([^"]+)"/, "column"],
@@ -123,7 +124,7 @@ export function suggestNames(name: string, candidates: Iterable<string>, max = 3
   return scored.slice(0, max).map(([, c]) => c);
 }
 
-const TOKEN = /"(?:[^"]|"")*"?|\[[^\]]*\]?|`[^`]*`?|[\w$]+|\S/y;
+const TOKEN = /"(?:[^"]|"")*"?|\[[^\]]*\]?|`(?:[^`]|``)*`?|[\w$]+|\S/y;
 
 /** The token starting at `at` in `text`: an identifier (quoted or bare), a
  *  word, or else one character. */
@@ -140,7 +141,13 @@ function escapeRegExp(s: string): string {
 /** Where `name` occurs as a whole word in `text`, preferring the first
  *  occurrence at or after `from`. */
 function findWord(text: string, name: string, from: number): { from: number; to: number } | null {
-  const re = new RegExp(`(?<![\\w$])"?${escapeRegExp(name)}"?(?![\\w$])`, "gi");
+  const word = escapeRegExp(name);
+  const quoted = [
+    escapeRegExp('"' + name.replaceAll('"', '""') + '"'),
+    escapeRegExp("[" + name + "]"),
+    escapeRegExp("`" + name.replaceAll("`", "``") + "`"),
+  ].join("|");
+  const re = new RegExp(`(?:${quoted}|(?<![\\w$])${word}(?![\\w$]))`, "gi");
   let first: { from: number; to: number } | null = null;
   for (const m of text.matchAll(re)) {
     const hit = { from: m.index, to: m.index + m[0].length };
@@ -166,6 +173,18 @@ export function problemRange(
 ): { from: number; to: number } {
   const missing = missingName(message);
   if (missing) {
+    if (offset !== null && offset < text.length) {
+      // SQLite can point to the qualifier, including a quoted alias with spaces.
+      let token = tokenAt(text, offset);
+      let dot: RegExpMatchArray | null;
+      while ((dot = text.slice(token.to).match(/^\s*\.\s*(?=\S)/))) {
+        token = tokenAt(text, token.to + dot[0].length);
+      }
+      const name = unquoteIdent(text.slice(token.from, token.to));
+      if (name === missing.name || message.endsWith(": " + name) || message.endsWith("." + name)) {
+        return token;
+      }
+    }
     const hit = findWord(text, missing.name, offset ?? 0);
     if (hit) return hit;
   }
@@ -207,8 +226,10 @@ export function diagnosticFor(
 ): Diagnostic {
   const range = problemRange(text, check.error, check.offset);
   const missing = missingName(check.error);
-  const actions: Action[] = missing
-    ? suggestNames(missing.name, candidatesFor(missing.kind, schema, text)).map((name) => ({
+  const token = text.slice(range.from, range.to);
+  const name = /^["\x60\[]/.test(token) ? unquoteIdent(token) : missing?.name;
+  const actions: Action[] = missing && name
+    ? suggestNames(name, candidatesFor(missing.kind, schema, text)).map((name) => ({
         name: `Replace with ${name}`,
         apply(view: EditorView, from: number, to: number) {
           view.dispatch({ changes: { from, to, insert: quoteIdent(name) } });

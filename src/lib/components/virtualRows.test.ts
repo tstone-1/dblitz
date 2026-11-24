@@ -20,6 +20,68 @@ function deferred<T>() {
 }
 
 describe("createVirtualRows", () => {
+  function gridForTransition(
+    loadChunk: (offset: number) => Promise<QueryResult>,
+    cancelQueries: () => Promise<void>,
+    defer = runNow,
+  ) {
+    return createVirtualRows({
+      chunkSize: 1, loadChunk, cancelQueries, defer,
+      getSelectedTable: () => "items", getVisibleColumns: () => ["id"],
+      getColumnIndex: () => 0, hasColumns: () => true,
+      setColumns: () => {}, setTotalRows: () => {}, setError: () => {},
+    });
+  }
+
+  it("retires cached cells immediately and waits for cancellation before loading the new table", async () => {
+    const cancel = deferred<void>();
+    const loads: number[] = [];
+    const grid = gridForTransition(async offset => {
+      loads.push(offset);
+      return { rows: [["new"]], columns: ["id"], total_rows: 1, offset };
+    }, () => cancel.promise);
+    grid.applyFirstChunk(grid.currentEpoch(), { rows: [["old"]], columns: ["id"], total_rows: 1, offset: 0 });
+    const switching = grid.beginReload();
+    expect(grid.peekVisibleRow(0)).toBeNull();
+    const copying = grid.getVisibleRows(0, 0);
+    expect(loads).toEqual([]);
+    cancel.resolve();
+    await switching;
+    expect(await copying).toEqual([["new"]]);
+    expect(loads).toEqual([0]);
+  });
+
+  it("keeps the replacement viewport request when an older flush is pending", async () => {
+    const queue: Array<() => void> = [];
+    const loads: number[] = [];
+    const grid = gridForTransition(async offset => {
+      loads.push(offset);
+      return { rows: [[String(offset)]], columns: ["id"], total_rows: 10, offset };
+    }, async () => {}, flush => { queue.push(flush); });
+    grid.getVisibleRow(5);
+    grid.reset();
+    grid.getVisibleRow(7);
+    for (const flush of queue) flush();
+    await loadsSettled();
+    expect(loads).toEqual([7]);
+    expect(grid.peekVisibleRow(7)).toEqual(["7"]);
+  });
+
+  it("stops the remaining workers when a bulk read fails", async () => {
+    const otherReads = deferred<void>();
+    const loads: number[] = [];
+    const grid = gridForTransition(async offset => {
+      loads.push(offset);
+      if (offset === 0) throw new Error("read failure");
+      await otherReads.promise;
+      return { rows: [[String(offset)]], columns: ["id"], total_rows: 40, offset };
+    }, async () => {});
+    await expect(grid.getVisibleRows(0, 39)).rejects.toThrow("read failure");
+    otherReads.resolve();
+    await loadsSettled();
+    expect(loads).toEqual([0, 1, 2, 3]);
+  });
+
   it("dedupes in-flight chunk loads and projects visible columns", async () => {
     const loads: Array<{ offset: number; limit: number }> = [];
     let columns: string[] = ["id", "name", "status"];
@@ -113,13 +175,14 @@ describe("createVirtualRows", () => {
     ]);
   });
 
-  it("rejects stale materialization after a newer reload starts", async () => {
+  it("stops dequeuing chunks when a newer reload supersedes a range", async () => {
     const pending = deferred<QueryResult>();
+    const offsets: number[] = [];
     const rows = createVirtualRows({
       defer: runNow,
       chunkSize: 2,
       getSelectedTable: () => "items",
-      loadChunk: () => pending.promise,
+      loadChunk: (offset) => { offsets.push(offset); return pending.promise; },
       cancelQueries: async () => {},
       getVisibleColumns: () => ["id"],
       getColumnIndex: () => 0,
@@ -129,7 +192,10 @@ describe("createVirtualRows", () => {
       setError: () => {},
     });
 
-    const materialized = rows.getVisibleRows(0, 0);
+    const materialized = rows.getVisibleRows(0, 199);
+    const started = offsets.length;
+    expect(started).toBeGreaterThan(0);
+    expect(started).toBeLessThan(100);
     await rows.beginReload();
     pending.resolve({
       columns: ["id"],
@@ -139,6 +205,7 @@ describe("createVirtualRows", () => {
     });
 
     await expect(materialized).rejects.toThrow("Selection changed");
+    expect(offsets).toHaveLength(started);
   });
 
   it("reports background chunk errors without rethrowing unhandled rejections", async () => {

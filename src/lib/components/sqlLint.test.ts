@@ -1,4 +1,6 @@
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
+import type { EditorView } from "@codemirror/view";
 import { EditorState } from "@codemirror/state";
 import {
   blockReasonFor,
@@ -136,6 +138,35 @@ describe("diagnosticFor", () => {
     expect([d.from, d.to]).toEqual([114, 121]);
     expect(d.severity).toBe("error");
     expect(d.actions!.map((a) => a.name)).toEqual(["Replace with customer"]);
+  });
+
+  it.each(["[oder]", "`oder`"])("replaces the entire quoted identifier %s", name => {
+    const text = `SELECT ${name} FROM t`;
+    const diagnostic = diagnosticFor(text, 0, { error: "no such column: oder", offset: 7 },
+      { ...schema, columns: { t: ["order"] } });
+    let state = EditorState.create({ doc: text });
+    const editor = { dispatch: (spec: Parameters<EditorState["update"]>[0]) => { state = state.update(spec).state; } };
+    diagnostic.actions![0].apply(editor as EditorView, diagnostic.from, diagnostic.to);
+    expect(state.doc.toString()).toBe('SELECT "order" FROM t');
+  });
+
+  it.each(["t", '"table alias"'])("repairs a complete multiword column name after qualifier %s", alias => {
+    const db = new DatabaseSync(":memory:");
+    try {
+      db.exec('CREATE TABLE t("order", "order status")');
+      db.exec("INSERT INTO t VALUES (1, 'shipped')");
+      const sql = "SELECT " + alias + ".[oder status] FROM t AS " + alias;
+      let error = "";
+      try { db.prepare(sql); } catch (e) { error = (e as Error).message; }
+      expect(error).toContain("oder status");
+      const d = diagnosticFor(sql, 0, { error, offset: 7 }, { ...schema, columns: { t: ["order", "order status"] } });
+      let state = EditorState.create({ doc: sql });
+      const editor = { dispatch: (spec: Parameters<EditorState["update"]>[0]) => { state = state.update(spec).state; } };
+      d.actions![0].apply(editor as EditorView, d.from, d.to);
+      expect(db.prepare(state.doc.toString()).get()?.["order status"]).toBe("shipped");
+    } finally {
+      db.close();
+    }
   });
 
   it("prefers the columns of the tables the statement names", () => {

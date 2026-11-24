@@ -38,6 +38,7 @@ describe("createPinnedFilters", () => {
       name: { value: "alice", is_regex: false },
     };
     const pinned = createPinnedFilters({
+      getColumns: () => ["name"],
       getSelectedTable: () => "users",
       getColumnFilters: () => columnFilters,
       setColumnFilters: (next) => { columnFilters = next; },
@@ -80,6 +81,7 @@ describe("createPinnedFilters", () => {
       name: { value: "edited", is_regex: false },
     };
     const pinned = createPinnedFilters({
+      getColumns: () => ["name"],
       getSelectedTable: () => "users",
       getColumnFilters: () => columnFilters,
       setColumnFilters: next => { columnFilters = next; },
@@ -116,6 +118,7 @@ describe("createPinnedFilters", () => {
     let globalFilter = "edited global";
     let reloads = 0;
     const pinned = createPinnedFilters({
+      getColumns: () => ["name"],
       getSelectedTable: () => "users",
       getColumnFilters: () => columnFilters,
       setColumnFilters: (next) => { columnFilters = next; },

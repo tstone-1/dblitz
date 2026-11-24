@@ -5,10 +5,16 @@ All notable changes to dblitz will be documented in this file.
 Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 (e.g., `26.4.0` = first April 2026 release).
 
-## [26.11.1] - Unreleased
+## [26.11.1] - 2026-11-24
 
 ### Fixed
 
+- Changing tables clears the previous rows before display or copy. A failed bulk read stops its remaining requests, and Reset ignores pins for columns that no longer exist.
+- SQL completion quotes clock-named columns, and quick fixes preserve multiword column names. A failed relative-path lookup reports an error when launching a database.
+- View settings survive a Windows junction change or a temporary read lock. Correcting a filter restores cached sorting for large Parquet files.
+- SQL history keeps queries from concurrent windows. Reopening a Windows database through a junction waits for its saved settings, and opening a file no longer probes unrelated recent files.
+- Changing views stops pending range reads. Removed columns no longer block live filters, pasted regex lists preserve surrounding anchors, and SQL quick fixes replace entire quoted identifiers.
+- Selection statistics ignore whitespace-only cells. Excel export notices show the destination and both row and cell limits. Opening a path containing invalid Unicode reports an error.
 - Concurrent Excel exports keep separate workbooks. Double-clicking SQL history runs the whole entry even when editor text is selected. Copying from a text field takes precedence over a pending grid copy.
 - Cancelling a query preserves Browse retries. Active DuckDB sessions keep their cache during startup cleanup. SQLite filters recognize displayed infinities.
 - Distinct Unicode filenames on Windows keep separate views. Releasing a column outside the header cancels reordering, and recent-file labels preserve filesystem roots and Unix filenames.

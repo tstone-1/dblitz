@@ -474,8 +474,15 @@ Inside:
   config (sort, widths, order, hidden columns, colors, pinned filters, tint,
   label). The filename is a 16-character prefix of `SHA-256(absolute_path)`.
 
-SQL query history is stored in the WebView's `localStorage` under the key
-`dblitz-sql-history`.
+SQL history keeps the last 100 queries in the WebView's local storage. Each new
+query has its own key so windows can append concurrently. Earlier versions'
+`dblitz-sql-history` entries remain visible until newer queries displace them.
+
+After upgrading from 26.11.0 or earlier, close **all** dblitz windows before
+removing old `sort-cache` or `spill` directories left by an interrupted sort.
+They contain temporary data and are under `dblitz` in the OS cache directory
+(`%LOCALAPPDATA%` on Windows, `~/Library/Caches` on macOS, or
+`$XDG_CACHE_HOME` / `~/.cache` on Linux). Current versions use `sessions`.
 
 ## Development
 

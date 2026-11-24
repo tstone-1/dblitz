@@ -30,7 +30,7 @@ foreach ($attempt in 1..15) {
         Remove-Item -Recurse -Force $signed -ErrorAction SilentlyContinue
         exit 0
     } catch {
-        Add-Content $log "attempt ${attempt}: $($_.Exception.Message)"
+        Add-Content $log "attempt $attempt for ${name}: $($_.Exception.Message)"
         Start-Sleep -Seconds 2
     }
 }

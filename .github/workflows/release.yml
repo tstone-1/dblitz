@@ -183,8 +183,15 @@ jobs:
 
           **Windows** - take the `x64-setup.exe`, or the portable `dblitz.exe`; on Windows on ARM, the `arm64-setup.exe` or `dblitz-arm64.exe`. All of them are code-signed; the publisher reads *Open Source Developer Timo Stein*. The certificate is new, so SmartScreen can still warn on first launch: choose *More info*, check the publisher, then *Run anyway*. There is no `.msi` after 26.10.0: if you installed dblitz from one, uninstall it once in Windows *Settings* > *Apps* and install the `-setup.exe`. See the [code signing policy](https://github.com/tstone-1/dblitz#code-signing-policy).
           NOTES
-          gh release create "$GITHUB_REF_NAME" --draft --title "dblitz $GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
-          echo "release_id=$(gh release view "$GITHUB_REF_NAME" --json databaseId -q .databaseId)" >> "$GITHUB_OUTPUT"
+          if ! gh release view "$GITHUB_REF_NAME" --json tagName > /dev/null; then
+            gh release create "$GITHUB_REF_NAME" --draft --title "dblitz $GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+          release_id=$(gh release view "$GITHUB_REF_NAME" --json databaseId,isDraft --jq 'select(.isDraft) | .databaseId')
+          if ! [[ "$release_id" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Expected a draft release with a numeric ID for $GITHUB_REF_NAME"
+            exit 1
+          fi
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
 
   build:
     needs: create-release

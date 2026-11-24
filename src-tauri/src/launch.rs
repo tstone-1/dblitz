@@ -49,13 +49,18 @@ impl PendingOpen {
         }
     }
 
-    /// Drain the stash and mark the webview ready, falling back to the launch
-    /// argument. `argv_path` is passed in rather than read here so the decision
-    /// is testable without touching the process environment.
-    pub(crate) fn take_initial(&self, argv_path: Option<String>) -> Option<String> {
+    /// Mark the listener ready. A stashed OS document takes precedence over
+    /// both a command-line path and an error decoding that path.
+    pub(crate) fn take_initial(
+        &self,
+        argv: Result<Option<String>, String>,
+    ) -> Result<Option<String>, String> {
         let mut state = self.0.lock();
         state.webview_ready = true;
-        state.path.take().or(argv_path)
+        match state.path.take() {
+            Some(path) => Ok(Some(path)),
+            None => argv,
+        }
     }
 }
 
@@ -163,21 +168,25 @@ pub(crate) fn handle_open_request(app: &AppHandle, url: &str) {
 /// `run()` read `argv[1]` raw - so the two spellings hashed differently and
 /// `dblitz inventory.db` from the file's own directory opened a second window on
 /// a file already open.
-pub(crate) fn launch_argument() -> Option<String> {
-    let args = launch_args_lossy(std::env::args_os().skip(1));
-    resolve_launch_argument(&args, |path| std::path::Path::new(path).is_file())
+pub(crate) fn launch_argument() -> Result<Option<String>, String> {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    launch_path_as_text(&args, std::path::Path::is_file)
 }
 
-/// The launch arguments as text, never panicking.
-///
-/// `std::env::args()` panics on an argument that is not valid Unicode - a
-/// Latin-1 file name on Linux, a lone surrogate on Windows - and it ran before
-/// any window existed, so dblitz vanished with no message at all. A lossy
-/// conversion keeps the process alive: the replacement character names a file
-/// that does not exist, so the open fails with the normal error the user can
-/// read, about the path they can see.
-fn launch_args_lossy(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<String> {
-    args.map(|a| a.to_string_lossy().into_owned()).collect()
+// Resolve the original OS path first. A lossy conversion can name a different
+// existing file, including when only the working directory contains invalid bytes.
+fn launch_path_as_text(
+    args: &[std::ffi::OsString],
+    is_file: impl Fn(&std::path::Path) -> bool,
+) -> Result<Option<String>, String> {
+    resolve_launch_argument(args, is_file)?
+        .map(|p| {
+            p.into_os_string().into_string().map_err(|_| {
+                "Cannot open the requested database because its path is not valid Unicode."
+                    .to_owned()
+            })
+        })
+        .transpose()
 }
 
 /// The half of [`launch_argument`] that does not read the process environment,
@@ -193,15 +202,22 @@ fn launch_args_lossy(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<Stri
 /// of them joined by single spaces are, the joined path wins. A path holding a
 /// run of two or more spaces cannot be recovered this way: the split already
 /// lost how many there were.
-fn resolve_launch_argument(args: &[String], is_file: impl Fn(&str) -> bool) -> Option<String> {
-    let first = absolutize_launch_path(args.first()?);
+fn resolve_launch_argument(
+    args: &[std::ffi::OsString],
+    is_file: impl Fn(&std::path::Path) -> bool,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let Some(first) = args.first() else {
+        return Ok(None);
+    };
+    let first = absolutize_launch_path(first.as_ref())?;
     if args.len() > 1 && !is_file(&first) {
-        let joined = absolutize_launch_path(&args.join(" "));
+        let joined = args.join(std::ffi::OsStr::new(" "));
+        let joined = absolutize_launch_path(joined.as_ref())?;
         if is_file(&joined) {
-            return Some(joined);
+            return Ok(Some(joined));
         }
     }
-    Some(first)
+    Ok(Some(first))
 }
 
 /// Resolve a launch-argument path against the process working directory.
@@ -225,17 +241,9 @@ fn resolve_launch_argument(args: &[String], is_file: impl Fn(&str) -> bool) -> O
 /// could not match. `std::path::absolute`
 /// touches no filesystem (no existence check, no symlink resolution) and handles
 /// the Windows drive-relative form `C:file.db`, which `cwd.join()` does not.
-fn absolutize_launch_path(path: &str) -> String {
-    if std::path::Path::new(path).is_absolute() {
-        return path.to_string();
-    }
-    match std::path::absolute(path) {
-        Ok(absolute) => absolute.to_string_lossy().into_owned(),
-        // No working directory (deleted, or unreadable). Nothing better to say
-        // than what the user typed; the open then fails with a real SQLite
-        // error instead of silently reading a different file.
-        Err(_) => path.to_string(),
-    }
+fn absolutize_launch_path(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    std::path::absolute(path)
+        .map_err(|error| format!("Cannot resolve launch path {}: {error}", path.display()))
 }
 
 /// Everything about the OS "open this document" path that can be checked
@@ -246,7 +254,7 @@ fn absolutize_launch_path(path: &str) -> String {
 #[cfg(test)]
 mod open_request_tests {
     use super::{
-        absolutize_launch_path, file_url_to_path, launch_args_lossy, resolve_launch_argument,
+        absolutize_launch_path, file_url_to_path, launch_path_as_text, resolve_launch_argument,
         PendingOpen,
     };
 
@@ -272,11 +280,18 @@ mod open_request_tests {
             "the fixture must not be valid Unicode"
         );
 
-        let args = launch_args_lossy([bad, "second".into()].into_iter());
-        assert_eq!(args, vec!["caf\u{FFFD}.sqlite", "second"]);
-        // And the resolver turns it into a path the open can fail on normally.
-        let resolved = resolve_launch_argument(&args, |_| false).unwrap();
-        assert!(resolved.ends_with("caf\u{FFFD}.sqlite"), "{resolved}");
+        let temp = tempfile::tempdir().unwrap();
+        let requested = temp.path().join(bad);
+        let other = std::path::PathBuf::from(requested.to_string_lossy().as_ref());
+        std::fs::write(&other, b"another database").unwrap();
+        let result = launch_path_as_text(&[requested.into_os_string()], std::path::Path::is_file);
+        assert!(result.unwrap_err().contains("not valid Unicode"));
+        assert_eq!(
+            launch_path_as_text(&[other.clone().into_os_string()], std::path::Path::is_file)
+                .unwrap()
+                .as_deref(),
+            other.to_str()
+        );
     }
 
     #[test]
@@ -376,7 +391,7 @@ mod open_request_tests {
         let pending = PendingOpen::default();
         assert_eq!(pending.deliver("/tmp/db.sqlite".to_string()), None);
         assert_eq!(
-            pending.take_initial(None).as_deref(),
+            pending.take_initial(Ok(None)).unwrap().as_deref(),
             Some("/tmp/db.sqlite")
         );
     }
@@ -387,12 +402,12 @@ mod open_request_tests {
         // out as an event. It must NOT also be stashed - a later
         // `get_initial_file` would then open the same file a second time.
         let pending = PendingOpen::default();
-        pending.take_initial(None);
+        pending.take_initial(Ok(None)).unwrap();
         assert_eq!(
             pending.deliver("/tmp/db.sqlite".to_string()),
             Some("/tmp/db.sqlite".to_string())
         );
-        assert_eq!(pending.take_initial(None), None);
+        assert_eq!(pending.take_initial(Ok(None)).unwrap(), None);
     }
 
     #[test]
@@ -404,7 +419,8 @@ mod open_request_tests {
         pending.deliver("/tmp/opened.sqlite".to_string());
         assert_eq!(
             pending
-                .take_initial(Some("/tmp/argv.sqlite".to_string()))
+                .take_initial(Err("invalid launch argument".into()))
+                .unwrap()
                 .as_deref(),
             Some("/tmp/opened.sqlite")
         );
@@ -416,11 +432,34 @@ mod open_request_tests {
         let pending = PendingOpen::default();
         assert_eq!(
             pending
-                .take_initial(Some("/tmp/argv.sqlite".to_string()))
+                .take_initial(Ok(Some("/tmp/argv.sqlite".to_string())))
+                .unwrap()
                 .as_deref(),
             Some("/tmp/argv.sqlite")
         );
-        assert_eq!(pending.take_initial(None), None);
+        assert_eq!(pending.take_initial(Ok(None)).unwrap(), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_removed_working_directory_returns_a_launch_error() {
+        const CHILD: &str = "DBLITZ_TEST_REMOVED_CWD";
+        if let Some(dir) = std::env::var_os(CHILD) {
+            std::fs::remove_dir(dir).unwrap();
+            assert!(launch_path_as_text(&args(&["inventory.db"]), |_| false).is_err());
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("removed");
+        std::fs::create_dir(&cwd).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("launch::open_request_tests::a_removed_working_directory_returns_a_launch_error")
+            .arg("--exact")
+            .env(CHILD, &cwd)
+            .current_dir(&cwd)
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 
     #[test]
@@ -431,7 +470,7 @@ mod open_request_tests {
         // shell's directory. So `dblitz inventory.sqlite` opened the wrong file
         // or none at all.
         let cwd = std::env::current_dir().expect("a working directory");
-        let resolved = absolutize_launch_path("inventory.sqlite");
+        let resolved = absolutize_launch_path("inventory.sqlite".as_ref()).unwrap();
 
         assert!(
             std::path::Path::new(&resolved).is_absolute(),
@@ -445,7 +484,7 @@ mod open_request_tests {
         // The defect's exact signature, stated directly so a future change that
         // reintroduces it fails here and not three layers away.
         assert_ne!(
-            crate::db::path_to_sqlite_uri(&resolved),
+            crate::db::path_to_sqlite_uri(resolved.to_str().unwrap()),
             "file:/inventory.sqlite?immutable=1"
         );
     }
@@ -461,7 +500,8 @@ mod open_request_tests {
         // one resolver, which is what stops them drifting apart again.
         let cwd = std::env::current_dir().expect("a working directory");
 
-        let resolved = resolve_launch_argument(&["inventory.sqlite".to_string()], |_| true)
+        let resolved = resolve_launch_argument(&["inventory.sqlite".into()], |_| true)
+            .unwrap()
             .expect("a present argument stays present");
         assert_eq!(
             std::path::Path::new(&resolved),
@@ -469,14 +509,14 @@ mod open_request_tests {
         );
 
         assert_eq!(
-            resolve_launch_argument(&[], |_| true),
+            resolve_launch_argument(&[], |_| true).unwrap(),
             None,
             "no argument, no path"
         );
     }
 
-    fn args(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|s| s.to_string()).collect()
+    fn args(parts: &[&str]) -> Vec<std::ffi::OsString> {
+        parts.iter().map(std::ffi::OsString::from).collect()
     }
 
     #[test]
@@ -487,10 +527,9 @@ mod open_request_tests {
         let cwd = std::env::current_dir().expect("a working directory");
         let real = cwd.join("Shared Files - Archive").join("inventory.sqlite");
         let real = real.to_string_lossy().into_owned();
-        let split: Vec<String> = real.split(' ').map(str::to_string).collect();
-        assert_eq!(split.len(), 4, "the fixture must actually be split");
+        let split = args(&["Shared", "Files", "-", "Archive/inventory.sqlite"]);
 
-        let resolved = resolve_launch_argument(&split, |p| p == real);
+        let resolved = launch_path_as_text(&split, |p| p == std::path::Path::new(&real)).unwrap();
         assert_eq!(resolved.as_deref(), Some(real.as_str()));
     }
 
@@ -500,8 +539,10 @@ mod open_request_tests {
         let cwd = std::env::current_dir().expect("a working directory");
         let first = cwd.join("a.sqlite").to_string_lossy().into_owned();
         let joined = format!("{first} extra");
-        let resolved =
-            resolve_launch_argument(&args(&[&first, "extra"]), |p| p == first || p == joined);
+        let resolved = launch_path_as_text(&args(&[&first, "extra"]), |p| {
+            p == std::path::Path::new(&first) || p == std::path::Path::new(&joined)
+        })
+        .unwrap();
         assert_eq!(resolved.as_deref(), Some(first.as_str()));
     }
 
@@ -511,7 +552,7 @@ mod open_request_tests {
         // with SQLite's error about the path the user can see, as before.
         let cwd = std::env::current_dir().expect("a working directory");
         let first = cwd.join("missing.sqlite").to_string_lossy().into_owned();
-        let resolved = resolve_launch_argument(&args(&[&first, "more"]), |_| false);
+        let resolved = launch_path_as_text(&args(&[&first, "more"]), |_| false).unwrap();
         assert_eq!(resolved.as_deref(), Some(first.as_str()));
     }
 
@@ -522,6 +563,9 @@ mod open_request_tests {
         let cwd = std::env::current_dir().expect("a working directory");
         let absolute = cwd.join("db.sqlite");
         let absolute = absolute.to_string_lossy().into_owned();
-        assert_eq!(absolutize_launch_path(&absolute), absolute);
+        assert_eq!(
+            absolutize_launch_path(absolute.as_ref()).unwrap(),
+            std::path::PathBuf::from(&absolute)
+        );
     }
 }

@@ -128,35 +128,45 @@ jobs:
           DBLITZ_SIGN_SCRIPT: ${{ github.workspace }}/scripts/sign-windows.ps1
         run: |
           if (-not $env:CERTUM_EMAIL -or -not $env:CERTUM_OTP) { Write-Output '::error::CERTUM_EMAIL or CERTUM_OTP_URI is not set in the environment "signing"'; exit 1 }
-          # One file at a time and stop at the first failure: a second attempt
-          # with the same account is a second login.
-          #
-          # The plain executable is held open for twenty seconds by another
-          # process that lets nobody write to it, which is the state a release
-          # build leaves the application's executable in. Signing it has to
-          # wait and then succeed.
-          $held = (Resolve-Path work\plain.exe).Path
-          $holder = Start-Job -ArgumentList $held -ScriptBlock {
-            param($path)
-            $file = [IO.File]::Open($path, 'Open', 'Read', 'Read')
-            Start-Sleep -Seconds 20
-            $file.Dispose()
-          }
-          Start-Sleep -Seconds 3
-          #
-          # Each file is signed the way makensis signs the uninstaller: from
-          # another folder, through the shell, by the quoted name of the
-          # wrapper. Started so, a wrapper that looks for its script beside
-          # itself looks in that other folder and signs nothing.
+          # Sign each file from the same working directory makensis uses.
+          $files = Get-ChildItem work -File | Sort-Object Name
           Push-Location $env:RUNNER_TEMP
-          foreach ($file in Get-ChildItem (Join-Path $env:GITHUB_WORKSPACE work) -File | Sort-Object Name) {
-            cmd /c "`"sign-windows.cmd`" `"$($file.FullName)`""
-            if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Output "::error::signing failed on $($file.Name)"; exit 1 }
-          }
-          Pop-Location
-          $waited = @(Select-String -Path (Join-Path $env:RUNNER_TEMP 'ssign.log') -Pattern '^attempt \d+:').Count
-          Write-Output "write attempts that had to wait: $waited"
-          if ($waited -lt 1) { Write-Output '::error::the held file was written at once, so the wait was not exercised'; exit 1 }
+          try {
+            foreach ($file in $files) {
+              if ($file.Name -ne 'plain.exe') {
+                cmd /c "`"sign-windows.cmd`" `"$($file.FullName)`""
+                if ($LASTEXITCODE -ne 0) { throw "Signing failed on $($file.Name)" }
+                continue
+              }
+              $log = Join-Path $env:RUNNER_TEMP 'ssign.log'
+              $baseline = if (Test-Path $log) { @(Get-Content $log).Count } else { 0 }
+              $lock = [IO.File]::Open($file.FullName, 'Open', 'Read', 'Read')
+              $signer = $null
+              try {
+                $signer = Start-Job -ArgumentList $file.FullName -ScriptBlock {
+                  param($path)
+                  Set-Location -LiteralPath $env:RUNNER_TEMP
+                  cmd /c "`"sign-windows.cmd`" `"$path`""
+                  if ($LASTEXITCODE -ne 0) { throw 'Signing failed on plain.exe' }
+                }
+                $deadline = [DateTime]::UtcNow.AddMinutes(10)
+                do {
+                  $retry = Get-Content $log -ErrorAction SilentlyContinue | Select-Object -Skip $baseline |
+                    Select-String '^attempt 1 for plain\.exe:'
+                  if ($retry) { break }
+                  if ($signer.State -in 'Completed','Failed','Stopped' -or [DateTime]::UtcNow -gt $deadline) {
+                    throw 'Signing plain.exe did not reach its copy retry'
+                  }
+                  Start-Sleep -Milliseconds 100
+                } while ($true)
+                $lock.Dispose()
+                Receive-Job $signer -Wait -ErrorAction Stop
+              } finally {
+                $lock.Dispose()
+                if ($signer) { Remove-Job $signer -Force }
+              }
+            }
+          } finally { Pop-Location }
 
       - name: Show what the signing client said
         if: always()

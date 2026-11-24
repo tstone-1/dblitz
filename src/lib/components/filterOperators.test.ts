@@ -140,9 +140,14 @@ describe("filterAfterListPaste", () => {
     });
   });
 
+  it("preserves both anchors around a pasted list", () => {
+    const filter = filterAfterListPaste({ value: "^X$", is_regex: true }, 1, 2, "A\nB")!;
+    expect(["A", "B", "Ax", "xB"].filter(value => new RegExp(filter.value).test(value))).toEqual(["A", "B"]);
+  });
+
   it("replaces only the selection in a regex-mode filter", () => {
     expect(filterAfterListPaste({ value: "^(X)$", is_regex: true }, 2, 3, "A\nB")).toEqual({
-      value: "^(A|B)$",
+      value: "^((?:A|B))$",
       is_regex: true,
     });
   });

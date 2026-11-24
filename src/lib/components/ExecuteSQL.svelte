@@ -8,7 +8,7 @@
   import {
     appState,
     getTableConfig,
-    persistSqlHistory,
+    appendSqlHistory,
   } from "#lib/store.svelte.ts";
   import DataGrid from "./DataGrid.svelte";
   import { exportNotice } from "./exportNotice";
@@ -107,10 +107,7 @@
     setResult: (value) => { result = value; },
     setExecutedSql: (value) => { executedSql = value; },
     executeSql: (statement) => executeSqlCmd(statement),
-    addHistoryEntry: (entry) => {
-      appState.sqlHistory = [entry, ...appState.sqlHistory.slice(0, 99)];
-      persistSqlHistory();
-    },
+    addHistoryEntry: appendSqlHistory,
   });
 
   async function cancelExecution() {
@@ -155,7 +152,7 @@
       rows: data.rows,
       columnTypes,
     });
-    appState.notice = exportNotice(written);
+    appState.notice = exportNotice(written, data.truncated ? data.rows.length : undefined);
   }
 </script>
 

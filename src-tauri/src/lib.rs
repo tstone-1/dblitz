@@ -38,7 +38,7 @@ pub fn run() {
     // second window on a file already open - the exact case this check exists
     // for, and the one a user is most likely to reach from a terminal.
     #[cfg(windows)]
-    if let Some(path) = launch_argument() {
+    if let Ok(Some(path)) = launch_argument() {
         if try_activate_existing(&path) {
             return;
         }
@@ -80,6 +80,7 @@ pub fn run() {
             commands::toggle_devtools,
             commands::load_view_config,
             commands::save_view_config,
+            commands::view_config_identity,
             commands::get_initial_file,
             commands::get_recent_files,
             commands::clear_recent_files,

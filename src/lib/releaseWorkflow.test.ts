@@ -410,6 +410,40 @@ describe("run blocks take runner values from the environment", () => {
   });
 });
 
+it("only exports a numeric draft ID and can retry a failed lookup", () => {
+  const job = jobs(readText(".github/workflows/release.yml")).get("create-release")!;
+  const block = runBlocks(job).find(body => body.includes("gh release create"));
+  expect(block).toBeDefined();
+  const script = block!.replace(/^ {10}/gm, "");
+  const dir = mkdtempSync(join(tmpdir(), "dblitz-draft-"));
+  const simulate = (lookup: string) => spawnSync("bash", ["-e", "-c", [
+    'export RUNNER_TEMP=. GITHUB_OUTPUT=result GITHUB_REF_NAME=v26.11.9',
+    'gh() {',
+    '  case "$2" in',
+    '    create) (set -C; echo draft > draft) ;;',
+    '    view) test -f draft || return 1',
+    '          if [[ "$*" == *databaseId* ]]; then',
+    '            case "$LOOKUP" in fail) return 1 ;; draft) echo 19 ;; published) return 0 ;; esac',
+    '          fi ;;',
+    '    *) return 1 ;;',
+    '  esac',
+    '}',
+    script,
+  ].join("\n")], { cwd: dir, env: { ...process.env, LOOKUP: lookup }, encoding: "utf8" });
+  try {
+    writeFileSync(join(dir, "result"), "");
+    expect(simulate("fail").status).toBe(1);
+    expect(readFileSync(join(dir, "result"), "utf8")).toBe("");
+    expect(readFileSync(join(dir, "draft"), "utf8").trim()).toBe("draft");
+    expect(simulate("draft").status).toBe(0);
+    expect(readFileSync(join(dir, "result"), "utf8").trim()).toBe("release_id=19");
+    expect(simulate("published").status).toBe(1);
+    expect(readFileSync(join(dir, "result"), "utf8").trim()).toBe("release_id=19");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 it("chooses Latest by numeric CalVer and fails closed on an unreadable release", () => {
   const python = process.platform === "win32" ? "python" : "python3";
   const run = (response: unknown) => spawnSync(python, ["scripts/release-latest.py", "v26.11.9"], {

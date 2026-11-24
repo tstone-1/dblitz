@@ -35,6 +35,14 @@ describe("buildSelectionStats", () => {
     });
   });
 
+  it("ignores whitespace but counts numeric zero", () => {
+    const stats = (row: string[]) => buildSelectionStats({
+      selection: { r0: 0, r1: 0, c0: 0, c1: row.length - 1 }, getRow: () => row,
+    });
+    expect(stats(["8", " ", "\t"])).toMatchObject({ avg: 8, min: 8 });
+    expect(stats(["8", " 0 "])).toMatchObject({ avg: 4, min: 0 });
+  });
+
   it("suppresses numeric aggregates when any loaded value is non-numeric", () => {
     expect(
       buildSelectionStats({

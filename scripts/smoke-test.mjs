@@ -33,7 +33,7 @@ import { copyFileSync, mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-// node:sqlite is built into the Node this repo pins (.nvmrc = 24); using it
+// node:sqlite is built into the Node version pinned in .nvmrc; using it
 // keeps the fixture generation dependency-free. It may print an experimental
 // warning on some point releases -- harmless.
 import { DatabaseSync } from "node:sqlite";
@@ -51,9 +51,8 @@ const POLL_INTERVAL_MS = 500;
 // outer bound, but a job that hits it is killed with no diagnostic and its logs
 // are the last thing that printed, which for a wedged session is "tauri-driver
 // is up" and nothing else. Failing here instead prints why, and prints the
-// driver's own stderr. Well inside the job's 25 minutes, and roughly 2.5x the
-// slowest run observed to date (10 min 6 s, 2026-08-14, cold Rust cache -- and
-// most of that was the build, which happens in an earlier step).
+// driver's own stderr. The script deadline applies only to the WebDriver step. The
+// workflow's job timeout also covers the preceding build.
 const OVERALL_TIMEOUT_MS = 10 * 60_000;
 // No individual WebDriver call may hang forever. `fetch` has no default
 // timeout, so without this a native driver that accepts the connection and

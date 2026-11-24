@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { EditorState } from "@codemirror/state";
 import { CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
@@ -131,6 +132,21 @@ describe("completionKindAt", () => {
 });
 
 describe("quoteIdent", () => {
+  it("inserts clock-named columns as data when their completions are accepted", () => {
+    const names = ["current_date", "current_time", "current_timestamp"];
+    const db = new DatabaseSync(":memory:");
+    try {
+      db.exec('CREATE TABLE t("current_date", "current_time", "current_timestamp")');
+      db.exec("INSERT INTO t VALUES ('date value', 'time value', 'timestamp value')");
+      const options = buildOptions("column", { columns: { t: names }, types: {}, engine: "sqlite" }, "SELECT  FROM t");
+      const projection = names.map(name => options.find(option => option.label === name && option.type === "property")!.apply);
+      expect(Object.values(db.prepare("SELECT " + projection.join(", ") + " FROM t").get()!))
+        .toEqual(["date value", "time value", "timestamp value"]);
+    } finally {
+      db.close();
+    }
+  });
+
   it("leaves plain names bare and quotes the rest", () => {
     expect(quoteIdent("user_id")).toBe("user_id");
     expect(quoteIdent("created at")).toBe('"created at"');

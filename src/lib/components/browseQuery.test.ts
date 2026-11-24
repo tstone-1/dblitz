@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createPinnedFilters } from "./pinnedFilters.svelte";
 import { createBrowseQuery, type BrowseQueryDeps } from "./browseQuery.svelte";
 import type { ColumnFilter, ColumnFilterValue, QueryResult, ViewConfig } from "#lib/ipc.ts";
 
@@ -124,6 +125,35 @@ function harness(options: HarnessOptions = {}) {
 }
 
 describe("createBrowseQuery.selectTable", () => {
+  it("filters the current table when a removed column had an incomplete pin", async () => {
+    const config = freshConfig();
+    config.pinned_filters.removed = { value: ">", is_regex: false };
+    const h = harness({ configs: { items: config } });
+    await h.query.selectTable("items");
+    vi.useFakeTimers();
+    try {
+      h.state.globalFilter = "needle";
+      h.query.debouncedReload();
+      await vi.advanceTimersByTimeAsync(600);
+      expect(h.queries.at(-1)).toMatchObject({ globalFilter: "needle", filters: [] });
+      const pins = createPinnedFilters({
+        getSelectedTable: () => h.state.selectedTable,
+        getColumns: () => h.state.columns,
+        getColumnFilters: () => h.state.columnFilters,
+        setColumnFilters: value => { h.state.columnFilters = value; },
+        getGlobalFilter: () => h.state.globalFilter,
+        setGlobalFilter: value => { h.state.globalFilter = value; },
+        getConfig: () => config, updateConfig: () => config,
+        triggerReload: h.query.debouncedReload,
+      });
+      pins.handleResetClick({ shiftKey: false } as MouseEvent);
+      h.state.globalFilter = "after reset";
+      h.query.debouncedReload();
+      await vi.advanceTimersByTimeAsync(600);
+      expect(h.queries.at(-1)).toMatchObject({ globalFilter: "after reset", filters: [] });
+    } finally { vi.useRealTimers(); }
+  });
+
   it("ignores a schema retry that finishes after another selection", async () => {
     const retry = Promise.withResolvers<string[]>();
     const h = harness({ cachedColumns: { other: ["id"] }, loadTableColumns: () => retry.promise });

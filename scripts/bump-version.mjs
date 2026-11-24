@@ -185,7 +185,7 @@ export function bumpVersionFiles(files, version, options = {}) {
   const tauriConf = replaceFirst(files.tauriConf, VERSION_KEY, version, "src-tauri/tauri.conf.json");
   assertOnlyVersionChanged(files.tauriConf, tauriConf, (o) => (o.version = ""), "src-tauri/tauri.conf.json");
 
-  return {
+  const updated = {
     packageJson,
     packageLock,
     cargoToml,
@@ -193,6 +193,11 @@ export function bumpVersionFiles(files, version, options = {}) {
     tauriConf,
     changelog: bumpChangelog(files.changelog, version, releaseDate),
   };
+  if (releaseDate !== undefined) {
+    const failures = checkReleaseContract({ tag: `v${version}`, ...updated });
+    if (failures.length) throw new Error(failures.join("\n"));
+  }
+  return updated;
 }
 
 /**
@@ -221,7 +226,13 @@ function bumpChangelog(changelog, version, releaseDate) {
       text = `${text.slice(0, at)}## [${version}] - Unreleased\n\n${text.slice(at)}`;
     }
   }
-  if (releaseDate !== undefined) text = text.replace(own, `$1${releaseDate}`);
+  if (releaseDate !== undefined) {
+    const previous = own.exec(text)?.[2].trim();
+    if (previous !== "Unreleased" && previous !== releaseDate) {
+      throw new Error(`CHANGELOG.md already dates ${version} to ${previous}`);
+    }
+    text = text.replace(own, `$1${releaseDate}`);
+  }
   return text;
 }
 

@@ -344,7 +344,7 @@
       rows: data.rows,
       columnTypes: types,
     });
-    appState.notice = exportNotice(written);
+    appState.notice = exportNotice(written, data.truncated ? data.rows.length : undefined);
   }
 
   function getColumnColor(col: string): string {
@@ -377,6 +377,7 @@
   // imports nothing from the store itself. It owns the global-filter pin
   // context menu state.
   const pinned = createPinnedFilters({
+    getColumns: () => columns,
     getSelectedTable: () => selectedTable,
     getColumnFilters: () => columnFilters,
     setColumnFilters: (cf) => { columnFilters = cf; },

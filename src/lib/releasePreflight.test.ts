@@ -111,6 +111,12 @@ describe("release preflight", () => {
     expect(failures.join("\n")).toContain("must be a YYYY-MM-DD release date");
   });
 
+  it("rejects a dated section with no notes before the next release", () => {
+    const files = consistentFiles("26.8.2");
+    files.changelog = "## [26.8.2] - 2026-08-23\n\n### Fixed\n\n## [26.8.1] - 2026-08-22\n- Old note\n";
+    expect(checkReleaseContract({ tag: "v26.8.2", ...files })).toContain("CHANGELOG.md has no release notes for 26.8.2.");
+  });
+
   it("rejects a version with no changelog entry at all", () => {
     const files = consistentFiles("26.8.2");
     files.changelog = "# Changelog\n\n## [26.8.1] - 2026-08-23\n";

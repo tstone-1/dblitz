@@ -12,7 +12,15 @@
 import type { ColumnFilterValue, ViewConfig } from "#lib/ipc.ts";
 import type { PinState } from "./pinLabel";
 
+export function livePinnedFilters(config: ViewConfig, columns: string[]): Record<string, ColumnFilterValue> {
+  const live = new Set(columns);
+  return Object.fromEntries(Object.entries(config.pinned_filters)
+    .filter(([name]) => live.has(name))
+    .map(([name, filter]) => [name, { ...filter }]));
+}
+
 export interface PinnedFiltersDeps {
+  getColumns: () => string[];
   /** Currently selected table name (or null if none). */
   getSelectedTable: () => string | null;
   /** Current ephemeral column filters. */
@@ -164,14 +172,7 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
     const selectedTable = deps.getSelectedTable();
     if (!selectedTable) return;
     const cfg = deps.getConfig(selectedTable);
-    deps.setColumnFilters(
-      Object.fromEntries(
-        Object.entries(cfg.pinned_filters).map(([col, pf]) => [
-          col,
-          { value: pf.value, is_regex: pf.is_regex },
-        ]),
-      ),
-    );
+    deps.setColumnFilters(livePinnedFilters(cfg, deps.getColumns()));
     deps.setGlobalFilter(cfg.pinned_global_filter ?? "");
     deps.triggerReload();
   }

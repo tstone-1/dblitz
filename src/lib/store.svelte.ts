@@ -10,6 +10,7 @@ import {
   saveViewConfig as saveViewConfigCmd,
   getColumns,
   sqlEngine as sqlEngineCmd,
+  viewConfigIdentity,
 } from "#lib/ipc.ts";
 import type { TableInfo, ColumnInfo, FileConfig, ViewConfig, SqlEngine } from "#lib/ipc.ts";
 
@@ -25,26 +26,59 @@ function browserStorage(): Storage | null {
   return typeof window === "undefined" ? null : window.localStorage;
 }
 
-export function loadSqlHistory(): SqlHistoryEntry[] {
-  const storage = browserStorage();
-  if (!storage) return [];
+const HISTORY_PREFIX = "dblitz-sql-history:";
+
+function historyKeys(storage: Storage): string[] {
+  const keys = new Set<string>();
+  for (let i = 0; i < storage.length; i++) {
+    const key = storage.key(i);
+    if (key?.startsWith(HISTORY_PREFIX)) keys.add(key);
+  }
+  return [...keys].sort().reverse();
+}
+
+function isHistoryEntry(entry: unknown): entry is SqlHistoryEntry {
+  return typeof entry === "object" && entry !== null
+    && "sql" in entry && typeof entry.sql === "string"
+    && "timestamp" in entry && typeof entry.timestamp === "number"
+    && "error" in entry && typeof entry.error === "boolean";
+}
+
+function legacyHistory(storage: Storage): SqlHistoryEntry[] {
   const raw = storage.getItem("dblitz-sql-history");
   if (!raw) return [];
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) throw new Error("SQL history is not an array");
-    return parsed
-      .filter((entry): entry is SqlHistoryEntry =>
-        typeof entry === "object" &&
-        entry !== null &&
-        typeof (entry as SqlHistoryEntry).sql === "string" &&
-        typeof (entry as SqlHistoryEntry).timestamp === "number" &&
-        typeof (entry as SqlHistoryEntry).error === "boolean",
-      )
-      .slice(0, 100);
+    return parsed.filter(isHistoryEntry).slice(0, 100);
   } catch {
     storage.removeItem("dblitz-sql-history");
     return [];
+  }
+}
+
+function readHistory(storage: Storage, keys: string[]): SqlHistoryEntry[] {
+  const entries: SqlHistoryEntry[] = [];
+  for (const key of keys.slice(0, 100)) {
+    const raw = storage.getItem(key);
+    if (!raw) continue;
+    try {
+      const entry = JSON.parse(raw);
+      if (isHistoryEntry(entry)) entries.push(entry);
+    } catch { /* Skip a damaged entry without discarding the remaining history. */ }
+  }
+  return entries.concat(legacyHistory(storage)).slice(0, 100);
+}
+
+export function loadSqlHistory(): SqlHistoryEntry[] {
+  const storage = browserStorage();
+  return storage ? readHistory(storage, historyKeys(storage)) : [];
+}
+
+export function refreshSharedHistory(event: StorageEvent) {
+  if (event.storageArea === browserStorage()
+    && (event.key === null || event.key === "dblitz-sql-history" || event.key.startsWith(HISTORY_PREFIX))) {
+    appState.sqlHistory = loadSqlHistory();
   }
 }
 
@@ -100,9 +134,11 @@ async function runOpenDatabase(path: string, request: number) {
     // pending work before fetching any metadata for the replacement session.
     retireDatabaseSession();
     let config: FileConfig;
+    let configKey: string;
     try {
-      await pendingConfigSaves.get(configPathKey(path));
-      config = await loadViewConfig();
+      configKey = await viewConfigIdentity(path);
+      await pendingConfigSaves.get(configKey);
+      config = await loadViewConfig(configKey);
     } catch (e) {
       // The backend has already switched. Drop the session rather than show
       // the old file or overwrite the new file's settings with defaults.
@@ -131,6 +167,7 @@ async function runOpenDatabase(path: string, request: number) {
     // Order matters: `appState.tables = tables` MUST be last because it's
     // the trigger for the auto-select effect in BrowseData. By the time the
     // effect fires, dbPath/fileConfig/tableColumns must already be in place.
+    activeConfigKey = configKey;
     appState.dbPath = path;
     appState.fileConfig = config;
     appState.tableColumns = colMap;
@@ -157,6 +194,7 @@ export function openDatabase(path: string): Promise<void> {
 }
 
 function retireDatabaseSession() {
+  activeConfigKey = null;
   appState.dbPath = null;
   appState.tables = [];
   appState.tableColumns = {};
@@ -181,9 +219,25 @@ export async function closeDatabase() {
   await task;
 }
 
-export function persistSqlHistory() {
+export function appendSqlHistory(entry: SqlHistoryEntry) {
+  appState.sqlHistory = [entry, ...appState.sqlHistory.slice(0, 99)];
   try {
-    browserStorage()?.setItem("dblitz-sql-history", JSON.stringify(appState.sqlHistory));
+    const storage = browserStorage();
+    if (!storage) return;
+    // Independent keys keep simultaneous writers from replacing one another.
+    // The counter orders sequential appends even if the clock moves backwards.
+    const latest = historyKeys(storage)[0];
+    const previous = latest ? Number(latest.slice(HISTORY_PREFIX.length).split("-")[0]) : 0;
+    const order = String(Math.max(entry.timestamp, (previous || 0) + 1)).padStart(16, "0");
+    const id = crypto.getRandomValues(new Uint32Array(4)).join("-");
+    storage.setItem(HISTORY_PREFIX + order + "-" + id, JSON.stringify(entry));
+    const keys = historyKeys(storage);
+    for (const key of keys.slice(100)) storage.removeItem(key);
+    const legacy = legacyHistory(storage);
+    const room = Math.max(0, 100 - keys.length);
+    if (room === 0) storage.removeItem("dblitz-sql-history");
+    else if (legacy.length > room) storage.setItem("dblitz-sql-history", JSON.stringify(legacy.slice(0, room)));
+    appState.sqlHistory = readHistory(storage, keys);
   } catch {
     appState.notice = "SQL history could not be saved on this device.";
   }
@@ -201,7 +255,7 @@ let saveFailureNotified = false;
 
 // Saves get their own serialising chain, for the same reason open/close have
 // one: they are fire-and-forget, and two of them in flight at once is the
-// normal case (a column drag emits one per frame). Without this the backend
+// normal case (two successive edits can overlap). Without this the backend
 // command runs on Tauri's threadpool in whatever order it likes, so an OLDER
 // snapshot can land after a newer one and quietly undo the user's last change.
 //
@@ -213,15 +267,11 @@ let saveFailureNotified = false;
 let viewConfigSaveQueue: Promise<void> = Promise.resolve();
 const pendingConfigSaves = new Map<string, Promise<void>>();
 
-function configPathKey(path: string): string {
-  return typeof navigator !== "undefined" && /^Win/i.test(navigator.platform)
-    ? path.replaceAll("\\", "/").toLowerCase()
-    : path;
-}
+let activeConfigKey: string | null = null;
 
-async function runSaveViewConfig(path: string, config: FileConfig) {
+async function runSaveViewConfig(path: string, identity: string, config: FileConfig) {
   try {
-    await saveViewConfigCmd(config, path);
+    await saveViewConfigCmd(config, path, identity);
   } catch (e) {
     console.error("Failed to save view config:", e);
     if (!saveFailureNotified) {
@@ -251,9 +301,9 @@ export function saveViewConfig(): Promise<void> {
   // here, not a clone, so later edits still reached the queued save.)
   const config = JSON.parse(JSON.stringify(appState.fileConfig)) as FileConfig;
 
-  const task = viewConfigSaveQueue.then(() => runSaveViewConfig(path, config));
+  const key = activeConfigKey ?? path;
+  const task = viewConfigSaveQueue.then(() => runSaveViewConfig(path, key, config));
   viewConfigSaveQueue = task.catch(() => {});
-  const key = configPathKey(path);
   pendingConfigSaves.set(key, task);
   return task.finally(() => {
     if (pendingConfigSaves.get(key) === task) pendingConfigSaves.delete(key);

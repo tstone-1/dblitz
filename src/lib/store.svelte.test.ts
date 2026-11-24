@@ -5,7 +5,7 @@ import {
   ensureTableConfig,
   loadSqlHistory,
   loadTheme,
-  persistSqlHistory,
+  appendSqlHistory,
   openDatabase,
   saveViewConfig,
 } from "./store.svelte";
@@ -23,6 +23,8 @@ describe("store localStorage loaders", () => {
       configurable: true,
       value: {
         localStorage: {
+          get length() { return storage.size; },
+          key: (index: number) => [...storage.keys()][index] ?? null,
           clear: () => storage.clear(),
           getItem: (key: string) => storage.get(key) ?? null,
           removeItem: (key: string) => {
@@ -45,8 +47,24 @@ describe("store localStorage loaders", () => {
 
   it("keeps a history write error outside the SQL result path", () => {
     vi.spyOn(window.localStorage, "setItem").mockImplementationOnce(() => { throw new Error("Quota"); });
-    expect(() => persistSqlHistory()).not.toThrow();
+    expect(() => appendSqlHistory({ sql: "SELECT 1", timestamp: 1, error: false })).not.toThrow();
     expect(appState.notice).toContain("history could not be saved");
+  });
+
+  it("keeps concurrent same-timestamp appends and the newest 100 entries across windows", () => {
+    const entry = (sql: string) => ({ sql, timestamp: 1, error: false });
+    window.localStorage.setItem("dblitz-sql-history", JSON.stringify([entry("legacy")]));
+    const setItem = window.localStorage.setItem;
+    // Interleave B after A has chosen an ordering key but before A writes it.
+    vi.spyOn(window.localStorage, "setItem").mockImplementationOnce((key, value) => {
+      appendSqlHistory(entry("B"));
+      setItem(key, value);
+    });
+    appendSqlHistory(entry("A"));
+    expect(loadSqlHistory().map(e => e.sql).sort()).toEqual(["A", "B", "legacy"]);
+    for (let i = 0; i < 101; i++) appendSqlHistory(entry(String(i)));
+    expect(loadSqlHistory().map(e => e.sql)).toEqual(Array.from({length: 100}, (_, i) => String(100 - i)));
+    expect(window.localStorage.length).toBe(100);
   });
 
   it("filters malformed SQL history entries", () => {
@@ -238,6 +256,7 @@ describe("view-config save sequencing", () => {
     vi.mocked(invoke).mockReset();
     vi.mocked(invoke).mockImplementation((command, args) => {
       calls.push({ command, args: (args ?? {}) as Record<string, unknown> });
+      if (command === "view_config_identity") return Promise.resolve(String((args as {path: string}).path).replace("junction/", ""));
       if (command === "save_view_config") {
         return new Promise<void>((resolve) => gates.push(() => resolve()));
       }
@@ -278,7 +297,7 @@ describe("view-config save sequencing", () => {
     await queuedForA;
 
     // A's settings went to A, even though B was open when the save dispatched.
-    expect(saves()[1].args.path).toBe("A.db");
+    expect(saves()[1].args).toMatchObject({ path: "A.db", identity: "A.db" });
     expect((saves()[1].args.config as { label: string | null }).label).toBe("from-A");
   });
 
@@ -307,18 +326,24 @@ describe("view-config save sequencing", () => {
     expect(labels).toEqual(["first", "second"]);
   });
 
-  it("waits for pending settings before reading the same file again", async () => {
+  it("waits for pending settings before reopening a Windows junction alias", async () => {
     const { gates, saves, calls } = harness();
     await openDatabase("same.db");
     appState.fileConfig.label = "edited";
     const save = saveViewConfig();
     await vi.waitFor(() => expect(saves()).toHaveLength(1));
-    const reopen = openDatabase("same.db");
+    const reopen = openDatabase("junction/same.db");
     await vi.waitFor(() => expect(calls.filter(c => c.command === "open_database")).toHaveLength(2));
     expect(calls.filter(c => c.command === "load_view_config")).toHaveLength(1);
     gates[0]();
     await Promise.all([save, reopen]);
     expect(calls.filter(c => c.command === "load_view_config")).toHaveLength(2);
+    expect(calls.filter(c => c.command === "load_view_config").at(-1)?.args.identity).toBe("same.db");
+    const saveViaAlias = saveViewConfig();
+    await vi.waitFor(() => expect(saves()).toHaveLength(2));
+    expect(saves()[1].args).toMatchObject({ path: "junction/same.db", identity: "same.db" });
+    gates[1]();
+    await saveViaAlias;
   });
 
   it("captures the config at enqueue time rather than at dispatch", async () => {

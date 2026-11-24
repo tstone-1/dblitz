@@ -1,6 +1,6 @@
 [package]
 name = "dblitz"
-version = "26.11.0"
+version = "26.11.1"
 description = "Read-only browser for SQLite, Parquet, CSV and JSON files"
 # Matches the repository's LICENSE file; declared here so `cargo` and any
 # generated metadata carry it too.

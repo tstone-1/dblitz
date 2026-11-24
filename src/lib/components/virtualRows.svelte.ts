@@ -18,8 +18,8 @@ import type { QueryResult } from "#lib/ipc.ts";
 //   filter never re-queries.
 //
 // * virtualRows.epoch -- the row-cache generation. beginReload() bumps epoch,
-//   AWAITS cancelQueries() (a reload is commencing that the caller will await),
-//   captures a per-epoch snapshot of table/filters/sort, then clears the cache.
+//   pins the new table/filter/sort snapshot and retires the old cache before
+//   awaiting cancellation. New loads wait until that cancellation completes.
 //   reset() bumps epoch fire-and-forget (no reload to await) for a DB switch.
 //   Every getRow-triggered background fetch is tagged with the epoch and the
 //   snapshot LIVE AT beginReload -- never current component state -- so a chunk
@@ -117,6 +117,7 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
   // Chunk range the grid last rendered; null until it reports one.
   let visibleChunks: { first: number; last: number } | null = null;
   let epoch = 0;
+  let cancellation: Promise<void> | null = null;
 
   const defer = deps.defer ?? ((run: () => void) => { setTimeout(run, 0); });
 
@@ -224,8 +225,12 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
     const snapshot = currentSnapshot;
     const offset = chunkIdx * deps.chunkSize;
     let tracked: Promise<QueryResult | null>;
-    const task = deps.loadChunk(offset, deps.chunkSize, snapshot).then((result) => {
-      if (!isCurrent(myEpoch)) return null;
+    const load = () => deps.loadChunk(offset, deps.chunkSize, snapshot);
+    const request = cancellation
+      ? cancellation.then(() => isCurrent(myEpoch) ? load() : null)
+      : load();
+    const task = request.then((result) => {
+      if (!result || !isCurrent(myEpoch)) return null;
       if (publishOnArrival.has(chunkIdx)) applyResult(chunkIdx, result, "if-empty");
       return result;
     });
@@ -280,10 +285,10 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
     if (flushScheduled) return;
     flushScheduled = true;
     defer(() => {
+      if (!isCurrent(myEpoch)) return;
       flushScheduled = false;
       const requested = scheduledChunks;
       scheduledChunks = new Set();
-      if (!isCurrent(myEpoch)) return;
       for (const idx of requested) {
         if (failedChunks.has(idx)) continue;
         if (visibleChunks && (idx < visibleChunks.first || idx > visibleChunks.last)) continue;
@@ -399,11 +404,17 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
       // both stampedes the single backend connection and duplicates whatever
       // the viewport already had in flight.
       let next = 0;
+      let failed = false;
       const worker = async () => {
-        while (next < missing.length) {
+        while (!failed && next < missing.length && isCurrent(myEpoch)) {
           const chunkIdx = missing[next++];
-          const result = await loadShared(chunkIdx, publishFetched);
-          if (result) chunks.set(chunkIdx, result.rows);
+          try {
+            const result = await loadShared(chunkIdx, publishFetched);
+            if (result) chunks.set(chunkIdx, result.rows);
+          } catch (error) {
+            failed = true;
+            throw error;
+          }
         }
       };
       await Promise.all(
@@ -435,6 +446,7 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
     publishOnArrival.clear();
     failedChunks.clear();
     scheduledChunks.clear();
+    flushScheduled = false;
     chunkRecency.clear();
     cacheVersion++;
   }
@@ -445,9 +457,14 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
     // Pin the query snapshot for this epoch BEFORE awaiting -- fetches kicked
     // off between now and the next reload must all query the same state.
     currentSnapshot = captureSnapshot();
-    await deps.cancelQueries();
-    if (!isCurrent(myEpoch)) return null;
     clearEpochState();
+    cancellation = deps.cancelQueries();
+    try {
+      await cancellation;
+    } finally {
+      if (isCurrent(myEpoch)) cancellation = null;
+    }
+    if (!isCurrent(myEpoch)) return null;
     return { epoch: myEpoch, snapshot: currentSnapshot };
   }
 
@@ -500,6 +517,7 @@ export function createVirtualRows<S = void>(deps: VirtualRowsDeps<S>) {
     currentSnapshot = captureSnapshot();
     clearEpochState();
     visibleChunks = null;
+    cancellation = null;
     void deps.cancelQueries();
   }
 

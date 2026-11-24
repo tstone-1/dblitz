@@ -217,6 +217,9 @@ pub struct AppConfig {
     /// Most-recently-opened databases, most recent first. Capped at RECENT_FILES_MAX.
     #[serde(default)]
     pub recent_files: Vec<String>,
+    /// Filesystem identities captured when a file was opened. Older configs contain only paths.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    recent_file_keys: HashMap<String, String>,
     /// Directory into which "Open in Excel" exports are written. `None` means
     /// use the application's temporary export directory.
     #[serde(default)]
@@ -242,6 +245,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             recent_files: Vec::new(),
+            recent_file_keys: HashMap::new(),
             export_dir: None,
             check_for_updates_on_startup: default_check_for_updates_on_startup(),
             last_run_version: None,
@@ -344,6 +348,7 @@ impl ConfigStore {
     /// result is a 16-hex-character filename inside `self.dir`, so no value of
     /// `db_path` - traversal, absolute, empty - can direct a write anywhere
     /// else. `config_path_for_db_stays_inside_the_config_dir` pins that.
+    #[cfg(test)]
     fn config_path_for_db(&self, db_path: &str) -> PathBuf {
         self.hashed_path(&normalize_path_key(db_path, self.windows_path_semantics))
     }
@@ -364,55 +369,59 @@ impl ConfigStore {
         self.dir.join(format!("{}.json", &hash[..16]))
     }
 
-    pub fn load_config(&self, db_path: &str) -> FileConfig {
-        let path = self.config_path_for_db(db_path);
-        if let Some(config) = self.read_config_file(&path) {
-            return config;
+    pub fn load_config_with_identity(
+        &self,
+        db_path: &str,
+        identity: &str,
+    ) -> Result<FileConfig, String> {
+        let path = self.hashed_path(identity);
+        if let Some(config) = self.read_config_file(&path)? {
+            return Ok(config);
         }
         // Prefer the most recently used legacy format. A folded key can
         // belong to two distinct files, so retain it for the other owner.
         if self.windows_path_semantics {
             let folded = self.hashed_path(&db_path.replace('\\', "/").to_lowercase());
             if folded != path {
-                if let Some(config) = self.read_config_file(&folded) {
-                    return config;
+                if let Some(config) = self.read_config_file(&folded)? {
+                    return Ok(config);
                 }
             }
         }
         let legacy = self.legacy_config_path_for_db(db_path);
         if legacy != path {
-            if let Some(config) = self.read_config_file(&legacy) {
-                return config;
+            if let Some(config) = self.read_config_file(&legacy)? {
+                return Ok(config);
             }
         }
-        FileConfig::default()
+        Ok(FileConfig::default())
     }
 
-    /// Read and sanitize one config file. `None` when it is absent, unreadable
-    /// or corrupt - all three mean "nothing usable here", and the caller's
-    /// fallback is the same in each case.
-    fn read_config_file(&self, path: &Path) -> Option<FileConfig> {
-        if !path.exists() {
-            return None;
-        }
-        match fs::read_to_string(path) {
-            Ok(s) => match serde_json::from_str(&s) {
-                Ok(config) => Some(sanitize_file_config(config)),
-                Err(e) => {
-                    warn!(path = %path.display(), error = %e, "Config file corrupted, using defaults");
-                    None
-                }
-            },
+    /// Missing or corrupt JSON falls back to the previous key. An I/O error
+    /// must stop an active load before autosave can replace an intact file.
+    fn read_config_file(&self, path: &Path) -> Result<Option<FileConfig>, String> {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("Reading view settings {}: {e}", path.display())),
+        };
+        match serde_json::from_slice(&bytes) {
+            Ok(config) => Ok(Some(sanitize_file_config(config))),
             Err(e) => {
-                warn!(path = %path.display(), error = %e, "Failed to read config file");
-                None
+                warn!(path = %path.display(), error = %e, "Config file corrupted, using defaults");
+                Ok(None)
             }
         }
     }
 
-    pub fn save_config(&self, db_path: &str, config: &FileConfig) -> Result<(), String> {
+    pub fn save_config_with_identity(
+        &self,
+        db_path: &str,
+        identity: &str,
+        config: &FileConfig,
+    ) -> Result<(), String> {
         fs::create_dir_all(&self.dir).str_err()?;
-        let path = self.config_path_for_db(db_path);
+        let path = self.hashed_path(identity);
         let json = serde_json::to_string_pretty(&sanitize_file_config(config.clone())).str_err()?;
         atomic_write(&path, &json)?;
         // Migration completes here: the value now lives under the normalized
@@ -464,11 +473,26 @@ impl ConfigStore {
     pub fn push_recent_file(&self, path: &str) {
         let mut config = self.load_app_config();
         let normalized = normalize_for_dedup(path);
-        config
-            .recent_files
-            .retain(|p| normalize_for_dedup(p) != normalized);
+        let spelling = path.replace('\\', "/").to_lowercase();
+        config.recent_files.retain(|p| {
+            if p == path {
+                return false;
+            }
+            if let Some(key) = config.recent_file_keys.get(p) {
+                return key != &normalized;
+            }
+            // Pre-upgrade entries have no identity. Resolve only a candidate
+            // with the same spelling, never an unrelated (possibly offline) share.
+            !(cfg!(windows)
+                && p.replace('\\', "/").to_lowercase() == spelling
+                && normalize_for_dedup(p) == normalized)
+        });
         config.recent_files.insert(0, path.to_string());
         config.recent_files.truncate(RECENT_FILES_MAX);
+        config
+            .recent_file_keys
+            .retain(|p, _| config.recent_files.contains(p));
+        config.recent_file_keys.insert(path.to_owned(), normalized);
         if let Err(e) = self.save_app_config(&config) {
             warn!(error = %e, "Failed to save recent files");
         }
@@ -493,6 +517,7 @@ impl ConfigStore {
     pub fn clear_recent_files(&self) -> Result<(), String> {
         let mut config = self.load_app_config();
         config.recent_files.clear();
+        config.recent_file_keys.clear();
         self.save_app_config(&config)
     }
 
@@ -575,7 +600,15 @@ impl ConfigStore {
         self.get_recent_files()
             .into_iter()
             .map(|path| {
-                let cfg = self.load_config(&path);
+                let cfg = self
+                    .load_config_with_identity(
+                        &path,
+                        &normalize_path_key(&path, self.windows_path_semantics),
+                    )
+                    .unwrap_or_else(|error| {
+                        warn!(%error, "Could not read recent file settings");
+                        FileConfig::default()
+                    });
                 RecentFile {
                     path,
                     tint: cfg.tint,
@@ -590,12 +623,12 @@ impl ConfigStore {
 // signatures are the app's stable config API (called from commands.rs);
 // they exist only to bind the OS config dir so callers don't have to.
 
-pub fn load_config(db_path: &str) -> FileConfig {
-    ConfigStore::os_default().load_config(db_path)
+pub fn load_config(db_path: &str, identity: &str) -> Result<FileConfig, String> {
+    ConfigStore::os_default().load_config_with_identity(db_path, identity)
 }
 
-pub fn save_config(db_path: &str, config: &FileConfig) -> Result<(), String> {
-    ConfigStore::os_default().save_config(db_path, config)
+pub fn save_config(db_path: &str, identity: &str, config: &FileConfig) -> Result<(), String> {
+    ConfigStore::os_default().save_config_with_identity(db_path, identity, config)
 }
 
 pub fn push_recent_file(path: &str) {
@@ -669,6 +702,50 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn pre_upgrade_recents_match_existing_unicode_case_variants() {
+        let dir = TempDir::new().unwrap();
+        let store = ConfigStore::new(dir.path().to_owned());
+        let path = dir.path().join("Å.db");
+        std::fs::write(&path, b"").unwrap();
+        let alias = dir.path().join("å.db");
+        let same_file = alias.is_file();
+        let legacy = AppConfig {
+            recent_files: vec![alias.to_str().unwrap().to_owned()],
+            ..AppConfig::default()
+        };
+        store.save_app_config(&legacy).unwrap();
+        store.push_recent_file(path.to_str().unwrap());
+        let recent = store.load_app_config().recent_files;
+        assert_eq!(recent[0], path.to_str().unwrap());
+        if same_file {
+            assert_eq!(recent.len(), 1);
+        } else {
+            assert_eq!(recent[1..], [alias.to_str().unwrap()]);
+        }
+    }
+
+    #[test]
+    fn recent_files_deduplicate_using_the_key_saved_at_open() {
+        let dir = TempDir::new().unwrap();
+        let store = ConfigStore::new(dir.path().to_owned());
+        let path = dir.path().join("local.db");
+        std::fs::write(&path, b"").unwrap();
+        let path = path.to_str().unwrap();
+        let alias = "unavailable-alias.db".to_owned();
+        let config = AppConfig {
+            recent_files: vec![alias.clone(), "old.db".to_owned()],
+            recent_file_keys: HashMap::from([(alias, normalize_for_dedup(path))]),
+            ..AppConfig::default()
+        };
+        store.save_app_config(&config).unwrap();
+        store.push_recent_file(path);
+        let saved = store.load_app_config();
+        assert_eq!(saved.recent_files, [path, "old.db"]);
+        assert_eq!(saved.recent_file_keys.len(), 1);
+    }
+
     #[test]
     fn push_recent_file_truncates_at_max() {
         let dir = TempDir::new().unwrap();
@@ -716,6 +793,7 @@ mod tests {
         store.clear_recent_files().unwrap();
         let config = store.load_app_config();
         assert!(config.recent_files.is_empty());
+        assert!(config.recent_file_keys.is_empty());
     }
 
     #[test]
@@ -1031,6 +1109,20 @@ mod tests {
         assert_eq!(sanitize_file_config(config).label.as_deref(), Some("PROD"));
     }
 
+    // Most store tests use a stable path throughout. The ownership tests below
+    // pass the identity separately to exercise a path that changes targets.
+    impl ConfigStore {
+        fn load_config(&self, db_path: &str) -> FileConfig {
+            let identity = normalize_path_key(db_path, self.windows_path_semantics);
+            self.load_config_with_identity(db_path, &identity).unwrap()
+        }
+
+        fn save_config(&self, db_path: &str, config: &FileConfig) -> Result<(), String> {
+            let identity = normalize_path_key(db_path, self.windows_path_semantics);
+            self.save_config_with_identity(db_path, &identity, config)
+        }
+    }
+
     #[test]
     fn view_config_round_trips() {
         let dir = TempDir::new().unwrap();
@@ -1077,6 +1169,65 @@ mod tests {
         // propagating the parse error.
         let loaded = store.load_config(db_path);
         assert_eq!(loaded, FileConfig::default());
+    }
+
+    #[test]
+    fn saving_through_an_alias_keeps_the_identity_of_the_original_session() {
+        let root = TempDir::new().unwrap();
+        let store = ConfigStore::new(root.path().join("settings"));
+        let original = "target-A";
+        let replacement = "target-B";
+        let alias = "current/demo.db";
+        let config = |label: &str| FileConfig {
+            label: Some(label.into()),
+            ..Default::default()
+        };
+        store
+            .save_config_with_identity(alias, replacement, &config("B"))
+            .unwrap();
+        store
+            .save_config_with_identity(alias, original, &config("edited A"))
+            .unwrap();
+        assert_eq!(
+            store.load_config_with_identity(alias, replacement).unwrap(),
+            config("B")
+        );
+        assert_eq!(
+            store.load_config_with_identity(alias, original).unwrap(),
+            config("edited A")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_unreadable_active_config_does_not_return_defaults() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = TempDir::new().unwrap();
+        let store = ConfigStore::new(root.path().into());
+        let saved = FileConfig {
+            label: Some("saved".into()),
+            ..Default::default()
+        };
+        store
+            .save_config_with_identity("file.db", "id", &saved)
+            .unwrap();
+        let path = store.hashed_path("id");
+        let before = fs::read(&path).unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        assert!(store
+            .load_config_with_identity("file.db", "id")
+            .unwrap_err()
+            .contains("Reading view settings"));
+        drop(lock);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(
+            store.load_config_with_identity("file.db", "id").unwrap(),
+            saved
+        );
     }
 
     #[test]

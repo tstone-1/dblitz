@@ -136,6 +136,11 @@ export function checkReleaseContract(input) {
     failures.push(
       `CHANGELOG.md heading for ${version} reads "${heading[1].trim()}"; it must be a YYYY-MM-DD release date.`,
     );
+  } else {
+    const body = input.changelog.slice(heading.index + heading[0].length).split(/^##\s/m, 1)[0];
+    if (!body.split(/\r?\n/).some(line => /^(?!#)\S/.test(line.trim()))) {
+      failures.push(`CHANGELOG.md has no release notes for ${version}.`);
+    }
   }
 
   return failures;

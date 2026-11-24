@@ -131,7 +131,7 @@ export function buildSelectionStats({
     for (let c = selection.c0; c <= selection.c1; c++) {
       if (isSelected && !isSelected(r, c)) continue;
       const value = row[c];
-      if (value === null || value === "") continue;
+      if (value == null || value.trim() === "") continue;
 
       const numberValue = Number(value);
       if (Number.isNaN(numberValue)) {

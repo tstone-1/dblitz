@@ -80,7 +80,8 @@ export function filterAfterListPaste(
   const start = selectionStart ?? current.value.length;
   const end = selectionEnd ?? start;
   return {
-    value: current.value.slice(0, start) + pattern + current.value.slice(end),
+    value: start === 0 && end === current.value.length ? pattern
+      : current.value.slice(0, start) + `(?:${pattern})` + current.value.slice(end),
     is_regex: true,
   };
 }

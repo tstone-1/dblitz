@@ -173,7 +173,7 @@ impl LockedDb {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{fixture, scratch_dir};
+    use super::super::tests::{fixture, scratch_dir, Fixture};
     use super::*;
     use std::path::Path;
 
@@ -189,14 +189,14 @@ mod tests {
         Ok(n)
     }
 
-    fn locked() -> (LockedDb, std::path::PathBuf) {
+    fn locked() -> Fixture<LockedDb> {
         let dir = scratch_dir("lockdown");
-        let file = fixture(&dir, 100);
-        let tmp = dir.join("spill");
+        let file = fixture(dir.path(), 100);
+        let tmp = dir.path().join("spill");
         let file = file.to_str().unwrap();
         let reader = crate::pq::FileFormat::Parquet.reader(&file_arg(file));
         let db = LockedDb::open(file, &reader, tmp.to_str().unwrap()).unwrap();
-        (db, dir)
+        Fixture { value: db, dir }
     }
 
     #[test]
@@ -204,8 +204,9 @@ mod tests {
         // The reader is the one piece of the pre-lock SQL the file has a say
         // in. Run as a batch, the COPY below ran on the still unlocked
         // instance and wrote its file.
-        let dir = scratch_dir("lockdown-one-statement");
-        let file = fixture(&dir, 10);
+        let root = scratch_dir("lockdown-one-statement");
+        let dir = root.path();
+        let file = fixture(dir, 10);
         let file = file.to_str().unwrap();
         let written = dir.join("injected.csv");
         let reader = format!(
@@ -220,7 +221,7 @@ mod tests {
 
     #[test]
     fn reading_the_opened_file_is_allowed() {
-        let (db, _dir) = locked();
+        let db = locked();
         assert_eq!(run(&db, "SELECT count(*) FROM data"), Ok(1));
         assert_eq!(run(&db, "FROM data LIMIT 3"), Ok(3));
         assert_eq!(run(&db, "SELECT * FROM data ORDER BY val LIMIT 3"), Ok(3));
@@ -290,9 +291,10 @@ mod tests {
         // The control for `no_statement_can_write_a_file`: the same statements
         // on a plain in-memory DuckDB DO create their artifacts. Without it, a
         // typo'd path would make the locked test pass for the wrong reason.
-        let dir = scratch_dir("lockdown-control");
+        let root = scratch_dir("lockdown-control");
+        let dir = root.path();
         let conn = Connection::open_in_memory().unwrap();
-        for (sql, artifact) in write_attacks(&dir) {
+        for (sql, artifact) in write_attacks(dir) {
             conn.execute_batch(&sql).unwrap();
             assert!(
                 artifact.exists(),
@@ -303,8 +305,9 @@ mod tests {
 
     #[test]
     fn no_statement_can_write_a_file() {
-        let (db, dir) = locked();
-        for (sql, artifact) in write_attacks(&dir) {
+        let db = locked();
+        let dir = db.dir.path();
+        for (sql, artifact) in write_attacks(dir) {
             assert!(run(&db, &sql).is_err(), "{sql} must be refused");
             assert!(!artifact.exists(), "{sql} wrote {artifact:?}");
         }
@@ -314,8 +317,9 @@ mod tests {
     fn the_settings_layer_alone_stops_writes() {
         // Same attacks, bypassing the classifier: the settings must hold on
         // their own, so a classifier bug is not a write.
-        let (db, dir) = locked();
-        for (sql, artifact) in write_attacks(&dir) {
+        let db = locked();
+        let dir = db.dir.path();
+        for (sql, artifact) in write_attacks(dir) {
             let _ = db.conn().execute_batch(&sql);
             assert!(!artifact.exists(), "settings let {sql} write {artifact:?}");
         }
@@ -325,8 +329,9 @@ mod tests {
     fn classifying_on_an_unlocked_instance_does_write() {
         // The control for the test below. If DuckDB ever stops doing I/O at
         // prepare time this goes red, and the ordering rule can be revisited.
-        let dir = scratch_dir("lockdown-prepare-control");
-        let file = fixture(&dir, 10);
+        let root = scratch_dir("lockdown-prepare-control");
+        let dir = root.path();
+        let file = fixture(dir, 10);
         let db =
             LockedDb::open_unlocked(file.to_str().unwrap(), dir.join("spill").to_str().unwrap())
                 .unwrap();
@@ -344,7 +349,8 @@ mod tests {
         // Preparing EXPORT DATABASE creates its directory (measured on an
         // unlocked instance). This is the reason the classifier may only ever
         // see a locked instance.
-        let (db, dir) = locked();
+        let db = locked();
+        let dir = db.dir.path();
         let target = dir.join("prepared-export");
         let sql = format!("EXPORT DATABASE {}", sql_literal(target.to_str().unwrap()));
         // Either refusal is fine (the locked prepare may already fail with a
@@ -372,12 +378,13 @@ mod tests {
 
     #[test]
     fn an_unlocked_instance_really_reads() {
-        let dir = scratch_dir("lockdown-read-control");
-        let file = fixture(&dir, 10);
+        let root = scratch_dir("lockdown-read-control");
+        let dir = root.path();
+        let file = fixture(dir, 10);
         let db =
             LockedDb::open_unlocked(file.to_str().unwrap(), dir.join("spill").to_str().unwrap())
                 .unwrap();
-        for sql in read_attacks(&dir) {
+        for sql in read_attacks(dir) {
             let n = run(&db, &sql);
             assert!(
                 matches!(n, Ok(n) if n > 0),
@@ -388,8 +395,9 @@ mod tests {
 
     #[test]
     fn nothing_outside_the_file_can_be_read() {
-        let (db, dir) = locked();
-        for sql in read_attacks(&dir) {
+        let db = locked();
+        let dir = db.dir.path();
+        for sql in read_attacks(dir) {
             assert!(run(&db, &sql).is_err(), "{sql} must be refused");
         }
         // No control for this one: without httpfs, which autoload may not
@@ -403,7 +411,7 @@ mod tests {
         // The refusals are the assertion. There was also a check that a
         // `<dir>/ext` directory stayed absent, but nothing points DuckDB's
         // extension directory there, so it could not fail.
-        let (db, _dir) = locked();
+        let db = locked();
         for sql in [
             "INSTALL httpfs",
             "LOAD httpfs",
@@ -421,7 +429,7 @@ mod tests {
 
     #[test]
     fn the_catalog_cannot_be_changed() {
-        let (db, _dir) = locked();
+        let db = locked();
         for sql in [
             "CREATE OR REPLACE VIEW data AS SELECT 42 AS id",
             "CREATE TABLE t AS SELECT 1",
@@ -440,7 +448,7 @@ mod tests {
 
     #[test]
     fn more_than_one_statement_is_refused() {
-        let (db, _dir) = locked();
+        let db = locked();
         assert_eq!(db.classify("SELECT 1; SELECT 2"), Err(Refusal::NotOne(2)));
     }
 }

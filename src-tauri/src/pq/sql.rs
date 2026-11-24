@@ -205,7 +205,7 @@ pub(crate) fn execute_sql(db: &LockedDb, sql: &str, generation: &AtomicU64, gen:
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{fixture, scratch_dir};
+    use super::super::tests::{fixture, scratch_dir, Fixture};
     use super::*;
 
     fn execute_sql(db: &LockedDb, sql: &str, generation: &AtomicU64) -> SqlResult {
@@ -219,12 +219,14 @@ mod tests {
         assert!(result.rows.is_empty());
     }
 
-    fn db(rows: u64) -> LockedDb {
+    fn db(rows: u64) -> Fixture<LockedDb> {
         let dir = scratch_dir("sql");
-        let file = fixture(&dir, rows);
+        let file = fixture(dir.path(), rows);
         let file = file.to_str().unwrap();
         let reader = crate::pq::FileFormat::Parquet.reader(&crate::pq::file_arg(file));
-        LockedDb::open(file, &reader, dir.join("spill").to_str().unwrap()).unwrap()
+        let value =
+            LockedDb::open(file, &reader, dir.path().join("spill").to_str().unwrap()).unwrap();
+        Fixture { value, dir }
     }
 
     #[test]

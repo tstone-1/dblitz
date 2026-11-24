@@ -399,9 +399,6 @@
       const data = await materializeSelection();
       if (!data) return;
       await onExport(data);
-      if (data.truncated) {
-        onNotice?.(`Excel export included the first ${data.rows.length.toLocaleString()} selected rows only.`);
-      }
       ctxMenu = null;
     } catch (e) {
       onError?.(String(e));

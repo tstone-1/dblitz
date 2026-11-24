@@ -193,8 +193,10 @@ pub fn query_table(
                 // 9-17 s), or the cache file can fail to be written. A build
                 // the user stopped stays stopped.
                 Err(e) if generation.load(Ordering::Relaxed) == gen && !e.contains("INTERRUPT") => {
+                    let page =
+                        listed_page(conn, &mut views, key, bound, &proj, req, gen, generation)?;
                     s.sort_cache_failed.store(true, Ordering::Relaxed);
-                    listed_page(conn, &mut views, key, bound, &proj, req, gen, generation)?
+                    page
                 }
                 page => page?,
             }
@@ -575,7 +577,7 @@ fn fetch(
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{fixture, scratch_dir};
+    use super::super::tests::{fixture, scratch_dir, Fixture};
     use super::*;
 
     fn req(offset: i64, limit: i64) -> QueryRequest {
@@ -598,14 +600,15 @@ mod tests {
         }
     }
 
-    fn session(rows: u64) -> ParquetSession {
+    fn session(rows: u64) -> Fixture<ParquetSession> {
         let dir = scratch_dir("query");
-        ParquetSession::open(fixture(&dir, rows).to_str().unwrap()).unwrap()
+        let value = ParquetSession::open(fixture(dir.path(), rows).to_str().unwrap()).unwrap();
+        Fixture { value, dir }
     }
 
     /// A session that materializes every sorted view, as a file above
     /// `ORDER_LIST_MAX_CELLS` does.
-    fn materializing(rows: u64) -> ParquetSession {
+    fn materializing(rows: u64) -> Fixture<ParquetSession> {
         let mut s = session(rows);
         s.order_list_max_cells = 0;
         s
@@ -799,7 +802,8 @@ mod tests {
     fn a_sort_the_cache_cannot_hold_is_paged_from_a_list() {
         let s = materializing(300);
         // The cache file's directory cannot be created: its parent is a file.
-        let blocker = scratch_dir("blocked").join("a-file");
+        let cache_dir = scratch_dir("blocked");
+        let blocker = cache_dir.path().join("a-file");
         std::fs::write(&blocker, b"").unwrap();
         s.views.lock().sort_cache = blocker.join("sub").join("cache.duckdb");
         let g = AtomicU64::new(0);
@@ -811,7 +815,7 @@ mod tests {
         assert!(!sorted_into_the_cache(&s));
         // Later sorts do not try the cache again.
         assert!(s.sort_cache_failed.load(Ordering::Relaxed));
-        s.views.lock().sort_cache = scratch_dir("unblocked").join("cache.duckdb");
+        s.views.lock().sort_cache = cache_dir.path().join("cache.duckdb");
         q.sort_asc = true;
         assert_eq!(ids(&query_table(&s, &q, &g).unwrap())[0], 0);
         assert!(!sorted_into_the_cache(&s));
@@ -898,7 +902,8 @@ mod tests {
         // In the sort cache the file's `rowid` hides the table's own, which
         // the cache's pages are cut by: positions 0 to 2 came back as every
         // row whose column value was below 3.
-        let dir = scratch_dir("rowid-parquet");
+        let root = scratch_dir("rowid-parquet");
+        let dir = root.path();
         let path = dir.join("rowid.parquet");
         Connection::open_in_memory()
             .unwrap()
@@ -968,35 +973,48 @@ mod tests {
         assert!(query_table(&s, &q, &AtomicU64::new(0)).is_err());
     }
 
+    #[test]
+    fn an_invalid_filter_does_not_disable_later_materialized_sorts() {
+        let s = materializing(100);
+        let g = AtomicU64::new(0);
+        let mut q = req(0, 10);
+        q.sort_column = Some("id".into());
+        q.filters = vec![filter("id", ">abc", false)];
+        assert!(query_table(&s, &q, &g).is_err());
+        q.filters = vec![filter("id", ">40", false)];
+        query_table(&s, &q, &g).unwrap();
+        assert!(sorted_into_the_cache(&s));
+    }
+
+    #[test]
+    fn dropping_a_session_removes_its_fixture() {
+        let session = session(10);
+        let path = session.dir.path().join("fixture.parquet");
+        assert!(path.is_file());
+        drop(session);
+        assert!(!path.exists());
+    }
+
+    type SortWorker = std::thread::JoinHandle<Result<QueryResult, String>>;
+
     /// A sort over enough rows that its build takes a visible while, run on
     /// another thread; returns the session and the join handle.
-    fn start_big_sort(
-        rows: u64,
-    ) -> (
-        std::sync::Arc<ParquetSession>,
-        std::sync::Arc<AtomicU64>,
-        std::thread::JoinHandle<Result<QueryResult, String>>,
-    ) {
-        let dir = scratch_dir("progress");
-        let mut s = ParquetSession::open(fixture(&dir, rows).to_str().unwrap()).unwrap();
+    fn start_big_sort(rows: u64) -> (std::sync::Arc<Fixture<ParquetSession>>, SortWorker) {
+        let mut s = session(rows);
         // Only a materialized sort has a build long enough to report on.
         s.order_list_max_cells = 0;
         let s = std::sync::Arc::new(s);
-        let g = std::sync::Arc::new(AtomicU64::new(0));
-        let (s2, g2) = (s.clone(), g.clone());
+        let worker_session = s.clone();
         let handle = std::thread::spawn(move || {
             let mut q = req(0, 100);
             q.sort_column = Some("name".into());
-            query_table(&s2, &q, &g2)
+            query_table(&worker_session, &q, &AtomicU64::new(0))
         });
-        (s, g, handle)
+        (s, handle)
     }
 
     /// Polls `view_progress` until it reports, or the build ends first.
-    fn first_progress(
-        s: &ParquetSession,
-        handle: &std::thread::JoinHandle<Result<QueryResult, String>>,
-    ) -> Option<f64> {
+    fn first_progress(s: &ParquetSession, handle: &SortWorker) -> Option<f64> {
         while !handle.is_finished() {
             if let Some(p) = s.view_progress() {
                 return Some(p);
@@ -1014,7 +1032,7 @@ mod tests {
             None,
             "an idle session reports nothing"
         );
-        let (s, _g, handle) = start_big_sort(3_000_000);
+        let (s, handle) = start_big_sort(3_000_000);
         let seen = first_progress(&s, &handle);
         let r = handle.join().unwrap().unwrap();
         assert_eq!(r.total_rows, Some(3_000_000));
@@ -1034,7 +1052,7 @@ mod tests {
 
     #[test]
     fn interrupting_stops_a_sort_build() {
-        let (s, _g, handle) = start_big_sort(3_000_000);
+        let (s, handle) = start_big_sort(3_000_000);
         assert!(
             first_progress(&s, &handle).is_some(),
             "precondition: the build was still running"
@@ -1064,15 +1082,16 @@ mod tests {
 
     /// A CSV with `rows` lines in a deliberately non-sorted order of `price`,
     /// so a sorted view differs from file order.
-    fn csv_session(rows: u64, header: &str) -> ParquetSession {
+    fn csv_session(rows: u64, header: &str) -> Fixture<ParquetSession> {
         let dir = scratch_dir("query_csv");
-        let path = dir.join("rows.csv");
+        let path = dir.path().join("rows.csv");
         let mut text = format!("{header}\n");
         for i in 0..rows {
             text.push_str(&format!("{i},item {i},{}\n", (i * 7919) % 1000));
         }
         std::fs::write(&path, text).unwrap();
-        ParquetSession::open(path.to_str().unwrap()).unwrap()
+        let value = ParquetSession::open(path.to_str().unwrap()).unwrap();
+        Fixture { value, dir }
     }
 
     fn price_req(offset: i64, limit: i64) -> QueryRequest {
@@ -1136,7 +1155,8 @@ mod tests {
 
     #[test]
     fn pages_with_shadowed_rowid_keep_equal_keys_in_file_order() {
-        let dir = scratch_dir("offset_ties");
+        let root = scratch_dir("offset_ties");
+        let dir = root.path();
         let file = dir.join("ties.csv");
         let mut csv = String::from("rowid,k,__dblitz_position\n");
         for id in 0..2500 {
@@ -1160,7 +1180,8 @@ mod tests {
 
     #[test]
     fn a_json_array_and_ndjson_both_page_in_file_order() {
-        let dir = scratch_dir("query_json");
+        let root = scratch_dir("query_json");
+        let dir = root.path();
         let array = dir.join("rows.json");
         let lines = dir.join("rows.ndjson");
         let items: Vec<String> = (0..1500)

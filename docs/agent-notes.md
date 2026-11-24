@@ -21,6 +21,8 @@ Read the section before working in its area.
 
 - **A second copy of the repo inside the repo folder stalls `npm run check`.** `tsconfig.json` includes `"*"`, and svelte-check walks the workspace. On 2026-11-10, with four git worktrees in a gitignored folder inside the repo (each a full tree with its own `node_modules`), the check printed nothing for five minutes and was stopped; with the worktrees removed it finished in 40 s. The cause was not isolated further than that before-and-after. Remove a worktree as soon as its diff is merged, or keep worktrees outside the repo folder.
 
+Run the Svelte type check and Vitest sequentially in one checkout. Both can regenerate the SvelteKit types directory during startup. Concurrent runs can remove a generated route type while the other process is writing it.
+
 ### Vitest's global environment is `node`
 
 - **Vitest's global environment is `node`.** Tests that use the DOM opt in per file with `// @vitest-environment jsdom` on line 1. Mounted components also need the browser export of Svelte in Vitest's client environment (see `vite.config.js`). Keep it per file: a global jsdom would hide that most of this suite is pure logic. jsdom 30 has no `document.elementFromPoint`, which `dragReorder.test.ts` supplies and asserts is still absent.
@@ -426,13 +428,15 @@ the `json` feature of the `duckdb` crate, because extension autoinstall is off.
 
 ### A view-config save carries its own database path
 
-- **A view-config save carries its own database path; the backend must never pick one from mutable state.** `save_view_config` is `#[tauri::command(async)]`, so it runs at a time the frontend does not control while `state.current_path` moves. `store.svelte.ts` serializes saves on their own chain (separate from `databaseRequestQueue`, so an autosave per drag frame cannot block an open) and captures the path *and* a detached JSON copy of the config at enqueue time — `$state.snapshot` returns the same object under this repo's vitest setup, so later edits still reached the queued save. The backend writes to the path it was handed: a save legitimately outlives its session, and the path is a lookup **key**, not a destination. Pinned by `store.svelte.test.ts` ("saves under the database that was open when the change was made", "serializes saves so an older snapshot cannot overwrite a newer one", "captures the config at enqueue time") and `config::tests::{save_config_keys_strictly_off_the_db_path_it_is_given, config_path_for_db_stays_inside_the_config_dir}`.
+- **A view-config save carries its own database path; the backend must never pick one from mutable state.** `save_view_config` is `#[tauri::command(async)]`, so it runs at a time the frontend does not control while `state.current_path` moves. `store.svelte.ts` serializes saves on their own chain (separate from `databaseRequestQueue`, so successive edits can be saved while another file opens) and captures the path *and* a detached JSON copy of the config at enqueue time — `$state.snapshot` returns the same object under this repo's vitest setup, so later edits still reached the queued save. The backend writes to the path it was handed: a save legitimately outlives its session, and the path is a lookup **key**, not a destination. Pinned by `store.svelte.test.ts` ("saves under the database that was open when the change was made", "serializes saves so an older snapshot cannot overwrite a newer one", "captures the config at enqueue time") and `config::tests::{save_config_keys_strictly_off_the_db_path_it_is_given, config_path_for_db_stays_inside_the_config_dir}`.
 
-- Reopening a file waits for the last save queued under the same path. A different file can open while that save is pending. If column discovery failed at open, Browse retries it before repairing the selected table's settings.
+- Loading and saving use the identity captured at open, even if a Windows junction is later retargeted. Reopening a file waits for the last save under that identity. A temporary read error aborts the active settings load before autosave can replace the file. A different file can open while that save is pending. If column discovery failed at open, Browse retries it before repairing the selected table's settings.
+
+The SQL history is shared by all windows on the same WebView origin. Each append writes an individual local-storage key, and the legacy history array supplies older entries during the changeover. The concurrency test interleaves two writers after they choose their ordering keys.
 
 ### The config key is a hash of the normalized path
 
-- Windows uses the filesystem's resolved spelling of an existing path for the window marker, recents and the per-database config hash. Unicode lowercase can collapse two distinct filenames. Config reads also recognize legacy folded and raw keys. Unix path keys remain byte-exact.
+- Windows uses the filesystem's resolved spelling of an existing path for the window marker, recents and the per-database config hash. Unicode lowercase can collapse two distinct filenames. Config reads also recognize legacy folded and raw keys. Unix path keys remain byte-exact. Recents cache identities at insertion so opening a local file does not resolve unrelated network paths.
 
 ### An `await` in a component publishes only if it still owns publication
 

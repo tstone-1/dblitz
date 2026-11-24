@@ -20,7 +20,8 @@ const TARGET = "99.1.0";
  * the release gate of 26.10.4 by assuming a pending section).
  */
 function withPendingSection(changelog: string): string {
-  if (/^## \[[^\]]+\] - Unreleased$/m.test(changelog)) return changelog;
+  const previous = /^## \[[^\]]+\] - Unreleased$/m;
+  if (previous.test(changelog)) return changelog.replace(previous, "$&\n\n- Synthetic release note.");
   const at = changelog.search(/^## \[/m);
   expect(at).toBeGreaterThan(0);
   const section = "## [99.0.0] - Unreleased\n\n### Added\n- A note.\n\n";
@@ -54,6 +55,16 @@ describe("nextVersion", () => {
 });
 
 describe("bumpVersionFiles on the repository's own files", () => {
+  it("prepares its positive fixture after an undated bump created an empty section", () => {
+    const files = repoFiles();
+    const dated = { ...files, changelog: "## [26.11.0] - 2026-11-01\n- Previous release\n" };
+    const pending = bumpVersionFiles(dated, "26.11.2");
+    expect(() => bumpVersionFiles(pending, "26.11.2", { releaseDate: "2026-11-24" })).toThrow();
+    const prepared = { ...pending, changelog: withPendingSection(pending.changelog) };
+    const release = bumpVersionFiles(prepared, "26.11.2", { releaseDate: "2026-11-24" });
+    expect(checkReleaseContract({ tag: "v26.11.2", ...release })).toEqual([]);
+  });
+
   it("produces a tree the release preflight accepts", () => {
     const files = repoFiles();
     const bumped = bumpVersionFiles(files, TARGET, { releaseDate: "2026-11-03" });
@@ -117,6 +128,13 @@ describe("bumpVersionFiles edge cases", () => {
     expect(() => bumpVersionFiles(base(log), "26.11.0", { releaseDate: "2026-11-03" })).toThrow(
       /no section for 26\.11\.0/,
     );
+  });
+
+  it("preserves dated releases and requires notes before dating a pending release", () => {
+    const files = base("## [26.1.4] - Unreleased\n\n### Fixed\n\n## [26.1.3] - 2026-01-01\n- Previously published\n");
+    expect(() => bumpVersionFiles(files, "26.1.3", { releaseDate: "2026-01-02" })).toThrow(/already dates/);
+    expect(bumpVersionFiles(files, "26.1.3", { releaseDate: "2026-01-01" }).changelog).toBe(files.changelog);
+    expect(() => bumpVersionFiles(files, "26.1.4", { releaseDate: "2026-01-02" })).toThrow(/no release notes/);
   });
 
   it("renames a pending Unreleased section to the new version", () => {
