@@ -140,8 +140,7 @@ pub(super) fn render_cell(value: rusqlite::types::ValueRef<'_>) -> Option<String
 /// all, which `build_where_clause` closes separately (see its numeric-equality
 /// arm).
 pub(super) fn render_real(value: f64) -> String {
-    // Neither is storable in a REAL cell (an INSERT of NaN stores NULL), so
-    // these only arrive from a computed expression in the SQL editor. SQLite
+    // SQLite stores infinities as REAL and converts an inserted NaN to NULL. It
     // prints infinities as `Inf`/`-Inf` and has no text form for NaN.
     if value.is_nan() {
         return "NULL".to_string();
@@ -244,6 +243,31 @@ pub fn collect_rows(
         rows.push(read_row(row, col_count));
     }
     Ok(rows)
+}
+
+#[cfg(test)]
+pub(super) const BOUNDED_QUERY: &str = "WITH RECURSIVE c(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM c WHERE x<10000) SELECT count(*) FROM c";
+
+/// Press Cancel after SQLite has started stepping. With a broken interrupt
+/// handle the bounded query finishes normally and the assertion fails.
+#[cfg(test)]
+pub(super) fn cancel_while_stepping(
+    state: &std::sync::Arc<super::DbState>,
+    conn: &mut rusqlite::Connection,
+) {
+    let state = std::sync::Arc::downgrade(state);
+    let mut sent = false;
+    conn.progress_handler(
+        1000,
+        Some(move || {
+            if !sent {
+                sent = true;
+                super::cancel_queries(&state.upgrade().unwrap());
+            }
+            false
+        }),
+    )
+    .unwrap();
 }
 
 /// Build a collision-free path under the OS temp dir for a test fixture.

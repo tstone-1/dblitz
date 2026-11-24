@@ -432,9 +432,30 @@ describe("UpdateState startup preference", () => {
     expect(state.checkAtStartup).toBe(false);
   });
 
+  it.each([true, false])("recovers the stored setting after queued writes (first fails: %s)", async firstFails => {
+    let stored = true;
+    const first = Promise.withResolvers<void>();
+    setPrefMock.mockImplementationOnce(async enabled => {
+      await first.promise;
+      stored = enabled;
+    }).mockRejectedValueOnce(new Error("disk full"));
+    getPrefMock.mockImplementation(async () => stored);
+    const state = new UpdateState();
+    const off = state.setCheckAtStartup(false);
+    const on = state.setCheckAtStartup(true);
+    await Promise.resolve();
+    expect(setPrefMock).toHaveBeenCalledTimes(1);
+    if (firstFails) first.reject(new Error("disk full"));
+    else first.resolve();
+    await Promise.all([off, on]);
+    expect(stored).toBe(firstFails);
+    expect(state.checkAtStartup).toBe(stored);
+  });
+
   it("snaps back when the change can't be persisted", async () => {
     // Otherwise the toggle claims a preference that won't survive a restart.
     setPrefMock.mockRejectedValue(new Error("disk full"));
+    getPrefMock.mockResolvedValue(true);
     const state = new UpdateState();
 
     await state.setCheckAtStartup(false);

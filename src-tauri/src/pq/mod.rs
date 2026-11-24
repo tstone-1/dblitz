@@ -57,8 +57,7 @@ pub const TABLE: &str = "data";
 const MEMORY_LIMIT: &str = "2GB";
 
 /// Sort-cache and spill files older than this are swept at startup. A crash
-/// leaves them behind; a running session keeps writing or reading its own, and
-/// on Windows an open file cannot be deleted anyway.
+/// leaves them behind. An exclusive ownership lock protects active sessions.
 const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// The file formats DuckDB reads for dblitz.
@@ -336,37 +335,54 @@ fn cache_root() -> PathBuf {
         .join("dblitz")
 }
 
-/// A fresh path for this process's next sort cache or spill directory.
-fn session_path(kind: &str, suffix: &str) -> PathBuf {
-    static N: AtomicU64 = AtomicU64::new(0);
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    cache_root()
-        .join(kind)
-        .join(format!("{}-{n}{suffix}", std::process::id()))
+/// The open file holds the session's ownership lock. Drop it after the
+/// DuckDB connections and before TempDir removes the directory on Windows.
+struct SessionCache {
+    _lock: std::fs::File,
+    dir: tempfile::TempDir,
 }
 
-/// Removes sort-cache files and spill directories a crashed session left
-/// behind. Best effort: anything in use or unreadable is skipped.
+impl SessionCache {
+    fn create(root: &Path) -> Result<Self, String> {
+        std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
+        let dir = tempfile::Builder::new()
+            .prefix("session-")
+            .tempdir_in(root)
+            .map_err(|e| e.to_string())?;
+        let lock =
+            std::fs::File::create_new(dir.path().join("owner.lock")).map_err(|e| e.to_string())?;
+        lock.try_lock().map_err(|e| e.to_string())?;
+        Ok(Self { _lock: lock, dir })
+    }
+}
+
 pub fn sweep_stale_cache() {
-    for kind in ["sort-cache", "spill"] {
-        let Ok(entries) = std::fs::read_dir(cache_root().join(kind)) else {
+    sweep_sessions(&cache_root().join("sessions"));
+}
+
+fn sweep_sessions(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir())
+            || !entry.file_name().to_string_lossy().starts_with("session-")
+        {
+            continue;
+        }
+        let dir = entry.path();
+        let Ok(lock) = std::fs::File::open(dir.join("owner.lock")) else {
             continue;
         };
-        for e in entries.flatten() {
-            let old = e
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .is_some_and(|age| age > STALE_AFTER);
-            if old {
-                let p = e.path();
-                let _ = if p.is_dir() {
-                    std::fs::remove_dir_all(&p)
-                } else {
-                    std::fs::remove_file(&p)
-                };
-            }
+        if lock
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > STALE_AFTER)
+            && lock.try_lock().is_ok()
+        {
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
 }
@@ -403,8 +419,9 @@ pub struct ParquetSession {
     building: AtomicBool,
     sql: Mutex<lockdown::LockedDb>,
     sql_interrupt: Arc<duckdb::InterruptHandle>,
+    classifier_interrupt: raw::SideHandle,
     views: Mutex<query::Views>,
-    spill_dir: PathBuf,
+    _cache: SessionCache,
 }
 
 impl ParquetSession {
@@ -419,13 +436,8 @@ impl ParquetSession {
         }
         let file = file_arg(path);
         let reader = format.reader(&file);
-        let spill_dir = session_path("spill", "");
-        // DuckDB creates its temp directory on the first spill, but not that
-        // directory's parents - on a machine that never ran dblitz, every
-        // sort too big for memory failed with "Failed to create directory".
-        if let Some(parent) = spill_dir.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
+        let cache = SessionCache::create(&cache_root().join("sessions"))?;
+        let spill_dir = cache.dir.path().join("spill");
         let spill = sql_literal(&spill_dir.to_string_lossy());
 
         let raw = raw::RawDb::open_in_memory()?;
@@ -496,6 +508,7 @@ impl ParquetSession {
         let browse_interrupt = browse.interrupt_handle();
         let builder = raw.side_handle();
         let sql_interrupt = sql.interrupt_handle();
+        let classifier_interrupt = sql.classifier_handle();
         Ok(ParquetSession {
             path: path.to_string(),
             columns,
@@ -512,8 +525,9 @@ impl ParquetSession {
             building: AtomicBool::new(false),
             sql: Mutex::new(sql),
             sql_interrupt,
-            views: Mutex::new(query::Views::new(session_path("sort-cache", ".duckdb"))),
-            spill_dir,
+            classifier_interrupt,
+            views: Mutex::new(query::Views::new(cache.dir.path().join("sort.duckdb"))),
+            _cache: cache,
         })
     }
 
@@ -539,7 +553,8 @@ impl ParquetSession {
     }
 
     pub fn execute_sql(&self, sql: &str, generation: &AtomicU64) -> crate::db::SqlResult {
-        sql::execute_sql(&self.sql.lock(), sql, generation)
+        let gen = generation.load(Ordering::Relaxed);
+        sql::execute_sql(&self.sql.lock(), sql, generation, gen)
     }
 
     /// `None` while the SQL tab's instance is busy running a query; see
@@ -564,6 +579,7 @@ impl ParquetSession {
     pub fn interrupt(&self) {
         self.browse_interrupt.interrupt();
         self.builder.interrupt();
+        self.classifier_interrupt.interrupt();
         self.sql_interrupt.interrupt();
     }
 
@@ -588,7 +604,6 @@ impl Drop for ParquetSession {
     fn drop(&mut self) {
         // Release the sort cache before deleting it: DETACH closes the file.
         query::drop_sort_cache(self.browse.get_mut().conn(), self.views.get_mut());
-        let _ = std::fs::remove_dir_all(&self.spill_dir);
     }
 }
 
@@ -1147,11 +1162,31 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn cache_sweep_requires_age_and_exclusive_ownership() {
+        let root = tempfile::tempdir().unwrap();
+        let live = SessionCache::create(root.path()).unwrap();
+        let abandoned = SessionCache::create(root.path()).unwrap();
+        let fresh = SessionCache::create(root.path()).unwrap();
+        let old = std::time::SystemTime::now() - STALE_AFTER - std::time::Duration::from_secs(60);
+        for cache in [&live, &abandoned] {
+            cache._lock.set_modified(old).unwrap();
+        }
+        let abandoned_path = abandoned.dir.keep();
+        drop(abandoned._lock);
+        let fresh_path = fresh.dir.keep();
+        drop(fresh._lock);
+        sweep_sessions(root.path());
+        assert!(live.dir.path().join("owner.lock").exists());
+        assert!(!abandoned_path.exists());
+        assert!(fresh_path.exists());
+    }
+
+    #[test]
     fn open_creates_the_parent_of_the_spill_directory() {
         let dir = scratch_dir("spill-parent");
         let s = ParquetSession::open(fixture(&dir, 5).to_str().unwrap()).unwrap();
         assert!(
-            s.spill_dir.parent().unwrap().is_dir(),
+            s._cache.dir.path().is_dir(),
             "DuckDB only creates the last path component; a big sort fails without this"
         );
     }

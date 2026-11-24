@@ -782,52 +782,12 @@ mod tests {
 
     #[test]
     fn cancel_interrupts_the_secondary_connection() {
-        // `execute_sql` runs on `DbState::aux_conn`, so this is the test that
-        // pins `cancel_queries` interrupting the SECOND interrupt handle:
-        // delete the `aux_interrupt_handle` arm of `cancel_queries` and this
-        // hangs rather than fails, because nothing else can stop the query.
-        // (`cancel_interrupts_the_browse_connection` in `schema.rs` is the
-        // mirror for the first handle. Both are needed - one handle cannot see
-        // a statement running on the other connection, and either arm deleted
-        // on its own leaves the other test green.)
-        //
-        // A grinding recursive CTE has no natural end and no per-row cheap
-        // point to check the generation counter from outside — the only way
-        // to stop it is `InterruptHandle::interrupt()`, which forces the next
-        // (or current) `sqlite3_step` call to return SQLITE_INTERRUPT.
-        use std::sync::Arc;
-        use std::time::{Duration, Instant};
-
+        use crate::db::util::{cancel_while_stepping, BOUNDED_QUERY};
         let (state, path) = setup_temp_db_with_table();
-        let state = Arc::new(state);
-        let worker_state = Arc::clone(&state);
-
-        let handle = std::thread::spawn(move || {
-            execute_sql(
-                &worker_state,
-                "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) \
-                 SELECT count(*) FROM c",
-            )
-        });
-
-        // Give the query a moment to actually start grinding before cancelling.
-        std::thread::sleep(Duration::from_millis(200));
-        let cancel_started = Instant::now();
-        crate::db::cancel_queries(&state);
-
-        let result = handle.join().expect("execute_sql thread should not panic");
-        let elapsed = cancel_started.elapsed();
-
-        assert!(
-            elapsed < Duration::from_secs(5),
-            "cancel should interrupt the query within a bounded time, took {:?}",
-            elapsed
-        );
-        assert!(
-            result.error.is_some(),
-            "an interrupted query should return an error, got: {:?}",
-            result
-        );
+        let state = std::sync::Arc::new(state);
+        cancel_while_stepping(&state, state.aux_conn.lock().as_mut().unwrap());
+        let result = execute_sql(&state, BOUNDED_QUERY);
+        assert_eq!(result.error.as_deref(), Some("interrupted"));
 
         close_database(&state);
         let _ = std::fs::remove_file(&path);

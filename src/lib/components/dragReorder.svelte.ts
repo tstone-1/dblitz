@@ -10,11 +10,17 @@ export function createDragReorder(
   let cleanupFn: (() => void) | null = null;
 
   function onMouseDown(e: MouseEvent, col: string) {
+    didReorder = false;
     if (e.button !== 0 || !getOnReorder()) return;
     if ((e.target as HTMLElement).classList.contains('resize-handle')) return;
     const startX = e.clientX;
     const startY = e.clientY;
     let started = false;
+
+    function columnAt(me: MouseEvent): string | null {
+      const header = document.elementFromPoint(me.clientX, me.clientY)?.closest<HTMLElement>('.col-header');
+      return header?.dataset.colidx ? getColumns()[Number(header.dataset.colidx)] ?? null : null;
+    }
 
     function onMove(me: MouseEvent) {
       const dx = me.clientX - startX;
@@ -24,15 +30,7 @@ export function createDragReorder(
         started = true;
         reorderCol = col;
       }
-      const el = document.elementFromPoint(me.clientX, me.clientY);
-      const headerEl = el?.closest('.col-header') as HTMLElement | null;
-      if (headerEl) {
-        const idx = Number(headerEl.dataset.colidx);
-        const columns = getColumns();
-        if (!isNaN(idx) && idx < columns.length) {
-          reorderOverCol = columns[idx];
-        }
-      }
+      reorderOverCol = columnAt(me);
     }
 
     function cleanup() {
@@ -41,12 +39,13 @@ export function createDragReorder(
       cleanupFn = null;
     }
 
-    function onUp() {
+    function onUp(event: MouseEvent) {
       cleanup();
+      reorderOverCol = started ? columnAt(event) : null;
       if (started && reorderCol && reorderOverCol && reorderCol !== reorderOverCol) {
         getOnReorder()?.(reorderCol, reorderOverCol);
       }
-      if (started) didReorder = true;
+      didReorder = started && reorderOverCol !== null;
       reorderCol = null;
       reorderOverCol = null;
     }

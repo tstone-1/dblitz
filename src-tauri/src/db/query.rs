@@ -1058,6 +1058,54 @@ mod tests {
     }
 
     #[test]
+    fn displayed_infinities_filter_numeric_and_mixed_storage() {
+        for declaration in ["REAL", "BLOB"] {
+            let state = state_with_memory_db(&format!("CREATE TABLE items(id, v {declaration}); INSERT INTO items VALUES(1,1e999),(2,-1e999),(3,1),(4,'Inf');"));
+            for (filter, ids) in [
+                ("=Inf", vec!["1", "4"]),
+                ("=-Inf", vec!["2"]),
+                ("<Inf", vec!["2", "3"]),
+            ] {
+                let request = QueryRequest {
+                    filters: vec![text_filter("v", filter)],
+                    ..page("items", 0, 10)
+                };
+                let result = query_table(&state, &request).unwrap();
+                let mut actual: Vec<_> = result
+                    .rows
+                    .iter()
+                    .map(|row| row[0].as_deref().unwrap())
+                    .collect();
+                actual.sort();
+                assert_eq!(actual, ids, "{declaration}: {filter}");
+            }
+        }
+    }
+
+    #[test]
+    fn interrupted_browse_sort_recovers_on_retry() {
+        use crate::db::util::cancel_while_stepping;
+        use std::sync::Arc;
+        let state = Arc::new(state_with_memory_db("CREATE TABLE items(v); WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<4096) INSERT INTO items SELECT x FROM n;"));
+        let mut guard = state.conn.lock();
+        let conn = guard.as_mut().unwrap();
+        *state.interrupt_handle.lock() = Some(conn.get_interrupt_handle());
+        cancel_while_stepping(&state, conn);
+        drop(guard);
+        let req = QueryRequest {
+            sort_column: Some("v".into()),
+            sort_asc: false,
+            ..page("items", 0, 3)
+        };
+        let read = || state.browse_request(|| query_table(&state, &req));
+        assert_eq!(read().unwrap_err(), CANCELLED_QUERY_MESSAGE);
+        assert_eq!(read().unwrap().rows[0][0].as_deref(), Some("4096"));
+        assert!(state
+            .browse_request(|| query_table(&state, &page("missing", 0, 3)))
+            .is_err_and(|e| e != CANCELLED_QUERY_MESSAGE));
+    }
+
+    #[test]
     fn strict_any_compares_stored_integers_numerically() {
         for mode in ["STRICT", ""] {
             let state = state_with_memory_db(&format!(

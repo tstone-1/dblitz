@@ -8,7 +8,7 @@
 //!    one-time "dblitz was updated to vX" notice, which is the only feedback a
 //!    user gets that the silent download+relaunch actually worked.
 //! 2. **"Can this install replace itself at all?"** — false for a `.deb`/`.rpm`
-//!    install on Linux, where the Tauri updater supports AppImage only, and
+//!    install on Linux, where dblitz leaves system packages to the package manager, and
 //!    false for the portable `dblitz.exe` on Windows, which has no installer
 //!    to hand off to. The UI uses it to report an available version *without*
 //!    offering an Install button it cannot honour.

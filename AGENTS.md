@@ -62,10 +62,10 @@ heading disagree, so rename them in the same commit.
 - *The SQL editor's live check goes through the same gates as Execute* — `prepare_checked` is shared, and a check error disables Execute, so drift blocks valid queries; offsets, function lists, rechecks.
 - *`PRAGMA mmap_size` must not come back* — with `immutable=1` a file shrinking under the mapping killed the process with SIGBUS, and it was slower cold.
 - *There are two read-only connections to the same file* — `conn` browses, `aux_conn` serves SQL and Structure; they agree only through `immutable=1`; lock order is fixed.
-- *Windows duplicate-instance detection is keyed by a hash of the path* — case-folded absolute path in a window property; the unconditional `FlashWindowEx` must stay.
+- *Windows duplicate-instance detection is keyed by a hash of the path* — resolved path in a window property; the unconditional `FlashWindowEx` must stay.
 - *A launch argument is the one path that arrives relative* — `absolutize_launch_path` resolves it before recents, the config key and the instance check see it.
 - *A view-config save carries its own database path* — saves are serialized and capture path and config at enqueue time; the path is a lookup key.
-- *The config key is a hash of the normalized path* — case-folded on Windows, byte-exact elsewhere; old raw-path keys are read and migrated.
+- *The config key is a hash of the normalized path* — Windows resolves the actual file spelling, Unix preserves the bytes, and old keys remain readable.
 - *An `await` in a component publishes only if it still owns publication* — capture a per-caller token and `dbOpenGeneration` before the await; `createSessionOwnedRequest` is the seam.
 - *Find in the grid searches the rows the grid shows* — through the grid's row source and chunk size; a failed block is an error, never "No match".
 - *A column preset stores the visible columns, in order* — so a column the table gains later stays hidden; applying one is one config save.

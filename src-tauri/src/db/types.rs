@@ -137,6 +137,22 @@ impl DbState {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// An error from an obsolete Browse request should reach the UI as a
+    /// cancellation even if the engine stopped inside its first row fetch.
+    pub(crate) fn browse_request<T>(
+        &self,
+        read: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let generation = self.current_query_generation();
+        read().map_err(|error| {
+            if self.current_query_generation() != generation {
+                super::CANCELLED_QUERY_MESSAGE.to_owned()
+            } else {
+                error
+            }
+        })
+    }
+
     /// The open Parquet session, if the open file is Parquet.
     pub fn parquet_session(&self) -> Option<std::sync::Arc<crate::pq::ParquetSession>> {
         self.parquet.lock().clone()

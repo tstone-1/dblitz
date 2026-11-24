@@ -9,6 +9,9 @@ Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 
 ### Fixed
 
+- Concurrent Excel exports keep separate workbooks. Double-clicking SQL history runs the whole entry even when editor text is selected. Copying from a text field takes precedence over a pending grid copy.
+- Cancelling a query preserves Browse retries. Active DuckDB sessions keep their cache during startup cleanup. SQLite filters recognize displayed infinities.
+- Distinct Unicode filenames on Windows keep separate views. Releasing a column outside the header cancels reordering, and recent-file labels preserve filesystem roots and Unix filenames.
 - Exact decimal thresholds and large integer spellings select the correct rows. Global search also works across wide SQLite tables.
 - Excel preserves text labels in mixed SQLite query results and DuckDB BIT and ENUM columns. Selection totals use decimal units and flag values beyond the supported precision.
 - Browse supports table and column names such as `constructor`. Pending clipboard copies respect the most recent selection, and the SQL editor recognizes DuckDB list and dollar-quoted literals when selecting a statement.

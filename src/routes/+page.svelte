@@ -7,6 +7,7 @@
   import { openSucceeded } from "#lib/openOutcome.ts";
   import { appState, initTheme, openDatabase } from "#lib/store.svelte.ts";
   import { update } from "#lib/updateState.svelte.ts";
+  import { cancelPendingClipboardCopy } from "#lib/components/clipboardTable.ts";
   import Toolbar from "#lib/components/Toolbar.svelte";
   import AppBanners from "#lib/components/AppBanners.svelte";
   import DatabaseStructure from "#lib/components/DatabaseStructure.svelte";
@@ -74,6 +75,7 @@
       }
     }
     document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("copy", cancelPendingClipboardCopy, true);
 
     // Suppress the native browser context menu (back/refresh/save as/print/...)
     // which adds no value in a desktop viewer. Editable fields keep it so users
@@ -91,6 +93,7 @@
       disposed = true;
       unlistenOpenFile?.();
       document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("copy", cancelPendingClipboardCopy, true);
       document.removeEventListener("contextmenu", onContextMenu);
       teardownUpdateCheck();
     };

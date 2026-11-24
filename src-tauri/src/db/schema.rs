@@ -511,8 +511,8 @@ mod tests {
         // returning an error. Deleting the restore leaves this test green
         // (confirmed by running it that way), so the restore is two lines of
         // defence with no live caller, not a guard this test covers.
+        use crate::db::util::{cancel_while_stepping, BOUNDED_QUERY};
         use std::sync::Arc;
-        use std::time::Duration;
 
         let (state, path) = open_temp_db("CREATE TABLE t (a INTEGER);");
 
@@ -543,27 +543,10 @@ mod tests {
             "a failed open must not disturb the database already open"
         );
 
-        // ...and still cancellable. A grinding recursive CTE has no natural
-        // end, so if the handle in `DbState` did not address this connection
-        // the join below would never return and this test would hang rather
-        // than fail - the same shape as `cancel_interrupts_long_running_sql`.
         let state = Arc::new(state);
-        let worker_state = Arc::clone(&state);
-        let worker = std::thread::spawn(move || {
-            crate::db::execute_sql(
-                &worker_state,
-                "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) \
-                 SELECT count(*) FROM c",
-            )
-        });
-        std::thread::sleep(Duration::from_millis(200));
-        crate::db::cancel_queries(&state);
-        let result = worker.join().expect("the query thread should not panic");
-
-        assert!(
-            result.error.is_some(),
-            "the still-open database must remain cancellable after a failed open"
-        );
+        cancel_while_stepping(&state, state.aux_conn.lock().as_mut().unwrap());
+        let result = crate::db::execute_sql(&state, BOUNDED_QUERY);
+        assert_eq!(result.error.as_deref(), Some("interrupted"));
 
         close_database(&state);
         let _ = std::fs::remove_file(&path);
@@ -712,52 +695,18 @@ mod tests {
 
     #[test]
     fn cancel_interrupts_the_browse_connection() {
-        // The mirror of `sql::tests::cancel_interrupts_the_secondary_connection`,
-        // and needed for the same reason: an interrupt handle can only stop a
-        // statement on the connection it was taken from, so `cancel_queries`
-        // has two arms and either one deleted alone leaves the other test
-        // green. Nothing else covers the browse arm any more - every
-        // `execute_sql`-based cancellation test now exercises the secondary
-        // connection.
-        //
-        // The grinding CTE is run on `state.conn` directly rather than through
-        // `query_table`, because no legal `QueryRequest` grinds forever; what
-        // is being pinned is that `state.interrupt_handle` addresses THAT
-        // connection.
-        use std::sync::Arc;
-        use std::time::{Duration, Instant};
-
+        use crate::db::util::{cancel_while_stepping, BOUNDED_QUERY};
         let (state, path) = open_temp_db("CREATE TABLE t (a INTEGER);");
-        let state = Arc::new(state);
-        let worker_state = Arc::clone(&state);
-
-        let worker = std::thread::spawn(move || {
-            let guard = worker_state.conn.lock();
-            let conn = guard.as_ref().unwrap();
-            conn.query_row(
-                "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) \
-                 SELECT count(*) FROM c",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-        });
-
-        std::thread::sleep(Duration::from_millis(200));
-        let cancel_started = Instant::now();
-        crate::db::cancel_queries(&state);
-        // If the handle did not address the browse connection this join would
-        // never return, so the failure mode is a hang rather than an assertion.
-        let result = worker.join().expect("the query thread should not panic");
-        let elapsed = cancel_started.elapsed();
-
-        assert!(
-            elapsed < Duration::from_secs(5),
-            "cancel should interrupt the browse connection within a bounded time, took {elapsed:?}"
+        let state = std::sync::Arc::new(state);
+        let mut guard = state.conn.lock();
+        let conn = guard.as_mut().unwrap();
+        cancel_while_stepping(&state, conn);
+        let result = conn.query_row(BOUNDED_QUERY, [], |row| row.get::<_, i64>(0));
+        assert_eq!(
+            result.unwrap_err().sqlite_error_code(),
+            Some(rusqlite::ErrorCode::OperationInterrupted)
         );
-        assert!(
-            result.is_err(),
-            "an interrupted query should return an error, got: {result:?}"
-        );
+        drop(guard);
 
         close_database(&state);
         let _ = std::fs::remove_file(&path);

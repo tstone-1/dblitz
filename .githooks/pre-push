@@ -39,11 +39,11 @@ if [ -z "$AUDIT" ]; then
     exit 1
 fi
 
-# Prints the audit script's `$ForbiddenPatterns` as POSIX extended regular
+# Prints the requested private policy array as POSIX extended regular
 # expressions, one per line. The patterns live only in that private script:
 # this file is public, so it carries none of them, in any spelling.
 #
-# The array is read strictly: every line between `$ForbiddenPatterns = @(` and
+# The array is read strictly: every line between its declaration and
 # the closing `)` must be blank, a comment, or one single-quoted string with an
 # optional trailing comma. A line of any other shape, a regex construct that
 # has no POSIX equivalent here, or an empty list fails the read, so a change
@@ -52,9 +52,9 @@ fi
 # it is an extension that GNU grep reads (measured), and the fallback this
 # replaces relied on it too. Not measured on macOS grep.
 read_forbidden_patterns() {
-    tr -d '\r' < "$1" | awk '
+    tr -d '\r' < "$1" | awk -v block="$2" '
         BEGIN { sq = sprintf("%c", 39); state = 0; n = 0; bad = "" }
-        state == 0 && $0 ~ /^\$ForbiddenPatterns = @\($/ { state = 1; next }
+        state == 0 && $0 == "$" block " = @(" { state = 1; next }
         state == 1 && $0 ~ /^\)$/ { state = 2; next }
         state != 1 { next }
         {
@@ -89,6 +89,7 @@ read_forbidden_patterns() {
                     else { bad = "line " NR " uses an escape POSIX grep lacks"; exit }
                     j += 2; continue
                 }
+                if (substr(lit, j, 5) == "[ \\t]") { out = out "[[:blank:]]"; j += 5; continue }
                 if (c == "[" || (c == "(" && substr(lit, j + 1, 1) == "?")) {
                     bad = "line " NR " uses a construct this reader does not translate"; exit
                 }
@@ -98,8 +99,8 @@ read_forbidden_patterns() {
             pat[++n] = out
         }
         END {
-            if (bad == "" && state != 2) bad = "no complete $ForbiddenPatterns block"
-            if (bad == "" && n == 0) bad = "the $ForbiddenPatterns block is empty"
+            if (bad == "" && state != 2) bad = "no complete $" block " block"
+            if (bad == "" && n == 0) bad = "the $" block " block is empty"
             if (bad != "") { print "[pre-push] cannot read the patterns: " bad > "/dev/stderr"; exit 1 }
             for (k = 1; k <= n; k++) print pat[k]
         }'
@@ -116,7 +117,7 @@ blocked() {
 scratch=$(mktemp -d) || blocked "Cannot create a temporary audit directory."
 trap 'rm -rf "$scratch"' 0
 trap 'exit 1' HUP INT TERM
-read_forbidden_patterns "$AUDIT" > "$scratch/patterns" || blocked "Cannot read the private pattern list."
+read_forbidden_patterns "$AUDIT" ForbiddenPatterns > "$scratch/patterns" || blocked "Cannot read the private pattern list."
 
 # The hook receives one line per ref. Git supplies an all-zero old ID for a
 # new ref, so use the remote's advertised history as its lower bound. Local
@@ -187,6 +188,22 @@ while IFS= read -r blob; do
         *) blocked "Cannot search blob $blob." ;;
     esac
 done < "$scratch/blobs"
+
+if grep -q '^[^^]' "$scratch/revisions"; then
+    read_forbidden_patterns "$AUDIT" ForbiddenCommitMessagePatterns > "$scratch/message-patterns" || blocked "Cannot read the private commit-message policy."
+    git rev-list --stdin < "$scratch/revisions" > "$scratch/commits" || blocked "Cannot enumerate outgoing commits."
+    while IFS= read -r oid; do
+        git show -s --format=%B "$oid" > "$scratch/message" || blocked "Cannot read an outgoing commit message."
+        status=0
+        grep -Ei -f "$scratch/message-patterns" "$scratch/message" > /dev/null 2> "$scratch/errors" || status=$?
+        [ ! -s "$scratch/errors" ] || blocked "Cannot check an outgoing commit message."
+        case "$status" in
+            0) blocked "Outgoing commit message contains a forbidden pattern." ;;
+            1) ;;
+            *) blocked "Cannot check an outgoing commit message." ;;
+        esac
+    done < "$scratch/commits"
+fi
 
 if command -v pwsh >/dev/null 2>&1 && grep -q '^[^^]' "$scratch/revisions"; then
     # The private checker reads a checkout and infers outgoing messages from

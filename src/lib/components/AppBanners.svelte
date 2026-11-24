@@ -42,8 +42,8 @@
           Install and restart
         </button>
       {:else}
-        <!-- An install the updater cannot replace in place: a .deb/.rpm
-             (it handles AppImage only) or the portable dblitz.exe (no
+        <!-- An install managed outside the in-app updater: a .deb/.rpm
+             (managed by the system package manager) or the portable dblitz.exe (no
              installer owns it). Offering an Install button here would promise
              something that cannot work - on Windows it would run the NSIS
              installer and silently produce a SECOND, installed copy while the

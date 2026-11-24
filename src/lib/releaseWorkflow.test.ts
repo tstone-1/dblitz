@@ -334,7 +334,7 @@ describe("workflow jobs are bounded and least-privileged", () => {
     // with this one set to true.
     const release = readText(".github/workflows/release.yml");
     expect(release).toMatch(
-      /^concurrency:\n {2}group: \$\{\{ github\.workflow \}\}\n {2}cancel-in-progress: false$/m,
+      /^concurrency:\n {2}group: \$\{\{ github\.workflow \}\}\n {2}queue: max\n {2}cancel-in-progress: false$/m,
     );
   });
 

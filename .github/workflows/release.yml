@@ -42,6 +42,7 @@ permissions:
 # nobody on the missing platforms.
 concurrency:
   group: ${{ github.workflow }}
+  queue: max
   cancel-in-progress: false
 
 jobs:

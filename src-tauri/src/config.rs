@@ -263,15 +263,31 @@ pub struct RecentFile {
 
 /// Normalize a path so two spellings of the same file collapse to one key.
 ///
-/// `windows_semantics` decides whether that means case-folding and
-/// slash-normalizing (Windows, where `C:\\Users\\Alice\\x.db` and
-/// `c:/users/alice/x.db` are one file) or leaving the bytes alone (Unix, where
-/// they are two). It is a parameter rather than a `cfg!` so the Windows
-/// behaviour is testable on the machines this is developed on - a rule that can
-/// only be exercised on one platform is a rule nobody runs.
+/// Existing Windows paths use the filesystem's spelling. The lexical fallback
+/// folds case one character at a time when the file is unavailable.
+/// Unix paths keep their original bytes.
 fn normalize_path_key(p: &str, windows_semantics: bool) -> String {
     if windows_semantics {
-        p.replace('\\', "/").to_lowercase()
+        // Ask the filesystem for the actual spelling. Unicode lowercase can
+        // expand one character into two and merge distinct Windows files.
+        #[cfg(windows)]
+        if let Ok(path) = fs::canonicalize(p) {
+            return format!("winpath:{}", path.to_string_lossy());
+        }
+        p.chars()
+            .map(|ch| {
+                if ch == '\\' {
+                    return '/';
+                }
+                let mut lower = ch.to_lowercase();
+                let first = lower.next().unwrap_or(ch);
+                if lower.next().is_none() {
+                    first
+                } else {
+                    ch
+                }
+            })
+            .collect()
     } else {
         p.to_string()
     }
@@ -353,11 +369,19 @@ impl ConfigStore {
         if let Some(config) = self.read_config_file(&path) {
             return config;
         }
-        // Only reached before this database has been saved under the new key.
+        // Prefer the most recently used legacy format. A folded key can
+        // belong to two distinct files, so retain it for the other owner.
+        if self.windows_path_semantics {
+            let folded = self.hashed_path(&db_path.replace('\\', "/").to_lowercase());
+            if folded != path {
+                if let Some(config) = self.read_config_file(&folded) {
+                    return config;
+                }
+            }
+        }
         let legacy = self.legacy_config_path_for_db(db_path);
         if legacy != path {
             if let Some(config) = self.read_config_file(&legacy) {
-                info!(path = %legacy.display(), "Loaded view config from the pre-normalization key");
                 return config;
             }
         }
@@ -396,7 +420,9 @@ impl ConfigStore {
         // the normalized one were lost. Best-effort - a failed removal leaves a
         // harmless orphan, and reporting it would fail a save that succeeded.
         let legacy = self.legacy_config_path_for_db(db_path);
-        if legacy != path && legacy.exists() {
+        let shared_legacy =
+            self.windows_path_semantics && db_path == db_path.replace('\\', "/").to_lowercase();
+        if legacy != path && !shared_legacy && legacy.exists() {
             if let Err(e) = fs::remove_file(&legacy) {
                 warn!(path = %legacy.display(), error = %e, "Failed to remove the pre-normalization config file");
             }
@@ -1159,6 +1185,38 @@ mod tests {
             store.config_path_for_db(r"C:\Users\Alice\inventory.db"),
             store.config_path_for_db("c:/users/alice/inventory.db")
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn distinct_unicode_files_keep_separate_configs_and_recents_keys() {
+        let root = TempDir::new().unwrap();
+        let store = ConfigStore::new(root.path().join("settings"));
+        let a = root.path().join("\u{130}.db");
+        let b = root.path().join("i\u{307}.db");
+        fs::File::create_new(&a).unwrap();
+        fs::File::create_new(&b).unwrap();
+        let a = a.to_str().unwrap();
+        let b = b.to_str().unwrap();
+        assert_ne!(normalize_for_dedup(a), normalize_for_dedup(b));
+        assert_eq!(
+            normalize_for_dedup(a),
+            normalize_for_dedup(&a.replace(".db", ".DB"))
+        );
+        fs::create_dir_all(&store.dir).unwrap();
+        let prior = store.hashed_path(&a.replace('\\', "/").to_lowercase());
+        let mut config = FileConfig {
+            label: Some("legacy".into()),
+            ..FileConfig::default()
+        };
+        fs::write(prior, serde_json::to_vec(&config).unwrap()).unwrap();
+        assert_eq!(store.load_config(a).label, config.label);
+        config.label = Some("first".into());
+        store.save_config(a, &config).unwrap();
+        config.label = Some("second".into());
+        store.save_config(b, &config).unwrap();
+        assert_eq!(store.load_config(a).label.as_deref(), Some("first"));
+        assert_eq!(store.load_config(b).label.as_deref(), Some("second"));
     }
 
     #[test]

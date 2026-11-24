@@ -30,6 +30,11 @@
 let latestCopy = 0;
 let pendingWrite: Promise<void> | null = null;
 
+/** A native input or editor copy takes precedence over pending row fetches. */
+export function cancelPendingClipboardCopy(): void {
+  latestCopy++;
+}
+
 /** Claim the clipboard when the user clicks, before any selected rows load. */
 export function beginClipboardCopy() {
   const request = ++latestCopy;

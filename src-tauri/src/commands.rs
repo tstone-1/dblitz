@@ -213,11 +213,12 @@ pub(crate) fn query_table(
         sort_column,
         sort_asc,
     };
-    match state.parquet_session() {
-        Some(session) => pq::query_table(&session, &req, state.generation()),
-        None => db::query_table(&state, &req),
-    }
-    .err_ctx(&format!("querying table \"{}\"", req.table))
+    state
+        .browse_request(|| match state.parquet_session() {
+            Some(session) => pq::query_table(&session, &req, state.generation()),
+            None => db::query_table(&state, &req),
+        })
+        .err_ctx(&format!("querying table \"{}\"", req.table))
 }
 
 #[tauri::command(async)]
@@ -227,11 +228,12 @@ pub(crate) fn count_rows(
     filters: Vec<ColumnFilter>,
     global_filter: String,
 ) -> Result<i64, String> {
-    match state.parquet_session() {
-        Some(pq) => pq.count_rows(&table, &filters, &global_filter, state.generation()),
-        None => db::count_rows(&state, &table, &filters, &global_filter),
-    }
-    .err_ctx(&format!("counting rows in table \"{table}\""))
+    state
+        .browse_request(|| match state.parquet_session() {
+            Some(pq) => pq.count_rows(&table, &filters, &global_filter, state.generation()),
+            None => db::count_rows(&state, &table, &filters, &global_filter),
+        })
+        .err_ctx(&format!("counting rows in table \"{table}\""))
 }
 
 #[tauri::command(async)]

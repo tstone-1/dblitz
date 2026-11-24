@@ -33,6 +33,7 @@ rusqlite = { version = "0.41.1", features = ["bundled", "hooks", "column_decltyp
 # 147 s cold build (1,009 s of CPU), so a cold CI leg grows by several minutes.
 duckdb = { version = "1.20000.0", features = ["bundled", "json", "parquet"] }
 regex = "1.13"
+tempfile = "3"
 sha2 = "0.11"
 hex = "0.4"
 dirs = "7"
@@ -67,7 +68,6 @@ objc2-app-kit = { version = "0.3", features = ["NSDocumentController"] }
 objc2-foundation = { version = "0.3", features = ["NSString", "NSURL"] }
 
 [dev-dependencies]
-tempfile = "3"
 zip = { version = "9", default-features = false }
 
 # Dev builds: optimize everything for near-release perf, keep debuginfo

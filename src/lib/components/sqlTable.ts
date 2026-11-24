@@ -254,7 +254,7 @@ export function resolveResultColumnColors(params: {
     tableNames.find((t) => t.toLowerCase() === parsed.toLowerCase()) ?? parsed;
 
   const saved = getColumnColors(canonical);
-  const map: Record<string, string> = {};
+  const map: Record<string, string> = Object.create(null);
   for (const col of columns) {
     if (Object.hasOwn(saved, col) && typeof saved[col] === "string") map[col] = columnColorForTheme(saved[col], params.theme);
   }

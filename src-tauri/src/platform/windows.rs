@@ -5,7 +5,7 @@
 use crate::updates::InstallProvenance;
 use tauri::{AppHandle, Manager};
 
-/// Compute a 64-bit hash of the lowercased path for cross-process duplicate
+/// Compute a 64-bit hash of the normalized path for cross-process duplicate
 /// detection via Win32 window properties.
 ///
 /// `DefaultHasher::new` is seeded with fixed keys (unlike `RandomState`), so the
@@ -179,7 +179,7 @@ pub(crate) fn add_to_recent_docs(path: &str) {
 /// comparing the `dblitz_db_path` window property.
 ///
 /// The property does not hold the path: it holds the 64-bit
-/// [`path_hash`] of the case-folded path, written by [`set_window_db_marker`]
+/// [`path_hash`] of the normalized path, written by [`set_window_db_marker`]
 /// (`SetPropW` stores one pointer-sized value, which is why it is a hash and not
 /// the string). So `path` here must be spelled the same way the other instance
 /// spelled it - absolute - or the two hashes cannot agree; `run()` absolutizes
@@ -320,13 +320,15 @@ mod tests {
     /// is caught here rather than in the wild.
     #[test]
     fn path_hash_is_nonzero_for_real_paths() {
-        for p in [
-            r"C:\db.sqlite",
-            r"C:\Users\alice\Data\inventory.sqlite",
-            r"\\server\share\db.sqlite",
-            "/Users/alice/db.sqlite",
-        ] {
-            assert_ne!(path_hash(p), 0, "{p} hashed to the 'no file open' marker");
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["db.sqlite", "Inventory.db", "Résumé.sqlite"] {
+            let path = dir.path().join(name);
+            std::fs::File::create_new(&path).unwrap();
+            assert_ne!(
+                path_hash(path.to_str().unwrap()),
+                0,
+                "{name} hashed to the 'no file open' marker"
+            );
         }
     }
 }
@@ -340,6 +342,10 @@ mod path_tests {
         assert_eq!(
             path_hash("C:/demo/Résumé.db"),
             path_hash(r"c:\DEMO\RÉSUMÉ.db")
+        );
+        assert_ne!(
+            path_hash("C:/demo/\u{130}.db"),
+            path_hash("C:/demo/i\u{307}.db")
         );
         assert_ne!(path_hash("C:/one/data.db"), path_hash("C:/two/data.db"));
     }

@@ -75,6 +75,8 @@ export class UpdateState {
 
   #pending: PendingUpdate | null = null;
   #preferenceRevision = 0;
+  #confirmedPreference = true;
+  #preferenceWrite = Promise.resolve();
 
   showBar = $derived(
     !this.dismissed &&
@@ -123,7 +125,10 @@ export class UpdateState {
     try {
       const revision = this.#preferenceRevision;
       const enabled = await getCheckForUpdatesOnStartup();
-      if (revision === this.#preferenceRevision) this.checkAtStartup = enabled;
+      if (revision === this.#preferenceRevision) {
+        this.#confirmedPreference = enabled;
+        this.checkAtStartup = enabled;
+      }
     } catch (e) {
       console.warn("Could not read the update-check preference:", e);
     }
@@ -132,16 +137,20 @@ export class UpdateState {
   /** Persists the opt-out. Applies optimistically so the toggle feels instant. */
   async setCheckAtStartup(enabled: boolean): Promise<void> {
     const revision = ++this.#preferenceRevision;
-    const previous = this.checkAtStartup;
     this.checkAtStartup = enabled;
-    try {
-      await setCheckForUpdatesOnStartup(enabled);
-    } catch (e) {
-      console.error("Could not save the update-check preference:", e);
-      // Snap back rather than leave the UI claiming a preference that didn't
-      // persist and won't survive a restart.
-      if (revision === this.#preferenceRevision) this.checkAtStartup = previous;
-    }
+    this.#preferenceWrite = this.#preferenceWrite.then(async () => {
+      try {
+        await setCheckForUpdatesOnStartup(enabled);
+        this.#confirmedPreference = enabled;
+      } catch (e) {
+        console.error("Could not save the update-check preference:", e);
+        if (revision === this.#preferenceRevision) {
+          this.checkAtStartup = this.#confirmedPreference;
+          await this.loadStartupPreference();
+        }
+      }
+    });
+    await this.#preferenceWrite;
   }
 
   /** Start both waits at launch. Teardown also cancels a check waiting for disk. */

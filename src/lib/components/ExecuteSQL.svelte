@@ -101,7 +101,7 @@
   const executeSql = createSqlExecution({
     getGeneration: () => appState.dbOpenGeneration,
     getSql: () => runnableSql,
-    getBlockReason: () => blockReason,
+    getBlockReason: (statement) => blockReasonFor(lastCheck, statement, appState.dbOpenGeneration),
     isRunning: () => running,
     setRunning: (value) => { running = value; },
     setResult: (value) => { result = value; },
@@ -132,7 +132,7 @@
 
   function loadAndRunFromHistory(entry: { sql: string }) {
     sql = entry.sql;
-    executeSql();
+    void executeSql(entry.sql);
   }
 
   function formatTime(ts: number): string {
@@ -186,7 +186,7 @@
           </button>
         {:else}
           <button
-            onclick={executeSql}
+            onclick={() => executeSql()}
             class="run-btn"
             disabled={!runnableSql.trim() || !!blockReason}
             title={blockReason ?? undefined}

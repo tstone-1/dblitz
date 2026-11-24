@@ -167,6 +167,13 @@ describe("resolveResultColumnColors", () => {
   });
 });
 
+it("preserves a saved color on a column named __proto__", () => {
+  const colors = resolveResultColumnColors({ sql: "SELECT * FROM items", columns: ["__proto__"],
+    tableNames: ["items"], theme: "light", getColumnColors: () => ({ ["__proto__"]: "#fff" }) });
+  expect(Object.hasOwn(colors, "__proto__")).toBe(true);
+  expect(colors["__proto__"]).toBe("#fff");
+});
+
 it("only reads explicitly saved column colors", () => {
   const args = { sql: "SELECT constructor FROM items", columns: ["constructor"],
     tableNames: ["items"], theme: "light" as const };

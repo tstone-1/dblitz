@@ -38,7 +38,7 @@ export interface SqlExecutionDeps {
   /** Why the text cannot run, from the editor's live check of THIS text, or
    *  null. A known-bad statement is not sent: Execute would refuse it with the
    *  same message, and the run would replace the previous result with it. */
-  getBlockReason?: () => string | null;
+  getBlockReason?: (statement: string) => string | null;
   isRunning: () => boolean;
   setRunning: (running: boolean) => void;
   setResult: (result: SqlResult | null) => void;
@@ -53,7 +53,7 @@ export interface SqlExecutionDeps {
   now?: () => number;
 }
 
-export function createSqlExecution(deps: SqlExecutionDeps): () => Promise<void> {
+export function createSqlExecution(deps: SqlExecutionDeps): (statement?: string) => Promise<void> {
   const now = deps.now ?? (() => Date.now());
 
   const request = createSessionOwnedRequest<ExecutedQuery>({
@@ -77,14 +77,14 @@ export function createSqlExecution(deps: SqlExecutionDeps): () => Promise<void> 
     },
   });
 
-  return async function executeSql(): Promise<void> {
+  return async function executeSql(statement = deps.getSql()): Promise<void> {
     // Re-entrancy guard: the CodeMirror Ctrl+Enter keymap calls onexecute
     // unconditionally, so without this a second Ctrl+Enter (or Enter while the
     // button is disabled) would fire a concurrent invoke and a duplicate
     // history entry. Ctrl+Enter while running is simply ignored (not a cancel).
     if (deps.isRunning()) return;
-    if (deps.getBlockReason?.()) return;
-    const trimmed = deps.getSql().trim();
+    if (deps.getBlockReason?.(statement)) return;
+    const trimmed = statement.trim();
     if (!trimmed) return;
 
     deps.setRunning(true);

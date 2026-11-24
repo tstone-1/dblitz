@@ -95,9 +95,17 @@ pub(crate) fn duckdb_error_offset(sql: &str, message: &str) -> Option<usize> {
     Some(line_start + at + token)
 }
 
-pub(crate) fn execute_sql(db: &LockedDb, sql: &str, generation: &AtomicU64) -> SqlResult {
+pub(crate) fn execute_sql(db: &LockedDb, sql: &str, generation: &AtomicU64, gen: u64) -> SqlResult {
+    let cancelled = || generation.load(Ordering::Relaxed) != gen;
     let sql = sql.trim();
-    if let Err(r) = db.classify(sql) {
+    if cancelled() {
+        return SqlResult::error(CANCELLED_QUERY_MESSAGE.to_owned());
+    }
+    let classification = db.classify(sql);
+    if cancelled() {
+        return SqlResult::error(CANCELLED_QUERY_MESSAGE.to_owned());
+    }
+    if let Err(r) = classification {
         return SqlResult::error(refusal_message(r));
     }
     let conn = db.conn();
@@ -114,6 +122,9 @@ pub(crate) fn execute_sql(db: &LockedDb, sql: &str, generation: &AtomicU64) -> S
             .map_err(|e| e.to_string())?;
         rows.map(|r| r.map_err(|e| e.to_string())).collect()
     })();
+    if cancelled() {
+        return SqlResult::error(CANCELLED_QUERY_MESSAGE.to_owned());
+    }
     let (columns, column_types): (Vec<String>, Vec<String>) = match described {
         Ok(d) => d.into_iter().unzip(),
         Err(e) => return SqlResult::error(e),
@@ -140,12 +151,14 @@ pub(crate) fn execute_sql(db: &LockedDb, sql: &str, generation: &AtomicU64) -> S
         })
         .collect::<Vec<_>>()
         .join(", ");
-    let gen = generation.load(Ordering::Relaxed);
     let query = format!("SELECT {proj} FROM {source} LIMIT {}", SQL_RESULT_LIMIT + 1);
     let mut stmt = match conn.prepare(&query) {
         Ok(s) => s,
         Err(e) => return SqlResult::error(e.to_string()),
     };
+    if cancelled() {
+        return SqlResult::error(CANCELLED_QUERY_MESSAGE.to_owned());
+    }
     let mut it = match stmt.query([]) {
         Ok(it) => it,
         Err(e) => return SqlResult::error(e.to_string()),
@@ -194,6 +207,17 @@ pub(crate) fn execute_sql(db: &LockedDb, sql: &str, generation: &AtomicU64) -> S
 mod tests {
     use super::super::tests::{fixture, scratch_dir};
     use super::*;
+
+    fn execute_sql(db: &LockedDb, sql: &str, generation: &AtomicU64) -> SqlResult {
+        super::execute_sql(db, sql, generation, generation.load(Ordering::Relaxed))
+    }
+
+    #[test]
+    fn cancelled_request_does_not_execute_after_waiting_for_the_sql_connection() {
+        let result = super::execute_sql(&db(1), "SELECT 42", &AtomicU64::new(1), 0);
+        assert_eq!(result.error.as_deref(), Some(CANCELLED_QUERY_MESSAGE));
+        assert!(result.rows.is_empty());
+    }
 
     fn db(rows: u64) -> LockedDb {
         let dir = scratch_dir("sql");

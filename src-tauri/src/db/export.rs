@@ -266,9 +266,22 @@ pub fn export_to_xlsx(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let path = dest_dir.join(format!("{EXPORT_PREFIX}{ts}.xlsx"));
-    let path_str = path.to_string_lossy().to_string();
-    wb.save(&path).str_err()?;
+    // Reserve the destination across threads and application instances. Keep
+    // the timestamp-only format understood by temporary-export cleanup.
+    let mut stamp = ts;
+    let (path, file) = loop {
+        let path = dest_dir.join(format!("{EXPORT_PREFIX}{stamp}.xlsx"));
+        match std::fs::File::create_new(&path) {
+            Ok(file) => break (path, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => stamp += 1,
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    if let Err(error) = wb.save_to_writer(file) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error.to_string());
+    }
+    let path_str = path.to_string_lossy().into_owned();
 
     Ok(XlsxExport {
         path: path_str,
@@ -279,6 +292,42 @@ pub fn export_to_xlsx(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_exports_keep_separate_files() {
+        use std::collections::HashSet;
+        use std::sync::Barrier;
+        let root = tempfile::tempdir().unwrap();
+        for dir in [
+            root.path().to_owned(),
+            temporary_export_dir(root.path()).unwrap(),
+        ] {
+            let barrier = Barrier::new(12);
+            std::thread::scope(|scope| {
+                let writers: Vec<_> = (0..12)
+                    .map(|i| {
+                        let (dir, barrier) = (&dir, &barrier);
+                        scope.spawn(move || {
+                            barrier.wait();
+                            export_to_xlsx(
+                                &["id".into()],
+                                &[vec![i.to_string()]],
+                                &["INTEGER".into()],
+                                dir,
+                            )
+                            .unwrap()
+                            .path
+                        })
+                    })
+                    .collect();
+                let paths: HashSet<_> = writers.into_iter().map(|t| t.join().unwrap()).collect();
+                assert_eq!(paths.len(), 12);
+                assert!(paths
+                    .iter()
+                    .all(|p| std::fs::metadata(p).unwrap().len() > 0));
+            });
+        }
+    }
 
     #[test]
     fn numeric_affinity_classifies_declared_types() {

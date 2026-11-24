@@ -26,14 +26,23 @@ export function tintPillStyle(value: string | null): string {
   return tint ? `background: ${tint}; color: white; border-color: ${tint};` : "";
 }
 
-export function fileName(path: string | null): string {
-  if (!path) return "No file open";
-  const parts = path.replace(/\\/g, "/").split("/");
-  return parts[parts.length - 1];
+function displayPath(path: string, windows: boolean) {
+  return windows ? path.replace(/\\/g, "/") : path;
 }
 
-export function parentDir(path: string): string {
-  const normalized = path.replace(/\\/g, "/");
+const onWindows = typeof navigator !== "undefined" && /^Win/i.test(navigator.platform);
+
+export function fileName(path: string | null, windows = onWindows): string {
+  if (!path) return "No file open";
+  const normalized = displayPath(path, windows);
+  return normalized.slice(normalized.lastIndexOf("/") + 1);
+}
+
+export function parentDir(path: string, windows = onWindows): string {
+  const normalized = displayPath(path, windows);
   const index = normalized.lastIndexOf("/");
-  return index > 0 ? normalized.slice(0, index) : "";
+  if (index === 0 || (windows && index === 2 && normalized[1] === ":")) {
+    return normalized.slice(0, index + 1);
+  }
+  return index < 0 ? "" : normalized.slice(0, index);
 }

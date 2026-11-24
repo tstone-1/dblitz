@@ -89,6 +89,14 @@ fn numeric_comparison(
     operand: &str,
     no_affinity: bool,
 ) -> Option<(String, usize)> {
+    let inf = match operand.trim() {
+        "Inf" | "+Inf" => Some("1e999"),
+        "-Inf" => Some("-1e999"),
+        _ => None,
+    };
+    if let Some(bound) = inf {
+        return Some((format!("((typeof({col}) IN ('integer','real') AND {col} {op} {bound}) OR (typeof({col}) = 'text' AND {col} {op} ?))"), 1));
+    }
     let (whole, fractional, negative) = scaled_parts(operand, 0)?;
     let integer = whole.parse::<i64>().ok();
     if let (false, Some(n)) = (fractional, integer) {

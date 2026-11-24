@@ -179,6 +179,19 @@ describe("createDragReorder", () => {
     expect(reorder.consumeReorder()).toBe(false);
   });
 
+  it("cancels a drop into the body after crossing a header", () => {
+    const calls: string[] = [];
+    const drag = createDragReorder(() => COLUMNS, () => (_, to) => calls.push(to));
+    drag.onMouseDown(mouse("mousedown", 100, 10, plainTarget()), "id");
+    headerUnderCursor(2);
+    document.dispatchEvent(mouse("mousemove", 140, 10));
+    expect(drag.reorderOverCol).toBe("status");
+    headerUnderCursor(null);
+    document.dispatchEvent(mouse("mouseup", 140, 60));
+    expect(calls).toEqual([]);
+    expect(drag.consumeReorder()).toBe(false);
+  });
+
   it("ignores a header index that is out of range for the current columns", () => {
     // `data-colidx` is read back out of the DOM, and the column list can shrink
     // (hide a column) between render and drop.

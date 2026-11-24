@@ -113,6 +113,10 @@ impl LockedDb {
         self.raw.conn()
     }
 
+    pub(crate) fn classifier_handle(&self) -> super::raw::SideHandle {
+        self.raw.side_handle()
+    }
+
     pub(crate) fn interrupt_handle(&self) -> Arc<duckdb::InterruptHandle> {
         self.conn().interrupt_handle()
     }

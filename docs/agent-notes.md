@@ -229,7 +229,7 @@ the `json` feature of the `duckdb` crate, because extension autoinstall is off.
   unfiltered pages use `file_row_number` ranges, 20-24 ms at any depth (`LIMIT/OFFSET`
   reached 82 ms at 50M). Filtered views cache the ascending matching row numbers and fetch
   chunks with `IN (...)`, ~22 ms. Sorted views are materialized **in their own column
-  types** into `<cache dir>/dblitz/sort-cache/<pid>-<n>.duckdb` and paged by `rowid`,
+  types** into `<cache dir>/dblitz/sessions/session-*/sort.duckdb` and paged by `rowid`,
   6-9 ms; each page is rendered on the way out. Caching rendered text instead took 34.5 s
   against 17.7 s. A cached order list was rejected in the spike: ~500 ms per chunk,
   because a sorted chunk touches nearly every row group.
@@ -307,6 +307,7 @@ the `json` feature of the `duckdb` crate, because extension autoinstall is off.
   interrupts without bumping the generation, because with a bump `query_table`
   reports "cancelled" after a build that ran to completion - a test that could not
   tell whether the build stopped, and did not.
+- Run targeted Cargo checks from `src-tauri`, the working directory used by `npm run quality`. From the repository root, `--manifest-path src-tauri/Cargo.toml` skips the crate directory's Cargo configuration and can trigger a full DuckDB rebuild with a different linker.
 - **CI compiled DuckDB twice per job until `[profile.dev.build-override] debug = false`.**
   Without it, `cargo check`/`clippy` and `cargo build`/`test` compiled libduckdb-sys's
   build script in two profiles (its fingerprints differed only in `profile` and in the
@@ -314,8 +315,7 @@ the `json` feature of the `duckdb` crate, because extension autoinstall is off.
   C++. Locally it hid in the cache: both outputs existed side by side, so neither
   command rebuilt. `cargo check -v` and `cargo build -v` printing the same
   `libduckdb-sys-<hash>/out` is the check.
-- The sort cache is detached and deleted when the session drops; stale sort caches and
-  spill directories older than 24 h are swept at startup (`pq::sweep_stale_cache`).
+- Each session holds an exclusive lock in its cache directory until both DuckDB connections close. On startup the sweep removes abandoned session directories older than 24 hours after acquiring their ownership locks. Earlier versions' unmarked directories stay outside that sweep.
 - Timings go through the shipped code: `cargo run --release --example parquet_benchmark [rows]`
   generates its own file and calls `ParquetSession`/`query_table` via `db::bench_api`.
 - Cost: `duckdb` with `bundled` + `parquet` (`bundled` alone has no Parquet reader), +35.7 MB
@@ -418,7 +418,7 @@ the `json` feature of the `duckdb` crate, because extension autoinstall is off.
 
 ### Windows duplicate-instance detection is keyed by a hash of the path
 
-- **Windows duplicate-instance detection is keyed by a 64-bit hash of the case-folded absolute path**, held in the `dblitz_db_path` window property (`SetPropW` stores one pointer-sized value, which is why it is a hash and not the string). It is not filename-only matching: same-named databases in different directories must open separately. Both the writer and the reader take their path from `launch_argument()`/`resolve_launch_argument()`, so no caller can hash a raw `argv[1]` against a marker holding the resolved path (`launch::open_request_tests::every_caller_of_the_launch_argument_gets_the_absolute_path`). The `FlashWindowEx` call that follows `SetForegroundWindow` in `try_activate_existing` is deliberately unconditional and must stay: activation is usually denied by the foreground lock, and without the flash the second launch exits silently and reads as "dblitz refuses to open this file". See the comment there for why the outcome cannot be tested reliably.
+- **Windows duplicate-instance detection is keyed by a 64-bit hash of the resolved Windows path**, held in the `dblitz_db_path` window property (`SetPropW` stores one pointer-sized value, which is why it is a hash and not the string). It is not filename-only matching: same-named databases in different directories must open separately. Both the writer and the reader take their path from `launch_argument()`/`resolve_launch_argument()`, so no caller can hash a raw `argv[1]` against a marker holding the resolved path (`launch::open_request_tests::every_caller_of_the_launch_argument_gets_the_absolute_path`). The `FlashWindowEx` call that follows `SetForegroundWindow` in `try_activate_existing` is deliberately unconditional and must stay: activation is usually denied by the foreground lock, and without the flash the second launch exits silently and reads as "dblitz refuses to open this file". See the comment there for why the outcome cannot be tested reliably.
 
 ### A launch argument is the one path that arrives relative
 
@@ -432,7 +432,7 @@ the `json` feature of the `duckdb` crate, because extension autoinstall is off.
 
 ### The config key is a hash of the normalized path
 
-- **The config key is `sha256(normalize_path_key(path))[..16]`** — case-folded and slash-normalized on Windows, byte-exact everywhere else, so one file cannot own two settings files. `ConfigStore` carries a `windows_path_semantics` flag so the Windows behaviour is tested on any OS. Reads fall back to the pre-normalization raw-path key and migrate on the next save, removing the old file (`view_config_key_folds_windows_path_spellings_together`, `unix_paths_stay_case_sensitive`, `load_config_falls_back_to_the_pre_normalization_key_then_migrates`).
+- Windows uses the filesystem's resolved spelling of an existing path for the window marker, recents and the per-database config hash. Unicode lowercase can collapse two distinct filenames. Config reads also recognize legacy folded and raw keys. Unix path keys remain byte-exact.
 
 ### An `await` in a component publishes only if it still owns publication
 
@@ -605,7 +605,7 @@ caught it either", which is the more useful result.
   read-only layers above, a crafted database file (the app's one genuinely
   untrusted input), updater signature verification, webview escape, and a file
   signed with the Windows certificate that the release workflow did not build.
-- The hook reads private expressions from the audit script's `$ForbiddenPatterns` array. Its strict reader blocks an empty list, unexpected syntax, or an expression it cannot translate. Pattern values and matched lines stay out of its output. When PowerShell 7 is available the private audit runs in a disposable checkout of the proposed revisions. Its diagnostics are private and only the verdict is reported.
+- The hook reads private expressions from the audit script's `$ForbiddenPatterns` and `$ForbiddenCommitMessagePatterns` arrays for outgoing contents and messages respectively. Its strict reader blocks an empty list, unexpected syntax, or an expression it cannot translate. Pattern values and matched lines stay out of its output. When PowerShell 7 is available the private audit runs in a disposable checkout of the proposed revisions. Its diagnostics are private and only the verdict is reported.
 - Git supplies one update per pushed ref on standard input. The hook searches the committed tree at each outgoing tip and each intermediate commit, covering all tracked file names, including `.mjs`. For a new ref, it uses the destination's advertised refs to identify already-published history. An unavailable remote, unreadable object, or search error blocks the push.
 - `src/lib/prePushHook.test.ts` exercises the hook against local synthetic repositories and a private pattern fixture. Never put a real blocked value into this repository to test the hook.
 ### The pre-push hook holds none of the names it blocks

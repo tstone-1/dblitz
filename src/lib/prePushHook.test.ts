@@ -57,6 +57,9 @@ describe("pre-push public-safe audit", { timeout: 60000 }, () => {
       "$ForbiddenPatterns = @(",
       `    '${marker}'`,
       ")",
+      "$ForbiddenCommitMessagePatterns = @(",
+      "    '^[ \\t]*Synthetic message marker\\b'",
+      ")",
       "$content = Get-Content -LiteralPath (Join-Path $CheckRepoPath 'publish sample.mjs') -Raw",
       "if ($content.Trim() -eq 'private checker case') { Write-Output 'private diagnostic sentinel'; exit 1 }",
       "if ($content -match $ForbiddenPatterns[0]) { Write-Output $ForbiddenPatterns[0]; exit 1 }",
@@ -83,6 +86,14 @@ describe("pre-push public-safe audit", { timeout: 60000 }, () => {
       expect(audit(update("main", clean, base)).status).toBe(0);
     },
   );
+
+  it("checks outgoing messages independently of clean file contents", () => {
+    const tree = git(["rev-parse", clean + "^{tree}"]);
+    const tip = git(["commit-tree", tree, "-p", clean, "-m", "Ordinary subject", "-m", " Synthetic message marker"]);
+    const run = audit(update("main", tip, clean));
+    expect(run.status).toBe(1);
+    expect(run.output).toContain("Outgoing commit message contains a forbidden pattern");
+  });
 
   it("checks a committed mjs blob after it was cleaned in the working tree", () => {
     const run = audit(update("main", marked, base));

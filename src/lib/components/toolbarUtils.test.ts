@@ -33,13 +33,17 @@ describe("toolbar utilities", () => {
 
   it("extracts filenames from POSIX and Windows paths", () => {
     expect(fileName("/tmp/example.sqlite")).toBe("example.sqlite");
-    expect(fileName("C:\\data\\example.sqlite")).toBe("example.sqlite");
+    expect(fileName("C:\\data\\example.sqlite", true)).toBe("example.sqlite");
     expect(fileName(null)).toBe("No file open");
   });
 
   it("extracts parent directories from POSIX and Windows paths", () => {
     expect(parentDir("/tmp/example.sqlite")).toBe("/tmp");
-    expect(parentDir("C:\\data\\example.sqlite")).toBe("C:/data");
+    expect(parentDir("C:\\data\\example.sqlite", true)).toBe("C:/data");
     expect(parentDir("example.sqlite")).toBe("");
+    expect(parentDir("/one.db", false)).toBe("/");
+    expect(parentDir("C:\\one.db", true)).toBe("C:/");
+    expect(parentDir("/tmp/run\\one.db", false)).toBe("/tmp");
+    expect(fileName("/tmp/run\\one.db", false)).toBe("run\\one.db");
   });
 });
