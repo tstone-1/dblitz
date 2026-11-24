@@ -17,7 +17,7 @@ import base64
 import io
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from playwright.sync_api import sync_playwright
 
@@ -37,6 +37,8 @@ class App:
         self.pg.wait_for_timeout(500)
 
     def png(self, clip=None):
+        if not shows_demo(self.pg):
+            raise RuntimeError("Capture requires the neutral demo database.")
         args = {"format": "png"}
         if clip:
             args["clip"] = {**clip, "scale": 1}
@@ -191,6 +193,23 @@ def lint(app):
     (OUT / "sql-check.png").write_bytes(app.png({"x": 0, "y": 0, "width": WIDTH, "height": 200}))
 
 
+DEMO_PATH = PureWindowsPath("C:/demo/roastery.sqlite")
+
+
+def shows_demo(page):
+    if not page.url.startswith("http://localhost"):
+        return False
+    toolbar = page.locator("button.file-path")
+    return toolbar.count() == 1 and PureWindowsPath(toolbar.inner_text()) == DEMO_PATH
+
+
+def select_demo_page(browser):
+    pages = [page for context in browser.contexts for page in context.pages if shows_demo(page)]
+    if len(pages) != 1:
+        raise RuntimeError(f"Expected one dblitz window showing {DEMO_PATH}")
+    return pages[0]
+
+
 STEPS = {"browse": browse, "sqlgif": sqlgif, "lint": lint}
 
 if __name__ == "__main__":
@@ -198,7 +217,9 @@ if __name__ == "__main__":
     with sync_playwright() as p:
         browser = p.chromium.connect_over_cdp("http://127.0.0.1:9222")
         # A debug build also exposes its devtools window as a page target.
-        page = next(x for x in browser.contexts[0].pages if x.url.startswith("http://localhost"))
+        page = select_demo_page(browser)
         for name in sys.argv[1:] or list(STEPS):
+            if not shows_demo(page):
+                raise RuntimeError("The selected window changed databases.")
             STEPS[name](App(page))
             print(f"[OK] {name}")

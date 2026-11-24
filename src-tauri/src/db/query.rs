@@ -4,12 +4,43 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
 use super::filters::{build_where_clause, WhereResult};
-use super::schema::table_columns;
+use super::schema::{table_columns, TableColumns};
 use super::types::{
     ColumnFilter, DbState, OrderKey, OrderedRows, QueryRequest, QueryResult, RowidIndex,
 };
 use super::util::{collect_rows, quote_ident, read_row, read_row_from, render_real, StrErr};
 use super::{CANCELLED_QUERY_MESSAGE, MAX_QUERY_LIMIT};
+
+/// STRICT ANY has no affinity. Ordinary ANY uses numeric affinity. Only query
+/// table_list when an active filter needs this distinction.
+fn table_where(
+    conn: &Connection,
+    quoted_table: &str,
+    columns: &mut TableColumns,
+    filters: &[ColumnFilter],
+    global: &str,
+) -> Result<WhereResult, String> {
+    if columns.info.iter().any(|col| {
+        col.col_type.eq_ignore_ascii_case("ANY")
+            && filters.iter().any(|f| f.column == col.name && !f.is_regex)
+    }) {
+        let strict = conn
+            .query_row(
+                &format!("PRAGMA main.table_list({quoted_table})"),
+                [],
+                |row| row.get::<_, bool>(5),
+            )
+            .str_err()?;
+        if strict {
+            for col in &mut columns.info {
+                if col.col_type.eq_ignore_ascii_case("ANY") {
+                    col.col_type.clear();
+                }
+            }
+        }
+    }
+    build_where_clause(&columns.info, filters, global)
+}
 
 /// Upper bound on how many chunk boundaries or rowids a single `Vec` is
 /// pre-sized for.
@@ -795,14 +826,20 @@ pub fn query_table(state: &DbState, req: &QueryRequest) -> Result<QueryResult, S
     // `rowid_alias` does all come out of this single read. It used to be read
     // again inside `rowid_alias`, on every scroll chunk, for an answer that
     // cannot change while the file is open.
-    let table_columns = table_columns(conn, &quoted_table)?;
+    let mut table_columns = table_columns(conn, &quoted_table)?;
     let columns = table_columns.visible.clone();
 
     let WhereResult {
         clause: where_clause,
         params,
         regex_filters,
-    } = build_where_clause(&table_columns.info, &req.filters, &req.global_filter)?;
+    } = table_where(
+        conn,
+        &quoted_table,
+        &mut table_columns,
+        &req.filters,
+        &req.global_filter,
+    )?;
 
     let valid_sort_column = req
         .sort_column
@@ -963,13 +1000,13 @@ pub fn count_rows(
     let guard = state.conn.lock();
     let conn = guard.as_ref().ok_or("No database open")?;
     let quoted_table = quote_ident(table);
-    let columns = table_columns(conn, &quoted_table)?;
+    let mut columns = table_columns(conn, &quoted_table)?;
 
     let WhereResult {
         clause: where_clause,
         params,
         regex_filters,
-    } = build_where_clause(&columns.info, filters, global_filter)?;
+    } = table_where(conn, &quoted_table, &mut columns, filters, global_filter)?;
     if !regex_filters.is_empty() {
         return Err("count_rows does not support regex filters".to_string());
     }
@@ -1018,6 +1055,24 @@ mod tests {
         let state = DbState::new();
         *state.conn.lock() = Some(conn);
         state
+    }
+
+    #[test]
+    fn strict_any_compares_stored_integers_numerically() {
+        for mode in ["STRICT", ""] {
+            let state = state_with_memory_db(&format!(
+                "CREATE TABLE items(id ANY) {mode}; INSERT INTO items VALUES(2),(9),('000123');"
+            ));
+            let req = QueryRequest {
+                filters: vec![text_filter("id", "=9")],
+                ..page("items", 0, 10)
+            };
+            let result = query_table(&state, &req).unwrap();
+            assert_eq!(result.rows, vec![vec![Some("9".to_owned())]]);
+            let count = count_rows(&state, "items", &[text_filter("id", "<5")], "").unwrap();
+            // Strict mode retains 000123 as text, which also precedes "5".
+            assert_eq!(count, if mode == "STRICT" { 2 } else { 1 });
+        }
     }
 
     fn temp_db_with_items(dir: &TempDir, name: &str, count: usize) -> std::path::PathBuf {

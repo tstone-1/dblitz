@@ -188,9 +188,36 @@ fn prepare_fixtures(pq: &Path, db: &Path, rows: i64) -> Result<(), Box<dyn std::
     let sqlite = staging.path().join("benchmark.sqlite");
     generate(&parquet, &sqlite, rows)?;
     // Publish complete files without replacing a destination created during generation.
-    std::fs::hard_link(parquet, pq)?;
-    std::fs::hard_link(sqlite, db)?;
+    publish_new(parquet, pq)?;
+    if let Err(error) = publish_new(sqlite, db) {
+        std::fs::remove_file(pq)?;
+        return Err(error.into());
+    }
     Ok(())
+}
+
+fn publish_new(source: std::path::PathBuf, dest: &Path) -> std::io::Result<()> {
+    use std::io::ErrorKind;
+    match tempfile::TempPath::try_from_path(source)?.persist_noclobber(dest) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.error.kind(),
+                ErrorKind::Unsupported | ErrorKind::PermissionDenied
+            ) =>
+        {
+            let mut src = std::fs::File::open(&error.path)?;
+            let mut dst = std::fs::File::create_new(dest)?;
+            if let Err(copy_error) = std::io::copy(&mut src, &mut dst).and_then(|_| dst.sync_all())
+            {
+                drop(dst);
+                std::fs::remove_file(dest)?;
+                return Err(copy_error);
+            }
+            Ok(())
+        }
+        Err(error) => Err(error.error),
+    }
 }
 
 fn generate(pq: &Path, db: &Path, rows: i64) -> Result<(), Box<dyn std::error::Error>> {
@@ -345,6 +372,17 @@ mod tests {
             assert_eq!(std::fs::read(present).unwrap(), b"original");
             assert!(!missing.exists());
         }
+    }
+
+    #[test]
+    fn publication_preserves_a_competing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("prepared");
+        let dest = dir.path().join("existing");
+        std::fs::write(&src, b"prepared").unwrap();
+        std::fs::write(&dest, b"original").unwrap();
+        assert!(publish_new(src, &dest).is_err());
+        assert_eq!(std::fs::read(dest).unwrap(), b"original");
     }
 
     #[test]

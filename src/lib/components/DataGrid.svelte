@@ -452,7 +452,7 @@
   });
 
   function getColor(col: string): string {
-    return columnColors[col] || '';
+    return Object.hasOwn(columnColors, col) ? columnColors[col] : "";
   }
 
   // Header context menu (color/hide)
@@ -846,6 +846,8 @@
       <span class="sel-stat">Avg: {fmtNum(selStats.avg!)}</span>
       <span class="sel-stat">Min: {fmtNum(selStats.min!)}</span>
       <span class="sel-stat">Max: {fmtNum(selStats.max!)}</span>
+    {:else if selStats.precisionLimited}
+      <span class="sel-stat">Numeric stats unavailable at this precision</span>
     {:else if selStats.numericPending}
       <span class="sel-stat">Numeric stats loading</span>
     {/if}

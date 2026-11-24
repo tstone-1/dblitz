@@ -246,3 +246,12 @@ describe("sqlCompletionSource", () => {
     expect(complete("SELECT |", true)!.options.length).toBeGreaterThan(0);
   });
 });
+
+it.each(['"gross;net"', '"gross"";net"', '[gross;net]', '`gross;net`'])(
+  "keeps the quoted identifier %s in its statement", (alias) => {
+    const first = "SELECT 1 AS " + alias;
+    const sql = first + "; SELECT 2";
+    expect(statementAtCursor(sql, 2)).toEqual({ from: 0, to: first.length });
+    expect(statementAtCursor(sql, sql.length)).toEqual({ from: first.length + 2, to: sql.length });
+  },
+);

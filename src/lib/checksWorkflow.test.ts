@@ -163,3 +163,11 @@ describe("the audit workflow runs cargo audit on a schedule", () => {
     expect(allowedInWorkflow()).not.toContain("RUSTSEC-2026-0459");
   });
 });
+
+it("runs the updater fixtures in presubmit and before creating a release draft", () => {
+  const command = "python3 scripts/test-update-manifest.py";
+  expect(readText(".github/workflows/checks.yml")).toContain(command);
+  const release = readText(".github/workflows/release.yml");
+  expect(release.slice(release.indexOf("\n  preflight:"), release.indexOf("\n  create-release:"))).toContain(command);
+  expect(readText(".github/workflows/checks.yml")).toMatch(/if: matrix\.os == 'windows-latest'\s+run: npm test -- src\/lib\/releaseWorkflow\.test\.ts/);
+});

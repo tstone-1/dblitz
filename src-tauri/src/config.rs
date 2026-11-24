@@ -279,7 +279,7 @@ fn normalize_path_key(p: &str, windows_semantics: bool) -> String {
 
 /// Normalize a path for case-insensitive dedup on Windows. On Unix, paths are
 /// case-sensitive so the original is returned.
-fn normalize_for_dedup(p: &str) -> String {
+pub(crate) fn normalize_for_dedup(p: &str) -> String {
     normalize_path_key(p, cfg!(windows))
 }
 

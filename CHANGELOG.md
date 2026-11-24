@@ -15,6 +15,11 @@ Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 - Copy and Excel export use the selection captured when the operation starts. Excel preserves the digits of very large integers. Saved column colors follow the active theme in Browse and SQL results.
 - Structure clears the previous table's columns when a new selection is loading. Table discovery includes user tables such as `sqliteCache`.
 
+- DuckDB compares fractional bounds on integer columns without rounding. SQLite filters respect STRICT ANY storage, and Excel export preserves text identifiers and high-precision decimals.
+- A table whose metadata loads on retry retains its saved sort and filters. Reopening the same file waits for pending settings. Grid statistics flag values outside their numeric precision.
+- SQL execution handles semicolons inside quoted identifiers and keeps successful results when history storage is full. Columns named `constructor` render normally, and Excel accepts aliases differing only in case.
+- Windows recognizes equivalent database paths when activating an open window.
+
 ### Security
 
 - Updated the Rust `cookie` and `url` dependencies for RUSTSEC-2026-0594 and RUSTSEC-2026-0592.

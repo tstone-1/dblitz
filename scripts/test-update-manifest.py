@@ -52,6 +52,14 @@ class UpdateManifestTest(unittest.TestCase):
     def test_accepts_signed_payloads(self):
         self.check()
 
+    def test_accepts_the_same_key_with_another_comment_and_newlines(self):
+        config = json.loads(self.config.read_bytes())
+        key = config["plugins"]["updater"]
+        body = base64.b64decode(key["pubkey"]).splitlines()[1]
+        key["pubkey"] = base64.b64encode(b"untrusted comment: re-exported\r\n" + body + b"\r\n").decode()
+        self.config.write_bytes(json.dumps(config).encode())
+        self.check()
+
     def test_rejects_another_key(self):
         self.generated_key("other")
         with self.assertRaises(subprocess.CalledProcessError):

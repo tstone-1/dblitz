@@ -85,22 +85,23 @@ export function unquoteIdent(token: string): string {
  * spaces, newlines kept, same length, so every offset still lines up.
  * Scanning the masked text keeps `'from users'` inside a literal from being
  * read as a FROM clause. Double quotes are identifiers in SQL and are left
- * alone.
+ * alone unless the caller is finding statement boundaries.
  *
  * `literalFill` replaces literal characters instead of a space when a caller
  * must tell a literal from whitespace: trimming a statement with literals
  * masked as spaces cut `WHERE name = 'x'` down to `WHERE name =`.
  */
-export function maskLiteralsAndComments(text: string, literalFill = " "): string {
+export function maskLiteralsAndComments(text: string, literalFill = " ", maskIdentifiers = false): string {
   let out = "";
   let i = 0;
   while (i < text.length) {
     const c = text[i];
-    if (c === "'") {
+    if (c === "'" || (maskIdentifiers && ['"', '`', '['].includes(c))) {
+      const endQuote = c === "[" ? "]" : c;
       let j = i + 1;
       while (j < text.length) {
-        if (text[j] === "'" && text[j + 1] === "'") j += 2;
-        else if (text[j] === "'") break;
+        if (c !== "[" && text[j] === endQuote && text[j + 1] === endQuote) j += 2;
+        else if (text[j] === endQuote) break;
         else j++;
       }
       const end = Math.min(j + 1, text.length);
@@ -127,7 +128,7 @@ export function maskLiteralsAndComments(text: string, literalFill = " "): string
 /** The statement around `pos`: between the nearest `;` on either side that is
  *  not inside a literal or comment. */
 export function statementBounds(text: string, pos: number): { from: number; to: number } {
-  const masked = maskLiteralsAndComments(text);
+  const masked = maskLiteralsAndComments(text, "x", true);
   const before = masked.lastIndexOf(";", pos - 1);
   const after = masked.indexOf(";", pos);
   return { from: before + 1, to: after === -1 ? text.length : after };
@@ -136,7 +137,7 @@ export function statementBounds(text: string, pos: number): { from: number; to: 
 /** Every statement in `text` that holds more than whitespace and comments, as
  *  ranges without the `;` and without surrounding whitespace or comments. */
 export function statementRanges(text: string): { from: number; to: number }[] {
-  const masked = maskLiteralsAndComments(text, "x");
+  const masked = maskLiteralsAndComments(text, "x", true);
   const out: { from: number; to: number }[] = [];
   let start = 0;
   for (let i = 0; i <= masked.length; i++) {

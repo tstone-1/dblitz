@@ -166,3 +166,11 @@ describe("resolveResultColumnColors", () => {
     ).toEqual({});
   });
 });
+
+it("only reads explicitly saved column colors", () => {
+  const args = { sql: "SELECT constructor FROM items", columns: ["constructor"],
+    tableNames: ["items"], theme: "light" as const };
+  expect(resolveResultColumnColors({ ...args, getColumnColors: () => ({}) })).toEqual({});
+  expect(resolveResultColumnColors({ ...args, getColumnColors: () => ({ constructor: "#fff" }) }))
+    .toEqual({ constructor: "#fff" });
+});

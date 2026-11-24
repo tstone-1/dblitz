@@ -63,7 +63,7 @@ fn is_numeric_affinity(declared: &str) -> bool {
     if t.contains("CHAR") || t.contains("CLOB") || t.contains("TEXT") {
         return false;
     }
-    if t.contains("BLOB") || t.is_empty() {
+    if t.contains("BLOB") || t.is_empty() || t.trim() == "ANY" {
         return false;
     }
     true
@@ -111,6 +111,13 @@ fn classify_cell(numeric: bool, val: &str) -> CellValue {
     }
 }
 
+/// Excel retains 15 significant decimal digits. DuckDB renders DECIMAL in
+/// fixed-point notation, including the trailing zeros from its declared scale.
+fn fits_excel_decimal(value: &str) -> bool {
+    let digits: String = value.chars().filter(char::is_ascii_digit).collect();
+    digits.trim_matches('0').len() <= 15
+}
+
 fn dedupe_headers(headers: &[String]) -> Vec<String> {
     use std::collections::HashSet;
 
@@ -118,7 +125,7 @@ fn dedupe_headers(headers: &[String]) -> Vec<String> {
     headers
         .iter()
         .map(|header| {
-            if used.insert(header.clone()) {
+            if used.insert(header.to_lowercase()) {
                 return header.clone();
             }
             // Keep bumping the suffix until it lands on a name nothing else
@@ -129,7 +136,7 @@ fn dedupe_headers(headers: &[String]) -> Vec<String> {
             let mut n = 2;
             loop {
                 let candidate = format!("{header}_{n}");
-                if used.insert(candidate.clone()) {
+                if used.insert(candidate.to_lowercase()) {
                     return candidate;
                 }
                 n += 1;
@@ -184,12 +191,22 @@ pub fn export_to_xlsx(
         return Err("Export row has more cells than headers".to_string());
     }
 
+    let exact_decimal: Vec<bool> = (0..headers.len())
+        .map(|i| {
+            column_types
+                .get(i)
+                .is_some_and(|t| t.to_ascii_uppercase().starts_with("DECIMAL"))
+        })
+        .collect();
     let table_headers = dedupe_headers(headers);
 
     let mut truncated_cells = 0usize;
     for (ri, row) in rows.iter().enumerate() {
         for (ci, val) in row.iter().enumerate() {
-            match classify_cell(numeric[ci], val) {
+            match classify_cell(
+                numeric[ci] && (!exact_decimal[ci] || fits_excel_decimal(val)),
+                val,
+            ) {
                 CellValue::Number(n) => {
                     ws.write_number((ri + 1) as u32, ci as u16, n).str_err()?;
                 }
@@ -317,7 +334,7 @@ mod tests {
             "SELECT id, '-9223372036854775808'::BIGINT AS lo, \
              '9223372036854775807'::BIGINT AS hi, \
              '18446744073709551615'::UBIGINT AS u, \
-             '-170141183460469231731687303715884105728'::HUGEINT AS h FROM data",
+             '-170141183460469231731687303715884105728'::HUGEINT AS h, 9007199254740993.25::DECIMAL(18,2) AS exact_price, 1.25::DECIMAL(8,2) AS price FROM data",
             &AtomicU64::new(0),
         );
         assert_eq!(result.error, None);
@@ -346,11 +363,13 @@ mod tests {
             sheet.contains(r#"<c r="A2"><v>1</v></c>"#),
             "ordinary integer should be numeric"
         );
+        assert!(sheet.contains(r#"<c r="G2"><v>1.25</v></c>"#));
         for (reference, expected) in [
             ("B2", i64::MIN.to_string()),
             ("C2", i64::MAX.to_string()),
             ("D2", u64::MAX.to_string()),
             ("E2", i128::MIN.to_string()),
+            ("F2", "9007199254740993.25".to_string()),
         ] {
             let prefix = format!(r#"<c r="{reference}" t="s"><v>"#);
             let (_, remainder) = sheet
@@ -502,6 +521,13 @@ mod tests {
             Some(EXCEL_MAX_CELL_CHARS)
         );
         assert_eq!(truncate_for_excel(&exact), None);
+    }
+
+    #[test]
+    fn case_insensitive_header_suffixes_avoid_existing_names() {
+        let headers = ["code", "Code_2", "Code"].map(str::to_owned);
+        assert_eq!(dedupe_headers(&headers), ["code", "Code_2", "Code_3"]);
+        assert!(!is_numeric_affinity("ANY"));
     }
 
     #[test]

@@ -39,6 +39,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Test signed updater fixtures
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
+          python3 scripts/test-update-manifest.py
+
       - name: Type check
         run: npm run check
 
@@ -70,6 +76,21 @@ jobs:
         os: [ubuntu-24.04, windows-latest, windows-11-arm, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        if: matrix.os == 'windows-latest'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        if: matrix.os == 'windows-latest'
+        run: npm ci
+
+      - name: Test Windows portable build verification
+        if: matrix.os == 'windows-latest'
+        run: npm test -- src/lib/releaseWorkflow.test.ts -t "local portable build verification"
 
       # Pinned to the v1 TAG, not to the `stable` branch. Both install the same
       # toolchain, but only a tag is a ref dependabot can advance -- see the

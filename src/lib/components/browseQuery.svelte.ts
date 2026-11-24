@@ -80,6 +80,7 @@ export interface BrowseQueryDeps {
   getColumnIndex: (column: string) => number | undefined;
   /** Column names cached at open time, so filters survive the first query. */
   getCachedTableColumns: (table: string) => string[] | undefined;
+  loadTableColumns: (table: string) => Promise<string[]>;
 
   // ---- persisted config ----------------------------------------------------
   getTableConfig: (table: string) => ViewConfig;
@@ -116,6 +117,7 @@ export function createBrowseQuery(deps: BrowseQueryDeps) {
   // not reactive state. Tracking it via `$state` would defeat the dedup (every
   // read/write would trigger downstream effects).
   let lastFilterState = "";
+  let selectionRequest = 0;
   let filterDebounce: ReturnType<typeof setTimeout> | null = null;
 
   function buildFilters(): ColumnFilter[] {
@@ -326,6 +328,17 @@ export function createBrowseQuery(deps: BrowseQueryDeps) {
   }
 
   async function selectTable(name: string): Promise<void> {
+    const request = ++selectionRequest;
+    let columns = deps.getCachedTableColumns(name);
+    if (!columns) {
+      try {
+        columns = await deps.loadTableColumns(name);
+      } catch (error) {
+        if (request === selectionRequest) deps.setError(String(error));
+        return;
+      }
+      if (request !== selectionRequest) return;
+    }
     // Cancel any pending debounced reload from the outgoing table so it can't
     // fire against the incoming one and waste a round-trip.
     cancelDebounce();
@@ -334,7 +347,7 @@ export function createBrowseQuery(deps: BrowseQueryDeps) {
     // so buildFilters() (called by reloadData below) sees the schema BEFORE
     // the first query result arrives. Without this, filters are dropped on
     // the very first query after a table switch because `valid` is empty.
-    deps.setColumns(deps.getCachedTableColumns(name) ?? []);
+    deps.setColumns(columns);
     const cfg = deps.ensureTableConfig(name);
     if (cfg.sort_column && !deps.getColumns().includes(cfg.sort_column)) {
       deps.updateTableConfig(name, (tableCfg) => {
@@ -402,6 +415,7 @@ export function createBrowseQuery(deps: BrowseQueryDeps) {
    * that lives here.
    */
   function resetForNewDatabase(): void {
+    ++selectionRequest;
     lastFilterState = "";
     cancelDebounce();
     virtualRows.reset();

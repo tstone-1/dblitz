@@ -196,3 +196,7 @@ describe("scrollTopToRevealRow", () => {
     });
   }
 });
+
+it("uses the default width for an unconfigured constructor column", () => {
+  expect(buildGridTemplate(["constructor"], {})).toBe("60px minmax(80px, 1fr)");
+});

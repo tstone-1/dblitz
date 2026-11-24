@@ -57,6 +57,9 @@ describe("pre-push public-safe audit", { timeout: 60000 }, () => {
       "$ForbiddenPatterns = @(",
       `    '${marker}'`,
       ")",
+      "$content = Get-Content -LiteralPath (Join-Path $CheckRepoPath 'publish sample.mjs') -Raw",
+      "if ($content -match $ForbiddenPatterns[0]) { Write-Output $ForbiddenPatterns[0]; exit 1 }",
+      "Write-Output $ForbiddenPatterns[0]",
       "exit 0",
     ].join("\n"));
     git(["init", "-qb", "main"]);
@@ -98,7 +101,14 @@ describe("pre-push public-safe audit", { timeout: 60000 }, () => {
   });
 
   it("allows a clean new ref and ref deletion", () => {
-    const run = audit(update("new", clean, zeros) + update("obsolete", zeros, base));
+    writeFileSync(join(repo, "publish sample.mjs"), marker);
+    let run;
+    try {
+      run = audit(update("new", clean, zeros) + update("obsolete", zeros, base));
+    } finally {
+      git(["restore", "--worktree", "--", "publish sample.mjs"]);
+    }
+    expect(run.output).not.toContain(marker);
     expect(run.output).toMatch(/outgoing content passed/);
     expect(run.status).toBe(0);
   });

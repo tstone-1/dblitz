@@ -4,6 +4,7 @@ import {
   appState,
   loadSqlHistory,
   loadTheme,
+  persistSqlHistory,
   openDatabase,
   saveViewConfig,
 } from "./store.svelte";
@@ -39,6 +40,12 @@ describe("store localStorage loaders", () => {
 
     expect(loadSqlHistory()).toEqual([]);
     expect(window.localStorage.getItem("dblitz-sql-history")).toBeNull();
+  });
+
+  it("keeps a history write error outside the SQL result path", () => {
+    vi.spyOn(window.localStorage, "setItem").mockImplementationOnce(() => { throw new Error("Quota"); });
+    expect(() => persistSqlHistory()).not.toThrow();
+    expect(appState.notice).toContain("history could not be saved");
   });
 
   it("filters malformed SQL history entries", () => {
@@ -297,6 +304,20 @@ describe("view-config save sequencing", () => {
 
     const labels = saves().map((c) => (c.args.config as { label: string | null }).label);
     expect(labels).toEqual(["first", "second"]);
+  });
+
+  it("waits for pending settings before reading the same file again", async () => {
+    const { gates, saves, calls } = harness();
+    await openDatabase("same.db");
+    appState.fileConfig.label = "edited";
+    const save = saveViewConfig();
+    await vi.waitFor(() => expect(saves()).toHaveLength(1));
+    const reopen = openDatabase("same.db");
+    await vi.waitFor(() => expect(calls.filter(c => c.command === "open_database")).toHaveLength(2));
+    expect(calls.filter(c => c.command === "load_view_config")).toHaveLength(1);
+    gates[0]();
+    await Promise.all([save, reopen]);
+    expect(calls.filter(c => c.command === "load_view_config")).toHaveLength(2);
   });
 
   it("captures the config at enqueue time rather than at dispatch", async () => {

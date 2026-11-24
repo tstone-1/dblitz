@@ -2,6 +2,7 @@
   import { tick, untrack } from "svelte";
   import {
     queryTable,
+    getColumns,
     cancelQueries,
     countRows,
     exportToXlsx,
@@ -185,7 +186,18 @@
     setError: (message) => { appState.error = message; },
     getVisibleColumns: () => visColsList,
     getColumnIndex: (col) => colIndexMap.get(col),
-    getCachedTableColumns: (table) => appState.tableColumns[table],
+    getCachedTableColumns: (table) => Object.hasOwn(appState.tableColumns, table)
+      ? appState.tableColumns[table] : undefined,
+    loadTableColumns: async (table) => {
+      const generation = appState.dbOpenGeneration;
+      const info = await getColumns(table);
+      const names = info.map((col) => col.name);
+      if (generation === appState.dbOpenGeneration) {
+        appState.tableColumns[table] = names;
+        appState.tableColumnTypes[table] = Object.fromEntries(info.map((col) => [col.name, col.col_type]));
+      }
+      return names;
+    },
     getTableConfig,
     ensureTableConfig,
     updateTableConfig,
@@ -336,7 +348,9 @@
 
   function getColumnColor(col: string): string {
     if (!selectedTable) return "";
-    return columnColorForTheme(getTableConfig(selectedTable).column_colors[col] || "", appState.theme);
+    const colors = getTableConfig(selectedTable).column_colors;
+    return Object.hasOwn(colors, col) && typeof colors[col] === "string"
+      ? columnColorForTheme(colors[col], appState.theme) : "";
   }
 
   function handleFilterInput(col: string, value: string) {

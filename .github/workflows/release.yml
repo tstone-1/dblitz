@@ -73,6 +73,12 @@ jobs:
       # main-module guard. `set -e` catches a real rejection; the grep catches a
       # silent no-op. Captured into a variable rather than piped, because the
       # exit status of `a | tee` is tee's.
+      - name: Test signed updater fixtures
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
+          python3 scripts/test-update-manifest.py
+
       - name: Verify the tag matches every version file
         run: |
           set -euo pipefail
@@ -735,7 +741,6 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y minisign
-          python3 scripts/test-update-manifest.py
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --pattern latest.json --pattern '*.app.tar.gz' --pattern '*-setup.exe' \
             --pattern '*.AppImage' --pattern '*.deb' --pattern '*.rpm' -D manifest
@@ -749,9 +754,7 @@ jobs:
           if [ -n "$previous" ]; then
             gh api "repos/$GITHUB_REPOSITORY/contents/src-tauri/tauri.conf.json?ref=$previous" \
               --jq .content | base64 -d > manifest/previous-config.json
-            old_key=$(jq -er .plugins.updater.pubkey manifest/previous-config.json)
-            current_key=$(jq -er .plugins.updater.pubkey src-tauri/tauri.conf.json)
-            [ "$old_key" = "$current_key" ] || { echo "::error::The last published updater key differs"; exit 1; }
+            python3 scripts/verify-update-manifest.py manifest "${GITHUB_REF_NAME#v}" manifest/previous-config.json
           fi
           python3 scripts/verify-update-manifest.py manifest "${GITHUB_REF_NAME#v}" src-tauri/tauri.conf.json
 

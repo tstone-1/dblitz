@@ -17,7 +17,7 @@ use tauri::{AppHandle, Manager};
 fn path_hash(path: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    path.to_ascii_lowercase().hash(&mut hasher);
+    crate::config::normalize_for_dedup(path).hash(&mut hasher);
     hasher.finish()
 }
 
@@ -328,5 +328,19 @@ mod tests {
         ] {
             assert_ne!(path_hash(p), 0, "{p} hashed to the 'no file open' marker");
         }
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::path_hash;
+
+    #[test]
+    fn window_identity_matches_config_path_identity() {
+        assert_eq!(
+            path_hash("C:/demo/Résumé.db"),
+            path_hash(r"c:\DEMO\RÉSUMÉ.db")
+        );
+        assert_ne!(path_hash("C:/one/data.db"), path_hash("C:/two/data.db"));
     }
 }

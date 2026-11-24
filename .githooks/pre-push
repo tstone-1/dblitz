@@ -188,7 +188,28 @@ while IFS= read -r blob; do
     esac
 done < "$scratch/blobs"
 
-if command -v pwsh >/dev/null 2>&1; then
-    pwsh -NoProfile -ExecutionPolicy Bypass -File "$AUDIT" -CheckPublicSafe -CheckRepoPath "$REPO_ROOT" || exit $?
+if command -v pwsh >/dev/null 2>&1 && grep -q '^[^^]' "$scratch/revisions"; then
+    # The private checker reads a checkout and infers outgoing messages from
+    # local branches and remote refs. Give it exactly the proposed revisions.
+    objects=$(git rev-parse --path-format=absolute --git-path objects) || blocked "Cannot locate outgoing objects."
+    local_env=$(git rev-parse --local-env-vars) || blocked "Cannot isolate audit environment."
+    (
+        unset $local_env
+        audit_repo="$scratch/checkout"
+        git init -q "$audit_repo" || exit 1
+        printf '%s\n' "$objects" > "$audit_repo/.git/objects/info/alternates" || exit 1
+        while read -r rev; do
+            case "$rev" in
+                ^*) oid=${rev#^}; ref="refs/remotes/published/$oid" ;;
+                *) oid=$rev; ref="refs/heads/outgoing/$oid" ;;
+            esac
+            git -C "$audit_repo" update-ref "$ref" "$oid" || exit 1
+        done < "$scratch/revisions"
+        while read -r tip; do
+            case "$tip" in ^*) continue ;; esac
+            git -C "$audit_repo" -c core.hooksPath=/dev/null read-tree --reset -u "$tip" || exit 1
+            pwsh -NoProfile -ExecutionPolicy Bypass -File "$AUDIT" -CheckPublicSafe -CheckRepoPath "$audit_repo" || exit 1
+        done < "$scratch/revisions"
+    ) > /dev/null 2>&1 || blocked "Private audit of outgoing revisions failed."
 fi
 echo "[pre-push] OK - outgoing content passed the public-safe check."

@@ -256,7 +256,7 @@ export function resolveResultColumnColors(params: {
   const saved = getColumnColors(canonical);
   const map: Record<string, string> = {};
   for (const col of columns) {
-    if (saved[col]) map[col] = columnColorForTheme(saved[col], params.theme);
+    if (Object.hasOwn(saved, col) && typeof saved[col] === "string") map[col] = columnColorForTheme(saved[col], params.theme);
   }
   return map;
 }

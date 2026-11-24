@@ -5,8 +5,8 @@
 //! - **Text matching is `ILIKE` against the rendered text** ([`text_expr`]).
 //!   SQLite's `LIKE` is case-insensitive and DuckDB's is not, and matching the
 //!   rendered text is what makes a filter agree with what the grid shows.
-//! - **A comparison operand is cast to the column's type**, and one that cannot
-//!   be cast is an error rather than an empty grid - the same rule as a
+//! - **Comparisons use the column type**, preserving fractional bounds for
+//!   integer columns. An operand that cannot be cast is an error rather than an empty grid - the same rule as a
 //!   filter naming an unknown column. SQLite would instead compare across
 //!   storage classes, which DuckDB's typed comparison does not do.
 //! - **A regex runs inside DuckDB (RE2)**, not in Rust. NULL still matches as
@@ -37,6 +37,91 @@ fn cast_target(col_type: &str) -> Option<&str> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || " (),_".contains(c));
     safe.then_some(col_type)
+}
+
+/// Integer columns are discrete. A non-integral threshold lies strictly
+/// between two adjacent integers, even beyond the exact range of a double.
+fn comparison(
+    q: &str,
+    text: &str,
+    col_type: &str,
+    op: &str,
+    input: &str,
+) -> (String, Option<String>) {
+    let Some(t) = cast_target(col_type) else {
+        return (format!("{text} {op} ?"), Some(input.into()));
+    };
+    let integral = matches!(
+        t,
+        "TINYINT"
+            | "SMALLINT"
+            | "INTEGER"
+            | "BIGINT"
+            | "HUGEINT"
+            | "UTINYINT"
+            | "USMALLINT"
+            | "UINTEGER"
+            | "UBIGINT"
+            | "UHUGEINT"
+    );
+    if integral && input.contains(['.', 'e', 'E']) {
+        if let Some((whole, fractional, negative)) = integer_parts(input) {
+            if fractional && op == "=" {
+                return ("false".into(), None);
+            }
+            let op = match (fractional, op, negative) {
+                (false, _, _) => op,
+                (true, "<" | "<=", false) => "<=",
+                (true, ">" | ">=", false) => ">",
+                (true, "<" | "<=", true) => "<",
+                _ => ">=",
+            };
+            // Keep common bounds on a native integer comparison. Mixing UHUGEINT
+            // with a signed bound can otherwise promote the pair to DOUBLE.
+            let sql = if t != "UHUGEINT" && whole.parse::<i64>().is_ok() {
+                format!("{q} {op} CAST(? AS BIGINT)")
+            } else {
+                format!("CAST({q} AS BIGNUM) {op} CAST(? AS BIGNUM)")
+            };
+            return (sql, Some(whole));
+        }
+    }
+    (format!("{q} {op} CAST(? AS {t})"), Some(input.into()))
+}
+
+/// Split an exact decimal spelling, including scientific notation. Past 39
+/// whole digits only the sign matters for comparisons to a fixed-width integer.
+fn integer_parts(input: &str) -> Option<(String, bool, bool)> {
+    let value = input.trim();
+    let negative = value.starts_with('-');
+    let unsigned = value.strip_prefix(['-', '+']).unwrap_or(value);
+    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((m, e)) => (m, e.parse::<i32>().ok()?),
+        None => (unsigned, 0),
+    };
+    let (whole, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{whole}{frac}");
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let point = whole.len() as i64 + i64::from(exponent);
+    let split = point.clamp(0, digits.len() as i64) as usize;
+    let fractional = digits[split..].bytes().any(|b| b != b'0');
+    let leading = digits[..split].trim_start_matches('0');
+    let mut integer = if leading.is_empty() {
+        "0".to_owned()
+    } else {
+        let zeros = (point - split as i64).max(0) as usize;
+        if leading.len() + zeros > 39 {
+            "1".to_owned() + &"0".repeat(39)
+        } else {
+            leading.to_owned() + &"0".repeat(zeros)
+        }
+    };
+    if negative && integer != "0" {
+        integer.insert(0, '-');
+    }
+    Some((integer, fractional, negative))
 }
 
 pub(crate) fn build_where(
@@ -87,10 +172,6 @@ pub(crate) fn build_where(
         }
 
         let q = quote_ident(&col.name);
-        let cast = |op: &str| match cast_target(&col.col_type) {
-            Some(t) => format!("{q} {op} CAST(? AS {t})"),
-            None => format!("{text} {op} ?"),
-        };
         let mut ors: Vec<String> = Vec::new();
         let mut or_params: Vec<String> = Vec::new();
         let mut ands: Vec<String> = Vec::new();
@@ -102,11 +183,11 @@ pub(crate) fn build_where(
                     format!("{text} NOT ILIKE ? ESCAPE '\\'"),
                     Some(contains_pattern(v)),
                 ),
-                Criterion::Ge(v) => (cast(">="), Some(v.to_string())),
-                Criterion::Le(v) => (cast("<="), Some(v.to_string())),
-                Criterion::Gt(v) => (cast(">"), Some(v.to_string())),
-                Criterion::Lt(v) => (cast("<"), Some(v.to_string())),
-                Criterion::Eq(v) => (cast("="), Some(v.to_string())),
+                Criterion::Ge(v) => comparison(&q, &text, &col.col_type, ">=", v),
+                Criterion::Le(v) => comparison(&q, &text, &col.col_type, "<=", v),
+                Criterion::Gt(v) => comparison(&q, &text, &col.col_type, ">", v),
+                Criterion::Lt(v) => comparison(&q, &text, &col.col_type, "<", v),
+                Criterion::Eq(v) => comparison(&q, &text, &col.col_type, "=", v),
                 Criterion::Contains(v) => (ilike(&text), Some(contains_pattern(v))),
             };
             if c.is_and() {
@@ -161,6 +242,29 @@ mod tests {
             " WHERE CAST(\"name\" AS VARCHAR) ILIKE ? ESCAPE '\\'"
         );
         assert_eq!(w.params, ["%Ab\\_c%"]);
+    }
+
+    #[test]
+    fn fractional_integer_thresholds_preserve_the_side_of_zero_and_large_digits() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        for (operand, expected) in [
+            (">-1.6", vec!["-1", "0", "9007199254740993"]),
+            ("<-0.01", vec!["-2", "-1"]),
+            (">9007199254740992.9", vec!["9007199254740993"]),
+            ("=9007199254740993.0", vec!["9007199254740993"]),
+        ] {
+            let filter = build_where(&[col("id", "BIGINT")], &[f("id", operand)], "").unwrap();
+            let sql = format!("SELECT id::VARCHAR FROM (VALUES (-2::BIGINT), (-1), (0), (9007199254740993)) t(id) {} ORDER BY id", filter.clause);
+            let mut stmt = conn.prepare(&sql).unwrap();
+            let rows = stmt
+                .query_map(duckdb::params_from_iter(filter.params.iter()), |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(rows, expected, "{operand}");
+        }
     }
 
     #[test]

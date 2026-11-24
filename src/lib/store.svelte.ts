@@ -101,6 +101,7 @@ async function runOpenDatabase(path: string, request: number) {
     retireDatabaseSession();
     let config: FileConfig;
     try {
+      await pendingConfigSaves.get(configPathKey(path));
       config = await loadViewConfig();
     } catch (e) {
       // The backend has already switched. Drop the session rather than show
@@ -183,10 +184,11 @@ export async function closeDatabase() {
 }
 
 export function persistSqlHistory() {
-  browserStorage()?.setItem(
-    "dblitz-sql-history",
-    JSON.stringify(appState.sqlHistory),
-  );
+  try {
+    browserStorage()?.setItem("dblitz-sql-history", JSON.stringify(appState.sqlHistory));
+  } catch {
+    appState.notice = "SQL history could not be saved on this device.";
+  }
 }
 
 // View-config saves happen silently in the background (every filter
@@ -211,6 +213,13 @@ let saveFailureNotified = false;
 // among themselves and (b) each save knows its own database, which the
 // captured `path` below gives it independently of any queue.
 let viewConfigSaveQueue: Promise<void> = Promise.resolve();
+const pendingConfigSaves = new Map<string, Promise<void>>();
+
+function configPathKey(path: string): string {
+  return typeof navigator !== "undefined" && /^Win/i.test(navigator.platform)
+    ? path.replaceAll("\\", "/").toLowerCase()
+    : path;
+}
 
 async function runSaveViewConfig(path: string, config: FileConfig) {
   try {
@@ -246,7 +255,11 @@ export function saveViewConfig(): Promise<void> {
 
   const task = viewConfigSaveQueue.then(() => runSaveViewConfig(path, config));
   viewConfigSaveQueue = task.catch(() => {});
-  return task;
+  const key = configPathKey(path);
+  pendingConfigSaves.set(key, task);
+  return task.finally(() => {
+    if (pendingConfigSaves.get(key) === task) pendingConfigSaves.delete(key);
+  });
 }
 
 /**
@@ -285,7 +298,8 @@ const defaultViewConfig: ViewConfig = Object.freeze(freshViewConfig());
 
 /** Read-only access — safe to call from templates/derived. */
 export function getTableConfig(tableName: string): ViewConfig {
-  return appState.fileConfig.tables[tableName] ?? defaultViewConfig;
+  const tables = appState.fileConfig.tables;
+  return Object.hasOwn(tables, tableName) ? tables[tableName] : defaultViewConfig;
 }
 
 /**
@@ -324,7 +338,7 @@ export function updateTableConfig(
  * factory's comment for what aliasing them would do.
  */
 export function ensureTableConfig(tableName: string): ViewConfig {
-  if (!appState.fileConfig.tables[tableName]) {
+  if (!Object.hasOwn(appState.fileConfig.tables, tableName)) {
     appState.fileConfig.tables[tableName] = freshViewConfig();
   }
   return appState.fileConfig.tables[tableName];

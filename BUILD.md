@@ -250,7 +250,7 @@ eyeballing the window title:
 | Signal | What it proves |
 |---|---|
 | `GET /latest.json` ~10 s after launch | the startup check fired |
-| `GET /dblitz.app.tar.gz` after you click **Install and restart** | download ran, and the signature verified — a bad signature aborts *before* the download completes |
+| `GET /dblitz.app.tar.gz` after you click **Install and restart** | the updater requested the archive. Verify successful installation by reading the installed version after restart. |
 | a *second* `GET /latest.json` seconds later | the app relaunched and re-checked as the new version |
 | `defaults read "$SCRATCH/installed/dblitz.app/Contents/Info.plist" CFBundleShortVersionString` now reads the NEW version | the in-place bundle swap succeeded |
 | `last_run_version` in the real `app.json` is the new version | the post-update transition was recorded |
@@ -653,7 +653,7 @@ whoever can run a workflow on `main` decides which program reads the login,
 as was already true of the workflow files themselves. Its protocol is
 reverse-engineered, so Certum can end it without notice; the cost of that is a
 release that fails to build, not one that ships unsigned, because the Windows
-leg reads every signature back.
+leg verifies the installer, portable executable, installed application and uninstaller signatures.
 
 ## Release Procedure
 

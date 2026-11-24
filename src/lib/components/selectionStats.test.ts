@@ -310,3 +310,13 @@ describe("buildSelectionStats", () => {
     expect(DEFAULT_MAX_STATS_ROWS).toBe(100_000);
   });
 });
+
+it.each([
+  ["9007199254740993", "-9007199254740992"],
+  ["9007199254740991", "2"],
+])("withholds rounded totals for %s and %s", (a, b) => {
+  const stats = buildSelectionStats({
+    selection: { r0: 0, r1: 0, c0: 0, c1: 1 }, getRow: () => [a, b],
+  });
+  expect(stats).toMatchObject({ sum: null, avg: null, precisionLimited: true });
+});

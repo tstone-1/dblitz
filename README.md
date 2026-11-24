@@ -239,8 +239,8 @@ and in the recent-files dropdown, so PROD and QA stay visually distinct.
   large tables
 - Sort by any column
 - Resize, reorder, hide, and color-tag columns
-- REAL values are displayed exactly as SQLite's own text conversion prints them
-  (`3.0`, not `3`), so a filter typed against what you see matches what is stored
+- REAL values keep their decimal form. SQLite's text conversion can differ in
+  the last digits. Use an equality filter such as `=3.0` for a numeric match.
 - Find text in the grid with **Ctrl+F** (Cmd+F on macOS) and step through the
   matches with **F3** / **Shift+F3**. The search covers the rows and columns the
   grid shows, with filters and sort applied, and selects each matching cell
@@ -416,7 +416,9 @@ The committer, reviewer and release approver is
   other files are signed for distribution.
 - **Where.** Releases are signed in the public [release workflow](.github/workflows/release.yml)
   on a GitHub-hosted runner, for a version tag the maintainer pushes. The
-  workflow reads every signature back and fails if one is missing or not his.
+  workflow verifies the signatures on the installer, portable executable and
+  installed application and uninstaller. It reports the transient plugin DLL
+  signatures when the installer can be unpacked.
 - **Rehearsal.** The maintainer can also run the [signing rehearsal](.github/workflows/sign-rehearsal.yml)
   on `main`. It signs a copy of the signing client and an old unsigned installer,
   verifies both signatures, and installs the test copy. The runner discards the

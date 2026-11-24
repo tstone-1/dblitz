@@ -128,7 +128,7 @@ describe("release workflow updater wiring", () => {
     expect(verify).toContain('python3 scripts/verify-update-manifest.py manifest "${GITHUB_REF_NAME#v}" src-tauri/tauri.conf.json');
     expect(verify).toContain('repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100');
     expect(verify).toContain("| jq -e 'add");
-    expect(verify).toContain('[ "$old_key" = "$current_key" ] ||');
+    expect(verify).toContain('python3 scripts/verify-update-manifest.py manifest "${GITHUB_REF_NAME#v}" manifest/previous-config.json');
   });
 
   it("points the Windows manifest entry at the NSIS installer", () => {

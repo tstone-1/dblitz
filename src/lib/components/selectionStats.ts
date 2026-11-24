@@ -8,6 +8,7 @@ export interface SelectionStats {
   min: number | null;
   max: number | null;
   numericPending: boolean;
+  precisionLimited?: true;
   /** True when the selection extends past `maxRows` and the aggregate scan
    *  (and, for a genuinely sparse/disjoint selection, the row/col count too)
    *  only covers the first `maxRows` rows. See the cap-handling comment in
@@ -74,6 +75,7 @@ export function buildSelectionStats({
   const capped = capRow < selection.r1;
   let allNumeric = true;
   let sum = 0;
+  let precisionLimited = false;
   let min = Infinity;
   let max = -Infinity;
   let count = 0;
@@ -122,7 +124,16 @@ export function buildSelectionStats({
         break;
       }
 
-      sum += numberValue;
+      const nextSum = sum + numberValue;
+      if (!Number.isFinite(nextSum)
+        || (Number.isInteger(numberValue) && !Number.isSafeInteger(numberValue))
+        || (Number.isInteger(nextSum) && !Number.isSafeInteger(nextSum))) {
+        precisionLimited = true;
+        allNumeric = false;
+        numericStopped = true;
+        break;
+      }
+      sum = nextSum;
       if (numberValue < min) min = numberValue;
       if (numberValue > max) max = numberValue;
       count++;
@@ -156,6 +167,7 @@ export function buildSelectionStats({
     min: aggregatesAvailable ? min : null,
     max: aggregatesAvailable ? max : null,
     numericPending,
+    ...(precisionLimited && { precisionLimited: true as const }),
     capped,
   };
 }

@@ -93,7 +93,7 @@ export function visibleRowIndices({
 export function buildGridTemplate(columns: string[], columnWidths: Record<string, number>): string {
   const tracks = columns.map((column) => {
     const width = columnWidths[column];
-    return width ? `${width}px` : "minmax(80px, 1fr)";
+    return typeof width === "number" && width > 0 ? `${width}px` : "minmax(80px, 1fr)";
   });
   return `60px ${tracks.join(" ")}`;
 }

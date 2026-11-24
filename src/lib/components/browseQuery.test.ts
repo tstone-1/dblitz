@@ -30,6 +30,7 @@ interface HarnessOptions {
   countRows?: BrowseQueryDeps["countRows"];
   configs?: Record<string, ViewConfig>;
   cachedColumns?: Record<string, string[]>;
+  loadTableColumns?: BrowseQueryDeps["loadTableColumns"];
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -75,6 +76,7 @@ function harness(options: HarnessOptions = {}) {
     getVisibleColumns: () => state.columns,
     getColumnIndex: (col) => state.columns.indexOf(col),
     getCachedTableColumns: (table) => cachedColumns[table],
+    loadTableColumns: options.loadTableColumns ?? (async () => ["id", "name"]),
     getTableConfig: (table) => configs[table] ?? freshConfig(),
     ensureTableConfig: (table) => (configs[table] ??= freshConfig()),
     updateTableConfig: (table, mutate) => {
@@ -122,7 +124,17 @@ function harness(options: HarnessOptions = {}) {
 }
 
 describe("createBrowseQuery.selectTable", () => {
-  it("hydrates columns, sort and pinned filters, then loads the first chunk", async () => {
+  it("ignores a schema retry that finishes after another selection", async () => {
+    const retry = Promise.withResolvers<string[]>();
+    const h = harness({ cachedColumns: { other: ["id"] }, loadTableColumns: () => retry.promise });
+    const slow = h.query.selectTable("items");
+    await h.query.selectTable("other");
+    retry.resolve(["name"]);
+    await slow;
+    expect(h.queries.map(query => query.table)).toEqual(["other"]);
+  });
+
+  it.each([true, false])("hydrates sort and pinned filters (cached schema: %s)", async (cached) => {
     // Positive control for the whole machine: without it, every "did not
     // publish" assertion below is satisfied by a machine that does nothing.
     const configs = {
@@ -134,7 +146,7 @@ describe("createBrowseQuery.selectTable", () => {
         pinned_global_filter: "x",
       },
     };
-    const h = harness({ configs });
+    const h = harness({ configs, cachedColumns: cached ? { items: ["id", "name"] } : {} });
     await h.query.selectTable("items");
 
     expect(h.state.selectedTable).toBe("items");
@@ -146,7 +158,10 @@ describe("createBrowseQuery.selectTable", () => {
     expect(h.state.totalRows).toBe(2);
     expect(h.state.loading).toBe(false);
     expect(h.queries).toHaveLength(1);
-    expect(h.queries[0]).toMatchObject({ table: "items", offset: 0, sortColumn: "name", sortAsc: false });
+    expect(h.queries[0]).toMatchObject({
+      table: "items", offset: 0, sortColumn: "name", sortAsc: false,
+      filters: [{ column: "name", value: "a", is_regex: false }],
+    });
   });
 
   it("drops a saved sort on a column the table no longer has", async () => {

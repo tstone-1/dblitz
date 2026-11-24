@@ -230,12 +230,16 @@ mod tests {
         let duck = crate::pq::ParquetSession::open(csv.to_str().unwrap()).unwrap();
         let generation = std::sync::atomic::AtomicU64::new(0);
 
-        let cases: [(&str, &str, i64); 12] = [
+        let cases: [(&str, &str, i64); 16] = [
             ("n", "<5", 4),
             ("n", "<=5", 5),
             ("n", ">5", 5),
             ("n", ">=5", 6),
             ("n", ">=3;<=6", 4),
+            ("n", "=1.4", 0),
+            ("n", ">1.6", 9),
+            ("n", "<=1.6", 1),
+            ("n", ">16e-1", 9),
             ("n", "=5", 1),
             ("n", "=5;=7", 2),
             ("n", "1", 2),

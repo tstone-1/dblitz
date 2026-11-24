@@ -248,7 +248,12 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
     // values instead - see `UntypedColumns`.
     let declared: Vec<String> = stmt
         .columns()
-        .map(|c| c.decl_type().unwrap_or("").to_string())
+        .map(|c| {
+            c.decl_type()
+                .filter(|t| !t.eq_ignore_ascii_case("ANY"))
+                .unwrap_or("")
+                .to_string()
+        })
         .collect();
     let mut untyped = UntypedColumns::new(&declared);
     let column_types = |untyped: &UntypedColumns| untyped.column_types(&declared);

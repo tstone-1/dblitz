@@ -8,7 +8,9 @@ person, company or record is represented.
 """
 
 import argparse
+import errno
 import os
+import shutil
 import random
 import sqlite3
 from contextlib import closing
@@ -125,6 +127,26 @@ def build(con: sqlite3.Connection, rng: random.Random) -> None:
     con.executemany("INSERT INTO order_items VALUES (?,?,?,?)", items)
 
 
+def publish_new(source: Path, destination: Path) -> None:
+    if os.name == "nt":
+        # Windows rename is atomic and refuses an existing destination.
+        os.rename(source, destination)
+        return
+    try:
+        os.link(source, destination)
+    except OSError as error:
+        if error.errno not in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EPERM, errno.ENOSYS):
+            raise
+        with source.open("rb") as src, destination.open("xb") as dst:
+            try:
+                shutil.copyfileobj(src, dst)
+                dst.flush()
+            except OSError:
+                dst.close()
+                destination.unlink()
+                raise
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("output", nargs="?", type=Path, default=Path("demo/roastery.sqlite"))
@@ -146,7 +168,7 @@ def main() -> None:
             os.replace(generated, out)
         else:
             # Another process can create the destination while we build.
-            os.link(generated, out)
+            publish_new(generated, out)
     print(f"[OK] wrote {out} ({out.stat().st_size // 1024} KiB)")
 
 
