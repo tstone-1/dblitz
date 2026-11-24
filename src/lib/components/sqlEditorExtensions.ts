@@ -39,7 +39,7 @@ import {
 import { tags } from "@lezer/highlight";
 import type { SqlCheck } from "#lib/ipc.ts";
 import { sqlCompletionSource, type SqlSchema } from "./sqlCompletion";
-import { runnableRange, sqlLinter, type CheckReport, type RunnableRange } from "./sqlLint";
+import { editorEngine, recheck, runnableRange, sqlLinter, type CheckReport, type RunnableRange } from "./sqlLint";
 
 /** Editor theme. Colors come from the app's CSS variables, so the only thing
  *  this needs to know is whether CodeMirror should treat itself as dark. */
@@ -173,7 +173,7 @@ export const activeStatementHighlight = ViewPlugin.fromClass(
       this.decorations = activeStatementDecorations(view);
     }
     update(update: ViewUpdate) {
-      if (update.docChanged || update.selectionSet) {
+      if (update.docChanged || update.selectionSet || update.transactions.some(tr => tr.effects.some(e => e.is(recheck)))) {
         this.decorations = activeStatementDecorations(update.view);
       }
     }
@@ -211,6 +211,7 @@ export interface EditorExtensionOptions {
  */
 export function buildEditorExtensions(o: EditorExtensionOptions): Extension[] {
   return [
+    editorEngine.of(() => o.getSchema().engine),
     executeKeymap(o.onexecute),
     baseKeymap(),
     history(),
@@ -232,7 +233,7 @@ export function buildEditorExtensions(o: EditorExtensionOptions): Extension[] {
     EditorView.lineWrapping,
     EditorView.updateListener.of((update) => {
       if (update.docChanged) o.onDocChanged(update.state.doc.toString());
-      if (update.docChanged || update.selectionSet) o.onRunnableChanged(runnableRange(update.state));
+      if (update.docChanged || update.selectionSet || update.transactions.some(tr => tr.effects.some(e => e.is(recheck)))) o.onRunnableChanged(runnableRange(update.state));
     }),
   ];
 }

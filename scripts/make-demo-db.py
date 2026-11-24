@@ -10,7 +10,8 @@ person, company or record is represented.
 import argparse
 import errno
 import os
-import shutil
+import ctypes
+import sys
 import random
 import sqlite3
 from contextlib import closing
@@ -137,14 +138,19 @@ def publish_new(source: Path, destination: Path) -> None:
     except OSError as error:
         if error.errno not in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EPERM, errno.ENOSYS):
             raise
-        with source.open("rb") as src, destination.open("xb") as dst:
-            try:
-                shutil.copyfileobj(src, dst)
-                dst.flush()
-            except OSError:
-                dst.close()
-                destination.unlink()
-                raise
+        # Some filesystems support exclusive rename but not hard links.
+        # A copy into destination would expose a partial database to readers.
+        libc = ctypes.CDLL(None, use_errno=True)
+        src, dst = os.fsencode(source), os.fsencode(destination)
+        if sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+            result = libc.renameat2(-100, src, -100, dst, 1)  # AT_FDCWD, RENAME_NOREPLACE
+        elif sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+            result = libc.renamex_np(src, dst, 4)  # RENAME_EXCL
+        else:
+            raise OSError(errno.ENOTSUP, "Filesystem has no safe exclusive publication method", destination) from error
+        if result != 0:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code), destination)
 
 
 def main() -> None:

@@ -405,3 +405,33 @@ describe("run blocks take runner values from the environment", () => {
     expect(blocks).toContain('gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"');
   });
 });
+
+it("keeps an older release retry from replacing a newer Homebrew cask", () => {
+  const workflow = readText(".github/workflows/release.yml");
+  const script = workflow.match(/python3 - "\$VERSION" "\$ARM_SHA" "\$INTEL_SHA" <<'PY'\n([\s\S]+?)\n {10}PY\n/)?.[1];
+  expect(script).toBeDefined();
+  const source = script!.replace(/^ {10}/gm, "");
+  const dir = mkdtempSync(join(tmpdir(), "dblitz-cask-"));
+  try {
+    mkdirSync(join(dir, "Casks"));
+    const path = join(dir, "Casks", "dblitz.rb");
+    const original = '  version "26.11.10"\n  sha256 arm:   "' + "0".repeat(64)
+      + '",\n         intel: "' + "1".repeat(64) + '"\n';
+    for (const version of ["26.11.9", "26.11.10", "26.12.0"]) {
+      writeFileSync(path, original);
+      const python = process.platform === "win32" ? "python" : "python3";
+      const run = spawnSync(python, ["-", version, "2".repeat(64), "3".repeat(64)], {
+        cwd: dir, input: source, encoding: "utf8",
+      });
+      expect(run.status, run.stderr).toBe(0);
+      const cask = readFileSync(path, "utf8");
+      if (version === "26.11.9") expect(cask).toBe(original);
+      else {
+        expect(cask).toContain('  version "' + version + '"');
+        expect(cask).toContain("2".repeat(64));
+      }
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

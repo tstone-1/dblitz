@@ -91,12 +91,19 @@ export function unquoteIdent(token: string): string {
  * must tell a literal from whitespace: trimming a statement with literals
  * masked as spaces cut `WHERE name = 'x'` down to `WHERE name =`.
  */
-export function maskLiteralsAndComments(text: string, literalFill = " ", maskIdentifiers = false): string {
+export function maskLiteralsAndComments(text: string, literalFill = " ", maskIdentifiers = false, engine: SqlEngine = "sqlite"): string {
   let out = "";
   let i = 0;
   while (i < text.length) {
     const c = text[i];
-    if (c === "'" || (maskIdentifiers && ['"', '`', '['].includes(c))) {
+    const dollar = engine === "duckdb" && c === "$" && !/[\w$]/.test(text[i - 1] ?? "")
+      ? /^\$(?:[a-zA-Z_][\w]*)?\$/.exec(text.slice(i))?.[0] : undefined;
+    if (dollar) {
+      const close = text.indexOf(dollar, i + dollar.length);
+      const end = close < 0 ? text.length : close + dollar.length;
+      out += text.slice(i, end).replace(/[^\n]/g, literalFill);
+      i = end;
+    } else if (c === "'" || (maskIdentifiers && (c === '"' || (engine === "sqlite" && (c === '`' || c === "["))))) {
       const endQuote = c === "[" ? "]" : c;
       let j = i + 1;
       while (j < text.length) {
@@ -127,8 +134,8 @@ export function maskLiteralsAndComments(text: string, literalFill = " ", maskIde
 
 /** The statement around `pos`: between the nearest `;` on either side that is
  *  not inside a literal or comment. */
-export function statementBounds(text: string, pos: number): { from: number; to: number } {
-  const masked = maskLiteralsAndComments(text, "x", true);
+export function statementBounds(text: string, pos: number, engine: SqlEngine = "sqlite"): { from: number; to: number } {
+  const masked = maskLiteralsAndComments(text, "x", true, engine);
   const before = masked.lastIndexOf(";", pos - 1);
   const after = masked.indexOf(";", pos);
   return { from: before + 1, to: after === -1 ? text.length : after };
@@ -136,8 +143,8 @@ export function statementBounds(text: string, pos: number): { from: number; to: 
 
 /** Every statement in `text` that holds more than whitespace and comments, as
  *  ranges without the `;` and without surrounding whitespace or comments. */
-export function statementRanges(text: string): { from: number; to: number }[] {
-  const masked = maskLiteralsAndComments(text, "x", true);
+export function statementRanges(text: string, engine: SqlEngine = "sqlite"): { from: number; to: number }[] {
+  const masked = maskLiteralsAndComments(text, "x", true, engine);
   const out: { from: number; to: number }[] = [];
   let start = 0;
   for (let i = 0; i <= masked.length; i++) {
@@ -162,8 +169,8 @@ export function statementRanges(text: string): { from: number; to: number }[] {
  * `SELECT 1;` leaves the cursor after the `;`), otherwise the next one, and
  * after the last statement the last one.
  */
-export function statementAtCursor(text: string, pos: number): { from: number; to: number } | null {
-  const ranges = statementRanges(text);
+export function statementAtCursor(text: string, pos: number, engine: SqlEngine = "sqlite"): { from: number; to: number } | null {
+  const ranges = statementRanges(text, engine);
   if (ranges.length <= 1) return null;
   const inside = ranges.find((r) => r.from <= pos && pos <= r.to);
   if (inside) return inside;
@@ -385,7 +392,7 @@ export function sqlCompletionSource(getSchema: () => SqlSchema) {
 
     const schema = getSchema();
     const doc = ctx.state.doc.toString();
-    const bounds = statementBounds(doc, ctx.pos);
+    const bounds = statementBounds(doc, ctx.pos, schema.engine);
     const statement = doc.slice(bounds.from, bounds.to);
     const before = doc.slice(bounds.from, ctx.pos);
 

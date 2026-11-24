@@ -15,9 +15,9 @@ import type { PinState } from "./pinLabel";
 export interface PinnedFiltersDeps {
   /** Currently selected table name (or null if none). */
   getSelectedTable: () => string | null;
-  /** Live ephemeral column filter map. Mutated in-place by revert/clear. */
+  /** Current ephemeral column filters. */
   getColumnFilters: () => Record<string, ColumnFilterValue>;
-  /** Wholesale replace the column filter map (used by reset / clear-all). */
+  /** Replace the column filter map, including when a column name shadows a prototype property. */
   setColumnFilters: (cf: Record<string, ColumnFilterValue>) => void;
   /** Live global filter value. */
   getGlobalFilter: () => string;
@@ -39,9 +39,11 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
   function pinStateOf(col: string): PinState {
     const selectedTable = deps.getSelectedTable();
     if (!selectedTable) return "none";
-    const pinned = deps.getConfig(selectedTable).pinned_filters[col];
+    const saved = deps.getConfig(selectedTable).pinned_filters;
+    const pinned = Object.hasOwn(saved, col) ? saved[col] : undefined;
     if (!pinned) return "none";
-    const live = deps.getColumnFilters()[col];
+    const filters = deps.getColumnFilters();
+    const live = Object.hasOwn(filters, col) ? filters[col] : undefined;
     const liveVal = live?.value ?? "";
     const liveRx = live?.is_regex ?? false;
     if (liveVal === pinned.value && liveRx === pinned.is_regex) return "pinned";
@@ -51,7 +53,7 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
   // Map of column → pin state for columns that have a pinned filter.
   // Consumers default to "none" for missing keys via `pinStates?.[col] ?? "none"`.
   const pinStates = $derived.by<Record<string, PinState>>(() => {
-    const out: Record<string, PinState> = {};
+    const out: Record<string, PinState> = Object.create(null);
     const selectedTable = deps.getSelectedTable();
     if (!selectedTable) return out;
     const pinned = deps.getConfig(selectedTable).pinned_filters;
@@ -72,17 +74,18 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
   function pinColumnFilter(col: string) {
     const selectedTable = deps.getSelectedTable();
     if (!selectedTable) return;
-    const f = deps.getColumnFilters()[col];
+    const filters = deps.getColumnFilters();
+    const f = Object.hasOwn(filters, col) ? filters[col] : undefined;
     if (!f || f.value.trim() === "") return; // no-op for empty input
     deps.updateConfig(selectedTable, (cfg) => {
-      cfg.pinned_filters[col] = { value: f.value, is_regex: f.is_regex };
+      cfg.pinned_filters = { ...cfg.pinned_filters, [col]: { value: f.value, is_regex: f.is_regex } };
     });
   }
 
   function unpinColumnFilter(col: string) {
     const selectedTable = deps.getSelectedTable();
     if (!selectedTable) return;
-    if (!(col in deps.getConfig(selectedTable).pinned_filters)) return;
+    if (!Object.hasOwn(deps.getConfig(selectedTable).pinned_filters, col)) return;
     deps.updateConfig(selectedTable, (cfg) => {
       delete cfg.pinned_filters[col];
     });
@@ -91,17 +94,18 @@ export function createPinnedFilters(deps: PinnedFiltersDeps) {
   function revertColumnFilter(col: string) {
     const selectedTable = deps.getSelectedTable();
     if (!selectedTable) return;
-    const pinned = deps.getConfig(selectedTable).pinned_filters[col];
+    const saved = deps.getConfig(selectedTable).pinned_filters;
+    const pinned = Object.hasOwn(saved, col) ? saved[col] : undefined;
     if (!pinned) return;
     const cf = deps.getColumnFilters();
-    cf[col] = { value: pinned.value, is_regex: pinned.is_regex };
+    deps.setColumnFilters({ ...cf, [col]: { value: pinned.value, is_regex: pinned.is_regex } });
     deps.triggerReload();
   }
 
   function clearColumnFilter(col: string) {
     const cf = deps.getColumnFilters();
-    if (cf[col]) {
-      cf[col] = { value: "", is_regex: cf[col].is_regex };
+    if (Object.hasOwn(cf, col)) {
+      deps.setColumnFilters({ ...cf, [col]: { value: "", is_regex: cf[col].is_regex } });
       deps.triggerReload();
     }
   }

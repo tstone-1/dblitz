@@ -10,6 +10,7 @@
 # Binaries: never inspected for text, never converted. These are the only
 # binary extensions the tree actually carries (icons and bundle artwork, and
 # the smoke test's Parquet fixture).
+*.gif binary
 *.png binary
 *.ico binary
 *.icns binary

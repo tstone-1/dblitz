@@ -126,7 +126,7 @@ export function createBrowseQuery(deps: BrowseQueryDeps) {
     // strip bare half-typed operator segments (">" with no operand) from
     // non-regex values so a reload triggered by a discrete action (a sort
     // click) queries with the still-valid segments instead of a broken filter.
-    const cleaned: Record<string, ColumnFilterValue> = {};
+    const cleaned: Record<string, ColumnFilterValue> = Object.create(null);
     for (const [col, f] of Object.entries(deps.getColumnFilters())) {
       cleaned[col] = f.is_regex
         ? f

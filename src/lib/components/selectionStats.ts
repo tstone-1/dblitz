@@ -35,6 +35,20 @@ interface BuildSelectionStatsOptions {
 
 export const DEFAULT_MAX_STATS_ROWS = 100_000;
 
+// Sum decimal strings in whole units of their smallest decimal place. A
+// scaled integer outside the safe range makes the aggregate unavailable.
+function decimalUnits(value: string, number: number): [number, number] {
+  if (!/[.eE]/.test(value)) return [number, 0];
+  const match = /^([+-]?)([0-9]*)\.?([0-9]*)(?:e([+-]?\d+))?$/i.exec(value.trim());
+  if (!match) return [number, 0];
+  const digits = match[2] + match[3];
+  const significant = digits.replace(/0+$/, "");
+  if (!significant) return [0, 0];
+  const scale = match[3].length - Number(match[4] ?? 0) - (digits.length - significant.length);
+  const units = Number(match[1] + significant);
+  return scale <= 0 ? [number, 0] : [units, scale];
+}
+
 export function buildSelectionStats({
   selection,
   getRow,
@@ -75,6 +89,8 @@ export function buildSelectionStats({
   const capped = capRow < selection.r1;
   let allNumeric = true;
   let sum = 0;
+  let sumUnits = 0;
+  let sumScale = 0;
   let precisionLimited = false;
   let min = Infinity;
   let max = -Infinity;
@@ -124,16 +140,21 @@ export function buildSelectionStats({
         break;
       }
 
-      const nextSum = sum + numberValue;
-      if (!Number.isFinite(nextSum)
-        || (Number.isInteger(numberValue) && !Number.isSafeInteger(numberValue))
-        || (Number.isInteger(nextSum) && !Number.isSafeInteger(nextSum))) {
+      const [units, scale] = decimalUnits(value, numberValue);
+      const nextScale = Math.max(sumScale, scale);
+      const left = sumUnits * 10 ** (nextScale - sumScale);
+      const right = units * 10 ** (nextScale - scale);
+      const nextUnits = left + right;
+      if (!Number.isSafeInteger(left) || !Number.isSafeInteger(right)
+        || !Number.isSafeInteger(nextUnits) || nextScale > 308) {
         precisionLimited = true;
         allNumeric = false;
         numericStopped = true;
         break;
       }
-      sum = nextSum;
+      sumScale = nextScale;
+      sumUnits = nextUnits;
+      sum = sumUnits / 10 ** sumScale;
       if (numberValue < min) min = numberValue;
       if (numberValue > max) max = numberValue;
       count++;

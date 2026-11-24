@@ -13,7 +13,8 @@
 //!   the empty string and a BLOB still never matches.
 
 use crate::db::{
-    contains_pattern, parse_criteria, push_column_criteria, ColumnFilter, ColumnInfo, Criterion,
+    contains_pattern, discrete_operator, parse_criteria, push_column_criteria, scaled_parts,
+    ColumnFilter, ColumnInfo, Criterion,
 };
 
 use super::{quote_ident, sql_literal, text_expr};
@@ -51,6 +52,56 @@ fn comparison(
     let Some(t) = cast_target(col_type) else {
         return (format!("{text} {op} ?"), Some(input.into()));
     };
+    if let Some((precision, scale)) = t
+        .strip_prefix("DECIMAL(")
+        .and_then(|s| s.strip_suffix(')'))
+        .and_then(|s| s.split_once(','))
+        .and_then(|(p, s)| {
+            Some((
+                p.trim().parse::<usize>().ok()?,
+                s.trim().parse::<u8>().ok()?,
+            ))
+        })
+        .filter(|(p, s)| *p <= 38 && usize::from(*s) <= *p)
+    {
+        if let Some((whole, fractional, negative)) = scaled_parts(input, scale) {
+            let Some(op) = discrete_operator(op, fractional, negative) else {
+                return ("false".into(), None);
+            };
+            let digits = whole.trim_start_matches('-');
+            if digits.len() > precision {
+                let matches = if negative {
+                    op.starts_with('>')
+                } else {
+                    op.starts_with('<')
+                };
+                return (
+                    if matches {
+                        format!("{q} IS NOT NULL")
+                    } else {
+                        "false".into()
+                    },
+                    None,
+                );
+            }
+            // An on-grid bound already casts exactly. Otherwise bind its nearest
+            // grid point toward zero and use the operator appropriate to its side.
+            let bound = if !fractional {
+                input.to_owned()
+            } else {
+                let scale = usize::from(scale);
+                let padded = format!("{digits:0>width$}", width = scale + 1);
+                let (left, right) = padded.split_at(padded.len() - scale);
+                let sign = if negative { "-" } else { "" };
+                if right.is_empty() {
+                    format!("{sign}{left}")
+                } else {
+                    format!("{sign}{left}.{right}")
+                }
+            };
+            return (format!("{q} {op} CAST(? AS {t})"), Some(bound));
+        }
+    }
     let integral = matches!(
         t,
         "TINYINT"
@@ -65,16 +116,9 @@ fn comparison(
             | "UHUGEINT"
     );
     if integral && input.contains(['.', 'e', 'E']) {
-        if let Some((whole, fractional, negative)) = integer_parts(input) {
-            if fractional && op == "=" {
+        if let Some((whole, fractional, negative)) = scaled_parts(input, 0) {
+            let Some(op) = discrete_operator(op, fractional, negative) else {
                 return ("false".into(), None);
-            }
-            let op = match (fractional, op, negative) {
-                (false, _, _) => op,
-                (true, "<" | "<=", false) => "<=",
-                (true, ">" | ">=", false) => ">",
-                (true, "<" | "<=", true) => "<",
-                _ => ">=",
             };
             // Keep common bounds on a native integer comparison. Mixing UHUGEINT
             // with a signed bound can otherwise promote the pair to DOUBLE.
@@ -87,41 +131,6 @@ fn comparison(
         }
     }
     (format!("{q} {op} CAST(? AS {t})"), Some(input.into()))
-}
-
-/// Split an exact decimal spelling, including scientific notation. Past 39
-/// whole digits only the sign matters for comparisons to a fixed-width integer.
-fn integer_parts(input: &str) -> Option<(String, bool, bool)> {
-    let value = input.trim();
-    let negative = value.starts_with('-');
-    let unsigned = value.strip_prefix(['-', '+']).unwrap_or(value);
-    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
-        Some((m, e)) => (m, e.parse::<i32>().ok()?),
-        None => (unsigned, 0),
-    };
-    let (whole, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    let digits = format!("{whole}{frac}");
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let point = whole.len() as i64 + i64::from(exponent);
-    let split = point.clamp(0, digits.len() as i64) as usize;
-    let fractional = digits[split..].bytes().any(|b| b != b'0');
-    let leading = digits[..split].trim_start_matches('0');
-    let mut integer = if leading.is_empty() {
-        "0".to_owned()
-    } else {
-        let zeros = (point - split as i64).max(0) as usize;
-        if leading.len() + zeros > 39 {
-            "1".to_owned() + &"0".repeat(39)
-        } else {
-            leading.to_owned() + &"0".repeat(zeros)
-        }
-    };
-    if negative && integer != "0" {
-        integer.insert(0, '-');
-    }
-    Some((integer, fractional, negative))
 }
 
 pub(crate) fn build_where(
@@ -264,6 +273,48 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
             assert_eq!(rows, expected, "{operand}");
+        }
+    }
+
+    #[test]
+    fn decimal_comparisons_preserve_thresholds_between_stored_values() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        for (ty, a, b, operand, expected) in [
+            ("DECIMAL(8,2)", "1.23", "1.24", "=1.234", vec![]),
+            ("DECIMAL(8,2)", "1.23", "1.24", "<1.234", vec![1]),
+            ("DECIMAL(8,2)", "1.23", "1.24", "=1.23", vec![1]),
+            ("DECIMAL(8,2)", "-1.24", "-1.23", ">-1.234", vec![2]),
+            (
+                "DECIMAL(38,2)",
+                "900719925474099312345678901234567890.12",
+                "900719925474099312345678901234567890.13",
+                "<900719925474099312345678901234567890.125",
+                vec![1],
+            ),
+        ] {
+            let pred = build_where(&[col("n", ty)], &[f("n", operand)], "").unwrap();
+            let source = format!(
+                " FROM (VALUES (1,'{a}'::{ty}),(2,'{b}'::{ty})) t(id,n) {}",
+                pred.clause
+            );
+            let ids = conn
+                .prepare(&format!("SELECT id{source} ORDER BY id"))
+                .unwrap()
+                .query_map(duckdb::params_from_iter(&pred.params), |r| {
+                    r.get::<_, i32>(0)
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let count: i64 = conn
+                .query_row(
+                    &format!("SELECT count(*){source}"),
+                    duckdb::params_from_iter(&pred.params),
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(ids, expected, "{operand}");
+            assert_eq!(count, expected.len() as i64);
         }
     }
 

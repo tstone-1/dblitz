@@ -124,7 +124,13 @@
   }: Props = $props();
 
   function pinStateOf(col: string): PinState {
-    return pinning?.pinStates?.[col] ?? "none";
+    const states = pinning?.pinStates;
+    return states && Object.hasOwn(states, col) ? states[col] : "none";
+  }
+
+  function filterFor(col: string) {
+    const filters = filtering?.columnFilters;
+    return filters && Object.hasOwn(filters, col) ? filters[col] : undefined;
   }
 
   // A pasted multi-line list becomes a regex matching any of its lines; see
@@ -134,7 +140,7 @@
     if (!onSetFilter) return;
     const input = e.currentTarget as HTMLInputElement;
     const next = filterAfterListPaste(
-      filtering?.columnFilters?.[col],
+      filterFor(col),
       input.selectionStart,
       input.selectionEnd,
       e.clipboardData?.getData("text/plain") ?? "",
@@ -240,7 +246,7 @@
 
   function onResizeMove(e: MouseEvent) {
     if (!resizeCol) return;
-    columnWidths[resizeCol] = Math.max(50, resizeStartW + (e.clientX - resizeStartX));
+    columnWidths = { ...columnWidths, [resizeCol]: Math.max(50, resizeStartW + (e.clientX - resizeStartX)) };
     syncGridTplToDOM();
   }
 
@@ -326,7 +332,9 @@
 
   // Context menu
   let ctxMenu = $state<{ x: number; y: number } | null>(null);
-  let materializingSelection = $state(false);
+  let copying = $state(false);
+  let exporting = $state(false);
+  let materializingSelection = $derived(copying || exporting);
 
   function handleContextMenu(e: MouseEvent, rowIdx: number) {
     const pos = selection.handleContextMenu(e, rowIdx);
@@ -353,11 +361,13 @@
     return !disposed && viewIdentity() === source && columns === headers ? data : null;
   }
 
+  let copyRequest = 0;
   async function copySelection(withHeaders: boolean) {
-    materializingSelection = true;
+    const request = ++copyRequest;
+    copying = true;
     try {
       const data = await materializeSelection();
-      if (!data) return;
+      if (!data || request !== copyRequest) return;
       // Serialization is delegated because it is not a join: a cell holding a
       // tab or a newline used to become extra spreadsheet columns or rows while
       // the copy reported success. See clipboardTable.ts.
@@ -365,20 +375,21 @@
         serializeClipboardTable(withHeaders ? data.headers : null, data.rows),
         navigator.clipboard,
       );
+      if (request !== copyRequest) return;
       if (data.truncated) {
         onNotice?.(`Selection copied with the first ${data.rows.length.toLocaleString()} selected row(s) only.`);
       }
       ctxMenu = null;
     } catch (e) {
-      onError?.(String(e));
+      if (request === copyRequest) onError?.(String(e));
     } finally {
-      materializingSelection = false;
+      if (request === copyRequest) copying = false;
     }
   }
 
   async function exportSelection() {
     if (!onExport) return;
-    materializingSelection = true;
+    exporting = true;
     try {
       const data = await materializeSelection();
       if (!data) return;
@@ -390,7 +401,7 @@
     } catch (e) {
       onError?.(String(e));
     } finally {
-      materializingSelection = false;
+      exporting = false;
     }
   }
 
@@ -732,7 +743,7 @@
             tabindex={onSort ? 0 : -1}
             aria-sort={sortColumn === col ? (sortAsc ? 'ascending' : 'descending') : 'none'}
             class:sortable={onSort != null}
-            class:has-active-filter={(filtering?.columnFilters?.[col]?.value ?? '').trim() !== ''}
+            class:has-active-filter={(filterFor(col)?.value ?? '').trim() !== ''}
             class:crosshair={selection.colSelected(colIdx)}
             class:drag-over-header={reorder.reorderOverCol === col && reorder.reorderCol !== col}
             class:dragging={reorder.reorderCol === col}
@@ -756,7 +767,7 @@
         <div class="grid-row filter-row" role="row" tabindex="-1">
           <div class="grid-cell row-num-header" role="gridcell" tabindex="-1"></div>
           {#each columns as col}
-            {@const f = filtering?.columnFilters?.[col]}
+            {@const f = filterFor(col)}
             {@const ps = pinStateOf(col)}
             <div class="grid-cell filter-cell" role="gridcell" tabindex="-1" data-pin-state={ps}>
               <input

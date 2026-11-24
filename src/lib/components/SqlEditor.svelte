@@ -105,7 +105,7 @@
     schema = {
       columns: appState.tableColumns,
       types: appState.tableColumnTypes,
-      engine: appState.sqlEngine,
+      engine: appState.sqlEngine ?? "sqlite",
     };
     void appState.dbOpenGeneration;
     if (view) requestRecheck(view);

@@ -129,3 +129,25 @@ it("drops an export if the table changes while selected rows load", async () => 
   await vi.waitFor(() => expect(button.disabled).toBe(false));
   expect(onExport).not.toHaveBeenCalled();
 });
+
+it("keeps the last Ctrl+C on the clipboard", async () => {
+  const first = Promise.withResolvers<string[][]>();
+  const rows = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValueOnce([["alpha", "1"]]);
+  renderGrid(rows);
+  const writeText = vi.fn(async (_text: string) => {});
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  const cells = target.querySelectorAll(".data-cell");
+  function copy(index: number) {
+    cells[index].dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true }));
+    window.dispatchEvent(new MouseEvent("mouseup", { button: 0, bubbles: true }));
+    flushSync();
+    window.dispatchEvent(new KeyboardEvent("keydown", { ctrlKey: true, key: "c" }));
+  }
+
+  copy(0);
+  copy(1);
+  await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith("1"));
+  first.resolve([["alpha", "1"]]);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(writeText).toHaveBeenCalledTimes(1);
+});

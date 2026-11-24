@@ -255,3 +255,10 @@ it.each(['"gross;net"', '"gross"";net"', '[gross;net]', '`gross;net`'])(
     expect(statementAtCursor(sql, sql.length)).toEqual({ from: first.length + 2, to: sql.length });
   },
 );
+
+it.each(["SELECT [']'] AS v", "SELECT $$one;two$$", "SELECT $tag$one;two$tag$"])(
+  "keeps both DuckDB statements intact after %s", first => {
+    const sql = first + "; SELECT 2";
+    expect(statementRanges(sql, "duckdb").map(r => sql.slice(r.from,r.to))).toEqual([first, "SELECT 2"]);
+  },
+);

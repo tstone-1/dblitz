@@ -314,9 +314,18 @@ describe("buildSelectionStats", () => {
 it.each([
   ["9007199254740993", "-9007199254740992"],
   ["9007199254740991", "2"],
+  ["4503599627370496.25", "-4503599627370496"],
 ])("withholds rounded totals for %s and %s", (a, b) => {
   const stats = buildSelectionStats({
     selection: { r0: 0, r1: 0, c0: 0, c1: 1 }, getRow: () => [a, b],
   });
   expect(stats).toMatchObject({ sum: null, avg: null, precisionLimited: true });
+});
+
+it("sums ordinary decimals without rounding the running total", () => {
+  const stats = buildSelectionStats({
+    selection: { r0: 0, r1: 0, c0: 0, c1: 2 },
+    getRow: () => ["1.25", "-1", "0.05"],
+  });
+  expect(stats?.sum).toBe(0.3);
 });

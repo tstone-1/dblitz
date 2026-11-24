@@ -129,8 +129,15 @@ describe("UpdateState.check", () => {
 });
 
 describe("UpdateState.installAndRestart", () => {
-  it("reports download progress and relaunches", async () => {
+  async function installedState() {
     const state = new UpdateState();
+    statusMock.mockResolvedValue({ previousVersion: null, currentVersion: "26.7.0", updated: false, selfUpdateSupported: true });
+    await state.loadStatus();
+    return state;
+  }
+
+  it("reports download progress and relaunches", async () => {
+    const state = await installedState();
     const seen: UpdatePhase[] = [];
     const download = vi.fn(async (onEvent: (event: DownloadEvent) => void) => {
       onEvent({ kind: "progress", downloaded: 0, total: 100 });
@@ -155,7 +162,7 @@ describe("UpdateState.installAndRestart", () => {
     // The whole point of the separate event kind: downloadAndInstall installs
     // before it resolves, so a phase flipped after the promise settles would be
     // shown once the install is already over.
-    const state = new UpdateState();
+    const state = await installedState();
     const seen: UpdatePhase[] = [];
     let relaunchedDuringInstall = false;
     const download = vi.fn(async (onEvent: (event: DownloadEvent) => void) => {
@@ -186,7 +193,7 @@ describe("UpdateState.installAndRestart", () => {
       onEvent({ kind: "progress", downloaded: 10, total: null });
     });
     checkMock.mockResolvedValue(pending("26.8.0", download));
-    const state = new UpdateState();
+    const state = await installedState();
     await state.check("manual");
 
     await state.installAndRestart();
@@ -200,7 +207,7 @@ describe("UpdateState.installAndRestart", () => {
     // retrying the same download can fix.
     const download = vi.fn().mockRejectedValue(new Error("Permission denied"));
     checkMock.mockResolvedValue(pending("26.8.0", download));
-    const state = new UpdateState();
+    const state = await installedState();
     await state.check("manual");
 
     await state.installAndRestart();
@@ -320,16 +327,23 @@ describe("UpdateState.loadStatus", () => {
     expect(state.showUpdatedNotice).toBe(false);
   });
 
-  it("leaves the version blank but stays optimistic when the call fails", async () => {
-    statusMock.mockRejectedValue(new Error("no runtime"));
+  it("keeps manual download available while install provenance is unknown", async () => {
+    const status = Promise.withResolvers<Awaited<ReturnType<typeof updateStatus>>>();
+    statusMock.mockReturnValue(status.promise);
     const state = new UpdateState();
-
-    await state.loadStatus();
+    const loading = state.loadStatus();
+    const download = vi.fn();
+    checkMock.mockResolvedValue(pending("26.8.0", download));
+    await state.check("manual");
+    expect(state.canInstall).toBe(false);
+    status.reject(new Error("no runtime"));
+    await loading;
 
     expect(state.currentVersion).toBeNull();
     expect(state.justUpdated).toBe(false);
-    // A failed status read must not disable a working updater on macOS/Windows.
-    expect(state.canInstall).toBe(true);
+    expect(state.canInstall).toBe(false);
+    await state.installAndRestart();
+    expect(download).not.toHaveBeenCalled();
   });
 
   it("lets the post-update notice be dismissed", async () => {

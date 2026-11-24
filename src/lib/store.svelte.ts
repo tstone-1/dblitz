@@ -69,7 +69,7 @@ export const appState = $state({
   tableColumns: {} as Record<string, string[]>, // table name -> column names for autocomplete
   tableColumnTypes: {} as Record<string, Record<string, string>>, // table -> col -> declared type (for xlsx export)
   // Which engine answers the SQL tab; picks the editor's function list.
-  sqlEngine: "sqlite" as SqlEngine,
+  sqlEngine: null as SqlEngine | null,
   fileConfig: { tables: {}, tint: null, label: null } as FileConfig,
   sqlHistory: loadSqlHistory(),
   theme: loadTheme(),
@@ -115,20 +115,18 @@ async function runOpenDatabase(path: string, request: number) {
     }
     // Fetch column names for all tables (for SQL autocomplete + as a
     // schema source for filter validation before the first query result).
-    const colMap: Record<string, string[]> = {};
-    const typeMap: Record<string, Record<string, string>> = {};
+    const colMap: Record<string, string[]> = Object.create(null);
+    const typeMap: Record<string, Record<string, string>> = Object.create(null);
     await Promise.all(tables.map(async (t) => {
       try {
         const cols = await getColumns(t.name);
         colMap[t.name] = cols.map((c) => c.name);
-        const tmap: Record<string, string> = {};
+        const tmap: Record<string, string> = Object.create(null);
         for (const c of cols) tmap[c.name] = c.col_type;
         typeMap[t.name] = tmap;
       } catch { /* best-effort: autocomplete works without columns */ }
     }));
-    // Best-effort like the columns above: a failure leaves the SQLite
-    // function list in the editor, which costs suggestions, not correctness.
-    const engine: SqlEngine = (await sqlEngineCmd().catch(() => null)) ?? "sqlite";
+    const engine = await sqlEngineCmd().catch(() => null);
     // Single synchronous publish - auto-select effect sees consistent state.
     // Order matters: `appState.tables = tables` MUST be last because it's
     // the trigger for the auto-select effect in BrowseData. By the time the
@@ -310,7 +308,7 @@ export function getTableConfig(tableName: string): ViewConfig {
  * fields before publishing.
  */
 function commitTableConfig(tableName: string, cfg: ViewConfig) {
-  appState.fileConfig.tables[tableName] = { ...cfg };
+  appState.fileConfig.tables = { ...appState.fileConfig.tables, [tableName]: { ...cfg } };
 }
 
 /**
@@ -339,7 +337,7 @@ export function updateTableConfig(
  */
 export function ensureTableConfig(tableName: string): ViewConfig {
   if (!Object.hasOwn(appState.fileConfig.tables, tableName)) {
-    appState.fileConfig.tables[tableName] = freshViewConfig();
+    appState.fileConfig.tables = { ...appState.fileConfig.tables, [tableName]: freshViewConfig() };
   }
   return appState.fileConfig.tables[tableName];
 }

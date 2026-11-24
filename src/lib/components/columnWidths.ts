@@ -27,7 +27,7 @@ export function computeAutoWidths({
   measurer,
   maxSample = MAX_SAMPLE,
 }: ComputeAutoWidthsOptions): Record<string, number> {
-  const widths: Record<string, number> = {};
+  const widths: Record<string, number> = Object.create(null);
   const rowCount = Math.min(rows.length, maxSample);
 
   for (const column of columns) {

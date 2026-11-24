@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import {
   appState,
+  ensureTableConfig,
   loadSqlHistory,
   loadTheme,
   persistSqlHistory,
@@ -347,4 +348,12 @@ describe("view-config save sequencing", () => {
     // a close would otherwise write that emptiness over real settings.
     expect(saves()).toHaveLength(0);
   });
+});
+
+it("creates owned settings for tables named after object properties", () => {
+  appState.fileConfig.tables = {};
+  for (const key of ["constructor", "__proto__"]) {
+    expect(ensureTableConfig(key).pinned_filters).toEqual({});
+    expect(Object.hasOwn(appState.fileConfig.tables, key)).toBe(true);
+  }
 });

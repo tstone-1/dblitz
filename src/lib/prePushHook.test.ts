@@ -47,7 +47,7 @@ function audit(input: string, destination = remote) {
 }
 
 describe("pre-push public-safe audit", { timeout: 60000 }, () => {
-  let base: string, clean: string, marked: string, fixed: string, zeros: string;
+  let base: string, clean: string, privateReject: string, marked: string, fixed: string, zeros: string;
 
   beforeAll(() => {
     mkdirSync(repo);
@@ -58,6 +58,7 @@ describe("pre-push public-safe audit", { timeout: 60000 }, () => {
       `    '${marker}'`,
       ")",
       "$content = Get-Content -LiteralPath (Join-Path $CheckRepoPath 'publish sample.mjs') -Raw",
+      "if ($content.Trim() -eq 'private checker case') { Write-Output 'private diagnostic sentinel'; exit 1 }",
       "if ($content -match $ForbiddenPatterns[0]) { Write-Output $ForbiddenPatterns[0]; exit 1 }",
       "Write-Output $ForbiddenPatterns[0]",
       "exit 0",
@@ -66,11 +67,22 @@ describe("pre-push public-safe audit", { timeout: 60000 }, () => {
     base = commit("published\n");
     git(["clone", "--quiet", "--bare", "--no-local", ".", remote]);
     clean = commit("ready\n");
+    privateReject = commit("private checker case");
     marked = commit(marker.toLowerCase());
     fixed = commit("cleaned\n");
     zeros = "0".repeat(base.length);
   }, 60000);
   afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+
+  it.skipIf(spawnSync("pwsh", ["-NoProfile", "-Command", "exit 0"]).status !== 0)(
+    "honors an independent private rejection and hides the diagnostic", () => {
+      const run = audit(update("main", privateReject, clean));
+      expect(run.status).toBe(1);
+      expect(run.output).toContain("Private audit of outgoing revisions failed");
+      expect(run.output).not.toContain("private diagnostic sentinel");
+      expect(audit(update("main", clean, base)).status).toBe(0);
+    },
+  );
 
   it("checks a committed mjs blob after it was cleaned in the working tree", () => {
     const run = audit(update("main", marked, base));

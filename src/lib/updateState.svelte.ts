@@ -59,12 +59,10 @@ export class UpdateState {
    */
   justUpdated = $state(false);
   /**
-   * Whether this install can replace itself. Optimistic default: on the two
-   * platforms where it is always true, a failed status call should not disable a
-   * working updater, and the false case (Linux `.deb`/`.rpm`) degrades to the
-   * same manual-download link an install failure would show anyway.
+   * Only a confirmed self-replacing installation may invoke the installer.
+   * Portable executables and system packages use the manual download.
    */
-  selfUpdateSupported = $state(true);
+  selfUpdateSupported = $state(false);
   /** Separately dismissible from an update offer — they can be on screen together. */
   updatedNoticeDismissed = $state(false);
 

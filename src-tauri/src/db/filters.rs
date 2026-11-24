@@ -1,7 +1,7 @@
 use regex::Regex;
 
 use super::types::{ColumnFilter, ColumnInfo};
-use super::util::{quote_ident, render_real};
+use super::util::quote_ident;
 
 #[derive(Debug)]
 pub(super) struct WhereResult {
@@ -31,20 +31,79 @@ fn has_no_affinity(declared: &str) -> bool {
                 .any(|k| t.contains(k)))
 }
 
-/// SQLite compares numeric cells in a column with no affinity against a
-/// numeric literal. Preserve the full signed INTEGER range before trying REAL.
-fn numeric_literal(no_affinity: bool, operand: &str) -> Option<String> {
-    if !no_affinity {
+/// Split an exact decimal spelling, including scientific notation. Past 39
+/// scaled digits only the sign matters for the supported numeric types.
+/// Return the truncated scaled integer, any discarded nonzero fraction and the input sign.
+pub(crate) fn scaled_parts(input: &str, scale: u8) -> Option<(String, bool, bool)> {
+    let value = input.trim();
+    let negative = value.starts_with('-');
+    let unsigned = value.strip_prefix(['-', '+']).unwrap_or(value);
+    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((m, e)) => (m, e.parse::<i32>().ok()?),
+        None => (unsigned, 0),
+    };
+    let (whole, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{whole}{frac}");
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    if let Ok(integer) = operand.parse::<i64>() {
-        return Some(integer.to_string());
+    let point = whole.len() as i64 + i64::from(exponent) + i64::from(scale);
+    let split = point.clamp(0, digits.len() as i64) as usize;
+    let fractional = digits[split..].bytes().any(|b| b != b'0');
+    let leading = digits[..split].trim_start_matches('0');
+    let mut integer = if leading.is_empty() {
+        "0".to_owned()
+    } else {
+        let zeros = (point - split as i64).max(0) as usize;
+        if leading.len() + zeros > 39 {
+            "1".to_owned() + &"0".repeat(39)
+        } else {
+            leading.to_owned() + &"0".repeat(zeros)
+        }
+    };
+    if negative && integer != "0" {
+        integer.insert(0, '-');
     }
-    operand
-        .parse::<f64>()
-        .ok()
-        .filter(|n| n.is_finite())
-        .map(render_real)
+    Some((integer, fractional, negative))
+}
+
+/// Compare a number between two adjacent representable values against its truncation.
+pub(crate) fn discrete_operator(op: &str, fractional: bool, negative: bool) -> Option<&str> {
+    if !fractional {
+        return Some(op);
+    }
+    match (op, negative) {
+        ("=", _) => None,
+        ("<" | "<=", false) => Some("<="),
+        (">" | ">=", false) => Some(">"),
+        ("<" | "<=", true) => Some("<"),
+        _ => Some(">="),
+    }
+}
+
+/// A numeric comparison for a SQLite column without affinity. Text cells
+/// retain the original bound spelling, including any significant spaces.
+fn numeric_comparison(col: &str, op: &str, operand: &str) -> Option<(String, usize)> {
+    let (whole, fractional, negative) = scaled_parts(operand, 0)?;
+    let integer = whole.parse::<i64>().ok();
+    if let (false, Some(n)) = (fractional, integer) {
+        if op == "=" {
+            return Some((format!("({col} = ? OR {col} = {n})"), 1));
+        }
+        return Some((format!("((typeof({col}) IN ('integer', 'real') AND {col} {op} {n}) OR (typeof({col}) = 'text' AND {col} {op} ?))"), 1));
+    }
+    let int_predicate = match (discrete_operator(op, fractional, negative), integer) {
+        (Some(op), Some(n)) => format!("{col} {op} {n}"),
+        (Some(op), None)
+            if (negative && op.starts_with('>')) || (!negative && op.starts_with('<')) =>
+        {
+            "1".into()
+        }
+        _ => "0".into(),
+    };
+    // CAST uses the same numeric conversion as the stored REAL. The original
+    // operand is bound once for each storage class that needs its spelling.
+    Some((format!("((typeof({col}) = 'integer' AND {int_predicate}) OR (typeof({col}) = 'real' AND {col} {op} CAST(? AS REAL)) OR (typeof({col}) = 'text' AND {col} {op} ?))"), 2))
 }
 
 /// One `;`-separated piece of a column filter, after its operator prefix is
@@ -143,27 +202,13 @@ pub(crate) fn push_column_criteria(
     }
 }
 
-/// One range comparison (`>=`, `<=`, `>`, `<`) against a bound text operand.
-///
-/// On a column with no affinity SQLite does not convert the bound text to a
-/// number, and across storage classes a number always sorts below any text.
-/// So `<5` against the INTEGERs 1 to 10 in `CREATE TABLE t(v)`, or in a view
-/// column `a + 1 AS v`, returned all ten rows and `>5` returned none (measured
-/// on SQLite 3.53.1). When the operand reads as a finite number, numeric cells
-/// are compared against it as a number, using the same integer-preserving
-/// conversion as the `=` arm, and text cells
-/// keep the text comparison they always had. Each half is guarded by
-/// `typeof`, because without the guard every text cell satisfies `> 5.0` and
-/// every numeric cell satisfies `< '5'`. A typed column keeps the single
-/// comparison: SQLite converts the operand there itself, and the extra arms
-/// would cost the index.
-fn range_comparison(col: &str, op: &str, operand: &str, no_affinity: bool) -> String {
-    match numeric_literal(no_affinity, operand) {
-        Some(literal) => format!(
-            "((typeof({col}) IN ('integer', 'real') AND {col} {op} {literal}) \
-             OR (typeof({col}) = 'text' AND {col} {op} ?))",
-        ),
-        _ => format!("{col} {op} ?"),
+fn balanced_or(terms: &[String]) -> String {
+    match terms {
+        [term] => term.clone(),
+        _ => {
+            let (left, right) = terms.split_at(terms.len() / 2);
+            format!("({} OR {})", balanced_or(left), balanced_or(right))
+        }
     }
 }
 
@@ -193,7 +238,11 @@ pub(super) fn build_where_clause(
         if terms.is_empty() {
             where_parts.push("0".to_string());
         } else {
-            where_parts.push(format!("({})", terms.join(" OR ")));
+            where_parts.push(if terms.len() == 1 {
+                format!("({})", terms[0])
+            } else {
+                balanced_or(&terms)
+            });
             params.extend(std::iter::repeat_n(
                 contains_pattern(global_filter),
                 terms.len(),
@@ -249,30 +298,26 @@ pub(super) fn build_where_clause(
                         and_parts.push(format!("{} NOT LIKE ? ESCAPE '\\'", col_escaped));
                         and_params.push(contains_pattern(rest));
                     }
-                    Criterion::Ge(rest) => {
-                        and_parts.push(range_comparison(&col_escaped, ">=", rest, no_affinity));
-                        and_params.push(rest.to_string());
-                    }
-                    Criterion::Le(rest) => {
-                        and_parts.push(range_comparison(&col_escaped, "<=", rest, no_affinity));
-                        and_params.push(rest.to_string());
-                    }
-                    Criterion::Gt(rest) => {
-                        and_parts.push(range_comparison(&col_escaped, ">", rest, no_affinity));
-                        and_params.push(rest.to_string());
-                    }
-                    Criterion::Lt(rest) => {
-                        and_parts.push(range_comparison(&col_escaped, "<", rest, no_affinity));
-                        and_params.push(rest.to_string());
-                    }
-                    Criterion::Eq(rest) => {
-                        if let Some(literal) = numeric_literal(no_affinity, rest) {
-                            or_parts
-                                .push(format!("({col_escaped} = ? OR {col_escaped} = {literal})"));
+                    Criterion::Ge(rest)
+                    | Criterion::Le(rest)
+                    | Criterion::Gt(rest)
+                    | Criterion::Lt(rest)
+                    | Criterion::Eq(rest) => {
+                        let (op, parts, params) = match criterion {
+                            Criterion::Ge(_) => (">=", &mut and_parts, &mut and_params),
+                            Criterion::Le(_) => ("<=", &mut and_parts, &mut and_params),
+                            Criterion::Gt(_) => (">", &mut and_parts, &mut and_params),
+                            Criterion::Lt(_) => ("<", &mut and_parts, &mut and_params),
+                            _ => ("=", &mut or_parts, &mut or_params),
+                        };
+                        let (sql, binds) = if no_affinity {
+                            numeric_comparison(&col_escaped, op, rest)
                         } else {
-                            or_parts.push(format!("{col_escaped} = ?"));
+                            None
                         }
-                        or_params.push(rest.to_string());
+                        .unwrap_or_else(|| (format!("{col_escaped} {op} ?"), 1));
+                        parts.push(sql);
+                        params.extend(std::iter::repeat_n(rest.to_string(), binds));
                     }
                     Criterion::Contains(val) => {
                         or_parts.push(format!("{} LIKE ? ESCAPE '\\'", col_escaped));
@@ -569,6 +614,62 @@ mod tests {
              prefixes build_where_clause parses (note: bare \"<>\" is complete on its own \
              and is correctly absent from the frontend list)"
         );
+    }
+
+    #[test]
+    fn wide_global_filter_reaches_the_last_column() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let names: Vec<_> = (0..1000).map(|i| format!("c{i}")).collect();
+        conn.execute_batch(&format!(
+            "CREATE TABLE t({}); INSERT INTO t(c999) VALUES ('needle'), ('other')",
+            names.join(",")
+        ))
+        .unwrap();
+        let columns = typed_cols(
+            &names
+                .iter()
+                .map(|s| (s.as_str(), "TEXT"))
+                .collect::<Vec<_>>(),
+        );
+        let filter = build_where_clause(&columns, &[], "needle").unwrap();
+        for query in ["SELECT count(*) FROM t", "SELECT rowid FROM t"] {
+            let result: i64 = conn
+                .query_row(
+                    &format!("{query}{}", filter.clause),
+                    rusqlite::params_from_iter(&filter.params),
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(result, 1);
+        }
+    }
+
+    #[test]
+    fn exact_decimal_spellings_and_spaces_compare_stored_integers() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t(v); INSERT INTO t VALUES (2),(9),(9007199254740992),(9007199254740993)",
+        )
+        .unwrap();
+        let cols = typed_cols(&[("v", "")]);
+        for (bound, expected) in [
+            ("< 5", vec![1]),
+            ("=9007199254740993.0", vec![4]),
+            ("=9.007199254740993e15", vec![4]),
+            (">9007199254740992.5", vec![4]),
+        ] {
+            let pred = build_where_clause(&cols, &[filter("v", bound)], "").unwrap();
+            let ids = conn
+                .prepare(&format!("SELECT rowid FROM t{}", pred.clause))
+                .unwrap()
+                .query_map(rusqlite::params_from_iter(&pred.params), |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(ids, expected, "{bound}");
+        }
     }
 
     #[test]

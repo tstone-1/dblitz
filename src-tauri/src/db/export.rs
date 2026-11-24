@@ -54,8 +54,8 @@ fn sweep_stale_exports(dir: &Path) {
 /// the column, and writing text such as `00123` as the number 123 loses data,
 /// while writing a number as text only loses formatting. The SQL tab does not
 /// send an empty type for a computed column whose values were all numbers; it
-/// derives `INTEGER` or `REAL` from the values (`db::sql::UntypedColumns`).
-fn is_numeric_affinity(declared: &str) -> bool {
+/// derives `INTEGER` or `REAL` from the values (`db::sql::ResultColumnTypes`).
+pub(super) fn is_numeric_affinity(declared: &str) -> bool {
     let t = declared.to_ascii_uppercase();
     if t.contains("INT") {
         return true;
@@ -67,6 +67,27 @@ fn is_numeric_affinity(declared: &str) -> bool {
         return false;
     }
     true
+}
+
+/// Convert DuckDB logical types into the exporter's numeric/text convention.
+pub(crate) fn is_duckdb_numeric(t: &str) -> bool {
+    (t.starts_with("DECIMAL(") && t.ends_with(')'))
+        || matches!(
+            t,
+            "TINYINT"
+                | "SMALLINT"
+                | "INTEGER"
+                | "BIGINT"
+                | "HUGEINT"
+                | "UTINYINT"
+                | "USMALLINT"
+                | "UINTEGER"
+                | "UBIGINT"
+                | "UHUGEINT"
+                | "BIGNUM"
+                | "FLOAT"
+                | "DOUBLE"
+        )
 }
 
 /// Largest absolute integer that an f64 can represent exactly. Integers beyond
@@ -452,6 +473,23 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn mixed_result_and_duckdb_labels_preserve_text() {
+        let cells = exported_cells("SELECT id FROM users WHERE id=1 UNION ALL SELECT '00123'");
+        assert_eq!(cells, vec![vec![CellValue::Text], vec![CellValue::Text]]);
+        for (t, val) in [
+            ("ENUM('00123','00456')", "00123"),
+            ("BIT", "00101"),
+            ("INTEGER[]", "00123"),
+        ] {
+            assert_eq!(classify_cell(is_duckdb_numeric(t), val), CellValue::Text);
+        }
+        assert_eq!(
+            classify_cell(is_duckdb_numeric("INTEGER"), "123"),
+            CellValue::Number(123.0)
+        );
     }
 
     #[test]

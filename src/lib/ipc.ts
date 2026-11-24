@@ -160,6 +160,7 @@ export interface CountRowsArgs {
 }
 
 export interface ExportXlsxArgs {
+  engine: SqlEngine | null;
   headers: string[];
   rows: string[][];
   columnTypes: string[];

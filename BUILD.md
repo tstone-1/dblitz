@@ -225,6 +225,7 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 
 # 1. Build the "old" app at the current version and keep it aside.
 npx tauri build --bundles app
+mkdir -p "$SCRATCH/installed"
 cp -R src-tauri/target/release/bundle/macos/dblitz.app "$SCRATCH/installed/"
 
 # 2. Bump the version everywhere, rebuild -> this is the update payload.
@@ -251,7 +252,7 @@ eyeballing the window title:
 |---|---|
 | `GET /latest.json` ~10 s after launch | the startup check fired |
 | `GET /dblitz.app.tar.gz` after you click **Install and restart** | the updater requested the archive. Verify successful installation by reading the installed version after restart. |
-| a *second* `GET /latest.json` seconds later | the app relaunched and re-checked as the new version |
+| a *second* `GET /latest.json` seconds later | another update check reached the server |
 | `defaults read "$SCRATCH/installed/dblitz.app/Contents/Info.plist" CFBundleShortVersionString` now reads the NEW version | the in-place bundle swap succeeded |
 | `last_run_version` in the real `app.json` is the new version | the post-update transition was recorded |
 

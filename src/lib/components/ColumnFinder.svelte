@@ -29,11 +29,13 @@
 
   let hiddenSet = $derived(new Set(hiddenColumns));
 
-  let matches = $derived.by(() => {
+  let allMatches = $derived.by(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return columns.slice(0, MAX_RESULTS);
-    return columns.filter((c) => c.toLowerCase().includes(q)).slice(0, MAX_RESULTS);
+    if (!q) return columns;
+    return columns.filter((c) => c.toLowerCase().includes(q));
   });
+
+  let matches = $derived(allMatches.slice(0, MAX_RESULTS));
 
   // Clamp selection if matches shrink.
   //
@@ -109,7 +111,7 @@
     />
     <div class="finder-meta">
       {#if query.trim()}
-        {matches.length} match{matches.length === 1 ? "" : "es"}
+        {allMatches.length} match{allMatches.length === 1 ? "" : "es"}
       {:else}
         {columns.length} columns
       {/if}

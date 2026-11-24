@@ -10,6 +10,7 @@
 
 - Install frontend dependencies with `npm install`; run the desktop app with `npm run tauri dev`.
 - `npm run quality` is the whole gate and is what CI runs: `npm run check`, `npm test`, `npm run build`, then in `src-tauri` `cargo fmt --check`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`. Use the bare clippy invocation with `-D warnings` — a plain `cargo clippy` can pass locally and still fail CI.
+- Run individual Cargo checks from `src-tauri/` as well. Cargo discovers crate-local linker settings from the working directory. A root-level `--manifest-path` invocation can rebuild the native dependencies with a different linker.
 - Use `npx tauri build` for local release builds. macOS DMG packaging may need to run outside a sandbox because Tauri invokes system image mounting tools.
 - Frontend code lives under `src/`; Tauri/Rust backend code under `src-tauri/`.
 - **Stage release commits by explicit pathspec.** `src/lib/releaseWorkflow.test.ts` rejects blanket staging in the release instructions (command lines only — prose naming `git add -A` to warn against it is exempt).

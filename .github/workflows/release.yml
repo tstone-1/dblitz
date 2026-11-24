@@ -800,20 +800,32 @@ jobs:
           git clone "https://x-access-token:${GH_TOKEN}@github.com/${TAP_REPO}.git" tap
           cd tap
 
-          # In-place edit preserves the rest of the cask (desc, app, zap stanza).
-          sed -i \
-            -e "s|^  version \"[^\"]*\"|  version \"${VERSION}\"|" \
-            -e "s|arm:   \"[0-9a-f]\{64\}\"|arm:   \"${ARM_SHA}\"|" \
-            -e "s|intel: \"[0-9a-f]\{64\}\"|intel: \"${INTEL_SHA}\"|" \
-            Casks/dblitz.rb
+          # A retry can run after a newer release has already updated the cask.
+          python3 - "$VERSION" "$ARM_SHA" "$INTEL_SHA" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
 
-          # Fail loudly if the substitutions didn't land (cask format drifted).
-          grep -q "version \"${VERSION}\"" Casks/dblitz.rb
-          grep -q "\"${ARM_SHA}\""         Casks/dblitz.rb
-          grep -q "\"${INTEL_SHA}\""       Casks/dblitz.rb
+          version, arm, intel = sys.argv[1:]
+          path = Path("Casks/dblitz.rb")
+          cask = path.read_text(encoding="utf-8")
+          version_line = r'^  version "(\d+\.\d+\.\d+)"$'
+          current, = re.findall(version_line, cask, re.MULTILINE)
+          if tuple(map(int, current.split("."))) > tuple(map(int, version.split("."))):
+              print(f"Cask {current} supersedes release {version}.")
+              sys.exit(0)
+
+          cask = re.sub(version_line, f'  version "{version}"', cask, flags=re.MULTILINE)
+          for arch, digest in (("arm", arm), ("intel", intel)):
+              cask, count = re.subn(rf'({arch}:\s+)"[0-9a-f]{{64}}"',
+                                    lambda m: f'{m[1]}"{digest}"', cask)
+              if count != 1:
+                  sys.exit(f"Expected one {arch} checksum, found {count}")
+          path.write_bytes(cask.encode("utf-8"))
+          PY
 
           if git diff --quiet; then
-            echo "Cask already at ${VERSION}; nothing to do."
+            echo "No cask changes to publish."
             exit 0
           fi
 

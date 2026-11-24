@@ -1,14 +1,7 @@
 // @vitest-environment jsdom
 //
-// The only test in this repo that needs a DOM: it mounts a real EditorView with
-// the same extension list `SqlEditor.svelte` mounts and presses the key. A
-// source-level assertion ("`Prec.highest` appears in the file") would pass for a
-// `Prec.highest` applied to the wrong keymap, and reading the order of an array
-// proves nothing about which handler CodeMirror runs first.
-//
-// jsdom is a per-file environment (see the pragma above) rather than the global
-// vitest environment: every other test here is pure logic and runs faster and
-// with fewer surprises under `node`.
+// Mount a real EditorView and press the key so the test exercises CodeMirror's
+// command precedence with the same extensions as the running editor.
 
 import { describe, expect, it } from "vitest";
 import { EditorState, Compartment, EditorSelection } from "@codemirror/state";

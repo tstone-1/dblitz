@@ -26,8 +26,12 @@ pub mod bench_api {
     pub use crate::pq::{query_table as parquet_query_table, ParquetSession};
 }
 
+pub(crate) use export::is_duckdb_numeric;
 pub use export::{export_to_xlsx, XlsxExport};
-pub(crate) use filters::{contains_pattern, parse_criteria, push_column_criteria, Criterion};
+pub(crate) use filters::{
+    contains_pattern, discrete_operator, parse_criteria, push_column_criteria, scaled_parts,
+    Criterion,
+};
 
 /// The error text of a query stopped by `cancel_queries` or by a newer request,
 /// on both engines. The frontend recognises a cancel by this exact text

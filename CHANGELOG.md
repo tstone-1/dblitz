@@ -9,6 +9,11 @@ Versioning follows [CalVer](https://calver.org/) using `YY.M.MICRO` format
 
 ### Fixed
 
+- Exact decimal thresholds and large integer spellings select the correct rows. Global search also works across wide SQLite tables.
+- Excel preserves text labels in mixed SQLite query results and DuckDB BIT and ENUM columns. Selection totals use decimal units and flag values beyond the supported precision.
+- Browse supports table and column names such as `constructor`. Pending clipboard copies respect the most recent selection, and the SQL editor recognizes DuckDB list and dollar-quoted literals when selecting a statement.
+- Self-update waits for the installation type to be confirmed. Retrying an older release preserves a newer Homebrew cask.
+
 - Opening files in quick succession keeps the displayed path, schema and query results together, including when the last file fails to open.
 - Sorted pages retain every tied row when an input column shadows the engine's row identifier. SQLite filters preserve exact 64-bit integer comparisons and global search finds text stored in BLOB columns.
 - Browse keeps the applied filters in sync with sorting and undo. Find and Select All handle a failed row count, and scrolling reaches the last row of very large tables.

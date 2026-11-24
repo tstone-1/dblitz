@@ -76,13 +76,13 @@ describe("createPinnedFilters", () => {
       },
     });
     let reloads = 0;
-    const columnFilters: Record<string, ColumnFilterValue> = {
+    let columnFilters: Record<string, ColumnFilterValue> = {
       name: { value: "edited", is_regex: false },
     };
     const pinned = createPinnedFilters({
       getSelectedTable: () => "users",
       getColumnFilters: () => columnFilters,
-      setColumnFilters: () => {},
+      setColumnFilters: next => { columnFilters = next; },
       getGlobalFilter: () => "",
       setGlobalFilter: () => {},
       triggerReload: () => { reloads += 1; },

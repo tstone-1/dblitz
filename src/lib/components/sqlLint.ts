@@ -19,7 +19,7 @@
  */
 
 import { linter, type Action, type Diagnostic } from "@codemirror/lint";
-import { StateEffect, type EditorState } from "@codemirror/state";
+import { Facet, StateEffect, type EditorState } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import type { SqlCheck } from "#lib/ipc.ts";
 import {
@@ -40,6 +40,10 @@ export interface RunnableRange {
   kind: RunnableKind;
 }
 
+export const editorEngine = Facet.define<() => SqlSchema["engine"], () => SqlSchema["engine"]>({
+  combine: getters => getters[0] ?? (() => "sqlite"),
+});
+
 /** The text Execute runs and where it is: the main selection when it is not
  *  empty, else the statement at the cursor when the document holds several
  *  (`statementAtCursor`), else the whole document. */
@@ -49,7 +53,7 @@ export function runnableRange(state: EditorState): RunnableRange {
     return { text: state.sliceDoc(sel.from, sel.to), from: sel.from, to: sel.to, kind: "selection" };
   }
   const doc = state.doc.toString();
-  const stmt = statementAtCursor(doc, sel.head);
+  const stmt = statementAtCursor(doc, sel.head, state.facet(editorEngine)());
   if (stmt) return { text: doc.slice(stmt.from, stmt.to), ...stmt, kind: "statement" };
   return { text: doc, from: 0, to: doc.length, kind: "all" };
 }
@@ -253,7 +257,7 @@ export interface SqlLintOptions {
 }
 
 /** Dispatched by `requestRecheck`; the linter treats it like an edit. */
-const recheck = StateEffect.define<null>();
+export const recheck = StateEffect.define<null>();
 
 /** Re-check the current text, e.g. after another database was opened.
  *  (`forceLinting` would not do: it only hurries a check already scheduled.) */

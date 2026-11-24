@@ -193,8 +193,8 @@
       const info = await getColumns(table);
       const names = info.map((col) => col.name);
       if (generation === appState.dbOpenGeneration) {
-        appState.tableColumns[table] = names;
-        appState.tableColumnTypes[table] = Object.fromEntries(info.map((col) => [col.name, col.col_type]));
+        appState.tableColumns = { ...appState.tableColumns, [table]: names };
+        appState.tableColumnTypes = { ...appState.tableColumnTypes, [table]: Object.fromEntries(info.map((col) => [col.name, col.col_type])) };
       }
       return names;
     },
@@ -293,7 +293,7 @@
   function setColumnColor(col: string, color: string) {
     if (!selectedTable) return;
     updateTableConfig(selectedTable, (cfg) => {
-      if (color) cfg.column_colors[col] = color;
+      if (color) cfg.column_colors = { ...cfg.column_colors, [col]: color };
       else delete cfg.column_colors[col];
     });
   }
@@ -304,7 +304,7 @@
     // write on drag-end (DataGrid emits once per resize), so the save cost
     // (folded into updateTableConfig) is bounded. No need to debounce further.
     updateTableConfig(selectedTable, (cfg) => {
-      cfg.column_widths[col] = width;
+      cfg.column_widths = { ...cfg.column_widths, [col]: width };
     });
   }
 
@@ -335,10 +335,11 @@
   }
 
   async function exportSelection(data: SelectionData) {
-    const types = data.headers.map((h) =>
-      selectedTable ? (appState.tableColumnTypes[selectedTable]?.[h] ?? "") : "",
-    );
+    const schemas = appState.tableColumnTypes;
+    const schema = selectedTable && Object.hasOwn(schemas, selectedTable) ? schemas[selectedTable] : {};
+    const types = data.headers.map(h => Object.hasOwn(schema, h) ? schema[h] : "");
     const written = await exportToXlsx({
+      engine: appState.sqlEngine,
       headers: data.headers,
       rows: data.rows,
       columnTypes: types,
@@ -354,20 +355,20 @@
   }
 
   function handleFilterInput(col: string, value: string) {
-    if (!columnFilters[col]) columnFilters[col] = { value, is_regex: false };
-    else columnFilters[col] = { ...columnFilters[col], value };
-    debouncedReload();
+    const previous = Object.hasOwn(columnFilters, col) ? columnFilters[col] : undefined;
+    setFilter(col, { value, is_regex: previous?.is_regex ?? false });
   }
 
-  function setFilter(col: string, filter: { value: string; is_regex: boolean }) {
-    columnFilters[col] = filter;
+  function setFilter(col: string, filter: ColumnFilterValue) {
+    columnFilters = { ...columnFilters, [col]: filter };
     debouncedReload();
   }
 
   function toggleRegex(col: string) {
-    if (!columnFilters[col]) columnFilters[col] = { value: "", is_regex: true };
-    else columnFilters[col] = { ...columnFilters[col], is_regex: !columnFilters[col].is_regex };
-    if (columnFilters[col]?.value.trim()) debouncedReload();
+    const previous = Object.hasOwn(columnFilters, col) ? columnFilters[col] : undefined;
+    const value = previous?.value ?? "";
+    columnFilters = { ...columnFilters, [col]: { value, is_regex: !previous?.is_regex } };
+    if (value.trim()) debouncedReload();
   }
 
   // Pinned filter state machine — extracted helper. Fully injected: this
@@ -411,7 +412,7 @@
 
   // Build column colors map for visible columns
   let visColColors = $derived.by(() => {
-    const colors: Record<string, string> = {};
+    const colors: Record<string, string> = Object.create(null);
     for (const col of visCols()) {
       const c = getColumnColor(col);
       if (c) colors[col] = c;

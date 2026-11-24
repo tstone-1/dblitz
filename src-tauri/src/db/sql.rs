@@ -161,17 +161,10 @@ pub fn validate_sql(state: &DbState, sql: &str) -> Option<SqlCheck> {
     Some(check)
 }
 
-/// The storage classes seen in each result column that has no declared type.
-///
-/// Such a column is reported as `INTEGER` or `REAL` only when every non-NULL
-/// value in the result was one, and keeps its empty type otherwise, which the
-/// export writes as text. That is what keeps a computed text column holding
-/// `00123` as text: it is the values' storage class that decides, never
-/// whether their text happens to parse as a number. A declared type is never
-/// overridden.
-struct UntypedColumns {
-    /// Indexed like the result's columns; `None` for a declared column.
-    seen: Vec<Option<Seen>>,
+/// SQLite's declaration describes a result column's origin, but compound
+/// queries can return text even when that origin is declared numeric.
+struct ResultColumnTypes {
+    seen: Vec<Seen>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -181,20 +174,16 @@ struct Seen {
     other: bool,
 }
 
-impl UntypedColumns {
-    fn new(declared: &[String]) -> Self {
-        UntypedColumns {
-            seen: declared
-                .iter()
-                .map(|t| t.is_empty().then(Seen::default))
-                .collect(),
+impl ResultColumnTypes {
+    fn new(count: usize) -> Self {
+        Self {
+            seen: vec![Seen::default(); count],
         }
     }
 
     fn observe(&mut self, row: &rusqlite::Row) {
         use rusqlite::types::ValueRef;
-        for (i, slot) in self.seen.iter_mut().enumerate() {
-            let Some(seen) = slot else { continue };
+        for (i, seen) in self.seen.iter_mut().enumerate() {
             match row.get_ref(i) {
                 Ok(ValueRef::Null) => {}
                 Ok(ValueRef::Integer(_)) => seen.integer = true,
@@ -208,10 +197,19 @@ impl UntypedColumns {
         declared
             .iter()
             .zip(&self.seen)
-            .map(|(t, seen)| match seen {
-                Some(s) if !s.other && s.real => "REAL".to_string(),
-                Some(s) if !s.other && s.integer => "INTEGER".to_string(),
-                _ => t.clone(),
+            .map(|(t, seen)| {
+                if seen.other && super::export::is_numeric_affinity(t) {
+                    return "TEXT".into();
+                }
+                if t.is_empty() && !seen.other {
+                    if seen.real {
+                        return "REAL".into();
+                    }
+                    if seen.integer {
+                        return "INTEGER".into();
+                    }
+                }
+                t.clone()
             })
             .collect()
     }
@@ -245,7 +243,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
     // (`COUNT(*)`, `1 + 1`) has none, and the export writes an empty type as
     // text, so `SELECT name, COUNT(*)` exported its counts as text cells that
     // Excel's SUM ignores. For those columns the type is derived from the
-    // values instead - see `UntypedColumns`.
+    // values instead - see `ResultColumnTypes`.
     let declared: Vec<String> = stmt
         .columns()
         .map(|c| {
@@ -255,8 +253,8 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
                 .to_string()
         })
         .collect();
-    let mut untyped = UntypedColumns::new(&declared);
-    let column_types = |untyped: &UntypedColumns| untyped.column_types(&declared);
+    let mut observed = ResultColumnTypes::new(col_count);
+    let column_types = |observed: &ResultColumnTypes| observed.column_types(&declared);
     // Snapshot the generation before running so a mid-iteration cancellation
     // (a newer request bumping it) can be detected without waiting on the
     // interrupt handle alone - see the loop below.
@@ -280,7 +278,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
                             return SqlResult::partial_error(
                                 columns,
                                 rows,
-                                column_types(&untyped),
+                                column_types(&observed),
                                 CANCELLED_QUERY_MESSAGE.to_string(),
                             );
                         }
@@ -292,7 +290,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
                             truncated = true;
                             break;
                         }
-                        untyped.observe(row);
+                        observed.observe(row);
                         rows.push(read_row(row, col_count));
                     }
                     Ok(None) => break,
@@ -300,7 +298,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
                         return SqlResult::partial_error(
                             columns,
                             rows,
-                            column_types(&untyped),
+                            column_types(&observed),
                             e.to_string(),
                         );
                     }
@@ -309,7 +307,7 @@ pub fn execute_sql(state: &DbState, sql: &str) -> SqlResult {
             SqlResult {
                 columns,
                 rows,
-                column_types: column_types(&untyped),
+                column_types: column_types(&observed),
                 error: None,
                 truncated,
             }

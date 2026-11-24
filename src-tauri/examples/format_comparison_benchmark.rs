@@ -197,27 +197,11 @@ fn prepare_fixtures(pq: &Path, db: &Path, rows: i64) -> Result<(), Box<dyn std::
 }
 
 fn publish_new(source: std::path::PathBuf, dest: &Path) -> std::io::Result<()> {
-    use std::io::ErrorKind;
-    match tempfile::TempPath::try_from_path(source)?.persist_noclobber(dest) {
-        Ok(()) => Ok(()),
-        Err(error)
-            if matches!(
-                error.error.kind(),
-                ErrorKind::Unsupported | ErrorKind::PermissionDenied
-            ) =>
-        {
-            let mut src = std::fs::File::open(&error.path)?;
-            let mut dst = std::fs::File::create_new(dest)?;
-            if let Err(copy_error) = std::io::copy(&mut src, &mut dst).and_then(|_| dst.sync_all())
-            {
-                drop(dst);
-                std::fs::remove_file(dest)?;
-                return Err(copy_error);
-            }
-            Ok(())
-        }
-        Err(error) => Err(error.error),
-    }
+    // The source is on the same volume. Persist uses an exclusive rename
+    // or a hard link; either publishes the completed file in one operation.
+    tempfile::TempPath::try_from_path(source)?
+        .persist_noclobber(dest)
+        .map_err(|e| e.error)
 }
 
 fn generate(pq: &Path, db: &Path, rows: i64) -> Result<(), Box<dyn std::error::Error>> {

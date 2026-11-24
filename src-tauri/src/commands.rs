@@ -266,12 +266,24 @@ pub(crate) fn sql_engine(state: State<'_, Arc<DbState>>) -> &'static str {
 
 #[tauri::command(async)]
 pub(crate) fn export_to_xlsx(
+    state: State<'_, Arc<DbState>>,
     app: tauri::AppHandle,
     headers: Vec<String>,
     rows: Vec<Vec<String>>,
     column_types: Option<Vec<String>>,
+    engine: Option<String>,
 ) -> Result<db::XlsxExport, String> {
-    let types = column_types.unwrap_or_default();
+    let mut types = column_types.unwrap_or_default();
+    if engine
+        .as_deref()
+        .map_or_else(|| state.parquet_session().is_some(), |e| e == "duckdb")
+    {
+        for t in &mut types {
+            if !db::is_duckdb_numeric(t) {
+                *t = "TEXT".into();
+            }
+        }
+    }
     let dest_dir = config::resolve_export_dir();
     let export =
         db::export_to_xlsx(&headers, &rows, &types, &dest_dir).err_ctx("exporting to Excel")?;

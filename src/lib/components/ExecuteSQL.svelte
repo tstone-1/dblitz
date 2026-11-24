@@ -150,6 +150,7 @@
       result?.column_types ?? [],
     );
     const written = await exportToXlsx({
+      engine: appState.sqlEngine,
       headers: data.headers,
       rows: data.rows,
       columnTypes,

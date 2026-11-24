@@ -361,7 +361,7 @@ the `json` feature of the `duckdb` crate, because extension autoinstall is off.
   - `export.rs` — XLSX export
   - `types.rs`, `util.rs` — shared DTOs and helpers (`safe_ident`, `read_row`, `render_real`, `StrErr`)
   - `bench_api` (in `db.rs`) — the one seam `src-tauri/examples/*.rs` may use. The two benchmarks call the shipped functions through a real `open_database` connection; they used to be re-implementations that could drift from what ships. Keep it that way when adding an example.
-- **The Excel export types a column by its declared type, and `execute_sql` supplies one for a computed column.** A computed column (`COUNT(*)`, `a + 1`) has no declared type; `sql.rs` reports `INTEGER` or `REAL` for it only when every non-NULL value in the result has that storage class, and `""` otherwise, which the export writes as text. So `COUNT(*)` exports as a number and a computed `'00123'` stays text. A cell over Excel's 32,767 characters is cut, not refused; the command returns the count of cut cells and `exportNotice.ts` tells the user.
+- Excel export preserves SQLite columns with mixed numeric and text storage classes as text, including compound SQL results with a numeric declaration. Computed columns containing only numeric values export as numbers. DuckDB supplies logical types: only numeric types qualify for numeric cells. A cell over Excel's 32,767 characters is cut. The command returns the count and `exportNotice.ts` reports it.
 
 ### All column discovery goes through `PRAGMA table_xinfo`
 
@@ -612,7 +612,7 @@ caught it either", which is the more useful result.
 
 - `.githooks/pre-push` runs the maintainer's private public-safe audit before a push and blocks the push when that audit script is not found. Until 2026-11-10 its fallback for a machine without `pwsh` carried its own copy of the blocked names, split across `printf` calls: that stops a grep and nothing else, and this file is public. The values are still in the history before that date.
 - The fallback now reads the patterns at run time from the `$ForbiddenPatterns` array of the audit script it found, and reads it strictly: a line of any other shape, a regex construct it cannot rewrite for POSIX `grep -E`, or an empty list blocks the push with a message to install PowerShell 7 or set `SKIP_AGENT_MEMORY_AUDIT=1`. A layout change in the private script therefore blocks pushes rather than dropping patterns.
-- It also blocks when `git ls-files` fails or lists nothing. Piped straight into the scan loop, a missing `git` gave the loop no input and the check printed OK having read no file.
+- The hook checks outgoing revisions with `git rev-list` and searches each committed tree with `git grep`. Enumeration and read failures block the push.
 - Never put a blocked value into this repository to test the hook: run it with `pwsh` off `PATH` and `HOME`/`USERPROFILE` pointing at a scratch folder whose `agent-memory/bin/audit-agent-memory.ps1` holds a synthetic pattern.
 
 ## Release
