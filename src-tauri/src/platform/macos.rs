@@ -4,8 +4,8 @@ use tauri::AppHandle;
 use tracing::warn;
 
 /// macOS counterpart to the Windows [`add_to_recent_docs`]: register the opened
-/// database with the OS so it appears in the Dock right-click menu and the app's
-/// "Open Recent" menu, via `NSDocumentController::noteNewRecentDocumentURL:`.
+/// database with the OS so it appears among the Dock icon's recent documents,
+/// via `NSDocumentController::noteNewRecentDocumentURL:`.
 ///
 /// `NSDocumentController` is main-thread-only, so the AppKit call is dispatched
 /// onto the main thread through the Tauri app handle. Best-effort — any failure

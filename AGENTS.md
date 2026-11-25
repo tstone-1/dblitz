@@ -104,3 +104,4 @@ heading disagree, so rename them in the same commit.
 - *macOS signing and notarization* — Developer ID shared with `screenpick` (a two-repo rotation); signing gates fail closed; the DMG is notarized separately.
 - *Windows code signing* — Certum certificate shared with `tpdf` and `screenpick`, applied by `ssign` from the `signing` environment; no MSI. Read BUILD.md first.
 - *Windows on ARM is built natively on `windows-11-arm`* — not cross-compiled; the verify step asserts the PE machine field; the portable exe is `dblitz-arm64.exe`.
+- *The NSIS publisher must not change* — it is `tstone`, from the identifier; an upgrade finds the old install folder through a registry key named after it, and the winget manifest declares it under `AppsAndFeaturesEntries`.

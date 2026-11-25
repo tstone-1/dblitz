@@ -872,7 +872,9 @@ To overwrite a pre-existing non-brew install, use `brew install --cask --force d
         ```
   - [ ] Run exe from build output to verify it works
   - [ ] Open a .sqlite file via double-click (file association test)
-  - [ ] Check that the jump list populates after opening files
+  - [ ] Open a new `.sqlite` fixture outside `%TEMP%` with the installed copy
+        and check its jump list. Windows omits files opened from `%TEMP%`, and
+        a portable copy can have a separate jump list.
 - **macOS:**
   - [ ] Installed version matches: `defaults read /Applications/dblitz.app/Contents/Info.plist CFBundleShortVersionString`
   - [ ] **The published DMG is notarized, not just the app inside it** — CI gates
@@ -886,9 +888,48 @@ To overwrite a pre-existing non-brew install, use `brew install --cask --force d
   - [ ] Mount the downloaded, quarantined DMG. Quit any running copy and launch the
         bundle by its full path with `open -n "/Volumes/<mounted volume>/dblitz.app"`.
         In Activity Monitor, inspect dblitz under **Open Files and Ports** and verify
-        the executable belongs to the mounted bundle. Confirm it opens without a
+        the executable belongs to the mounted bundle. If its path contains
+        `AppTranslocation`, use `mount` to confirm that the translocation's
+        `nullfs` source is `dblitz.app` on that exact DMG. Confirm it opens without a
         "damaged" error.
-  - [ ] After opening a database, it appears in the Dock icon's right-click **Recent** menu and **File → Open Recent** (`NSDocumentController`, added 26.7.1)
+  - [ ] Open a database, then right-click the dblitz Dock icon and confirm that
+        the database appears among the recent documents.
+
+### 6. winget
+
+dblitz is submitted to `microsoft/winget-pkgs` as `tstone-1.dblitz`, from the
+fork `tstone-1/winget-pkgs`. The first submission was 26.11.1, pull request
+489131, opened 2026-11-25; until it is merged, do not push later versions onto it. Each push restarts
+validation and the moderator review: tpdf's first submission was updated for
+27 releases and waited from 2026-10-02 to 2026-11-24. After the merge, each
+release is a new pull request of its own.
+
+A version is three files under `manifests/t/tstone-1/dblitz/<version>/`,
+copied from the previous version with `PackageVersion`, both `InstallerUrl`
+and `InstallerSha256` values (x64 and arm64 `-setup.exe`) and
+`ReleaseNotesUrl` changed. Title the pull request
+`Update: tstone-1.dblitz to <version>`.
+
+- **The folder must match `PackageVersion`.** Validation rejects
+  `.../26.11.2/` holding files that still say `26.11.1`.
+- **The repository retires old manifest schemas.** Before each submission,
+  compare `ManifestVersion` with the newest folder under
+  `schemas/JSON/manifests` in `microsoft/winget-cli`, and update it in all
+  three files, in both the `ManifestVersion` line and the `$schema` comment on
+  line 1.
+- **Run `winget validate --manifest <folder>` before opening the pull request.**
+- **Hash the downloaded release asset**, not a local build:
+  `(Get-FileHash <file> -Algorithm SHA256).Hash`. The installers are signed in
+  CI, so a local build has a different hash.
+- **`AppsAndFeaturesEntries` declares `Publisher: tstone`**, the value the
+  installer writes to the uninstall key. It comes from the bundle identifier
+  `com.tstone.dblitz` because `tauri.conf.json` sets no `publisher`, and it
+  must stay that way: see "The NSIS publisher must not change" in
+  `docs/agent-notes.md`.
+- **Use the REST API for the fork, not git.** The fork is a copy of a very
+  large repository, and git fetches from it have been refused with HTTP 429.
+  Create the branch and write the three files through the `git/trees`,
+  `git/commits` and `git/refs` endpoints.
 
 ## Quick Reference
 
